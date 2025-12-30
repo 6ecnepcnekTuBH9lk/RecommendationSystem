@@ -3,8 +3,12 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv310" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv3101" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv310_ new" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv310aboba" />
     </content>
-    <orderEntry type="inheritedJdk" />
+    <orderEntry type="jdk" jdkName="Python 3.10 (РекомендательнаяСистема)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

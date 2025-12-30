@@ -1,17 +1,16 @@
 import os
 import sys
-
 import chardet
 import numpy as np
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QPushButton, QLineEdit,
-                             QComboBox, QCheckBox, QRadioButton, QSlider,
-                             QProgressBar, QSpinBox, QDoubleSpinBox, QTextEdit,
-                             QListWidget, QTabWidget, QMessageBox, QInputDialog, QFileDialog, QFrame)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon, QPixmap, QPalette, QColor
 import pandas as pd
 from SwitchTheme import ThemeSwitch
+from LightFM import train_recommender
+from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtGui import QIcon, QPixmap, QPalette, QColor
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+                             QLineEdit, QComboBox, QCheckBox, QRadioButton, QSlider, QProgressBar, QSpinBox,
+                             QDoubleSpinBox, QTextEdit, QListWidget, QTabWidget, QMessageBox, QInputDialog,
+                             QFileDialog, QFrame, QFormLayout, QAbstractSpinBox, QGridLayout, QSizePolicy)
 
 
 class MainWindow(QMainWindow):
@@ -25,9 +24,9 @@ class MainWindow(QMainWindow):
 
         # Размер окна
         screen = app.primaryScreen().availableGeometry()
-        x = (screen.width() - 1077) // 2
-        y = (screen.height() - 1077) // 2
-        self.setGeometry(x, y, 1077, 1077)
+        x = (screen.width() - 846) // 2
+        y = (screen.height() - 1000) // 2
+        self.setGeometry(x, y, 846, 1000)
 
         # Центральный виджет и основной layout
         central_widget = QWidget()
@@ -37,13 +36,26 @@ class MainWindow(QMainWindow):
 
         # Создаем вкладки для разных групп виджетов
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabBar::tab { font-size: 15px; }
-        """)
+        self.tabs.setStyleSheet("""QTabWidget::pane { border: 1px solid #DCDCDC; }
+                                   
+                                   QTabBar::tab { 
+                                                  font-family: "Verdana"; 
+                                                  font-weight: 500;
+                                                  font-size: 14px;
+                                                  letter-spacing: 0.1px;
+                                                  color: black;
+                                                  background: #EBEBEB;
+                                                  padding: 7px 10px; 
+                                                  border-radius: 10px; }
+                                                                
+                                   QTabBar::tab:selected { background: #DCDCDC; }""")
         main_layout.addWidget(self.tabs)
 
         # Вкладка с загрузкой входных данных
         self.create_input_data_widgets_tab()
+        # Вкладка с обучением модели
+        self.create_train_model_widgets_tab()
+
         # Вкладка с базовыми виджетами
         self.create_basic_widgets_tab()
         # Вкладка с виджетами ввода
@@ -123,10 +135,10 @@ class MainWindow(QMainWindow):
                         QTabBar::tab:selected { background: #5A5A5A; }
 
                         QPushButton {
-                            background-color: #505050;
-                            border: 1px solid #666;
+                            background-color: #4B4B4B;
+                            border: 1px solid #9B4DFF;
                             padding: 6px 10px;
-                            border-radius: 7px;
+                            border-radius: 10px;
                             color: white;
                         }
                         QPushButton:hover { background-color: #5F5F5F; }
@@ -236,10 +248,10 @@ class MainWindow(QMainWindow):
                                                     }
 
                                                     QPushButton {
-                                                        background-color: #E6E6E6;
-                                                        border: 1px solid #D7D7D7;
+                                                        background-color: #EBEBEB;
+                                                        border: 1px solid #9B4DFF;
                                                         padding: 6px 10px;
-                                                        border-radius: 7px;
+                                                        border-radius: 10px;
                                                         color: black;
                                                     }
                                                     QPushButton:hover { background-color: #D7D7D7; }
@@ -308,13 +320,27 @@ class MainWindow(QMainWindow):
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         tab.setLayout(layout)
 
-        label_btn_layout = QHBoxLayout()
+        row_layout = QHBoxLayout()
 
         # Заголовок
-        label_1 = QLabel("Загрузка данных")
-        label_1.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label_1.setStyleSheet("font-size: 16px; padding: 8px 0px; font-style: italic;")
-        layout.addWidget(label_1)
+        self.label_1 = QLabel("Загрузка данных")
+        self.label_1.setSizePolicy(self.label_1.sizePolicy().Policy.Fixed, self.label_1.sizePolicy().Policy.Fixed)
+        self.label_1.setContentsMargins(0, 0, 0, 0)
+        self.label_1.setStyleSheet("""
+            QLabel {
+                        font-family: "Verdana"; 
+                        font-weight: 500;
+                        font-size: 14px;
+                        letter-spacing: 0.1px;
+                        color: black;
+                        background-color: #FAFAFA;
+                        padding: 7px 65px; 
+                        border-radius: 10px;
+                        border: 1px solid #C8C8C8;
+                        margin: 8px 0px 8px 0px;
+                    }
+        """)
+        layout.addWidget(self.label_1, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Вываливающийся список
         self.combo_box_types = QComboBox()
@@ -323,326 +349,497 @@ class MainWindow(QMainWindow):
                                        "Добавление товаров в избранное из Mindbox",
                                        "Номенклатура из 1С", "Категории сайта из 1С",
                                        ])
-        label_btn_layout.addWidget(self.combo_box_types)
+        self.combo_box_types.setStyleSheet("""
+        QComboBox {
+        font-family: "Verdana"; 
+        font-weight: 500;
+        font-size: 14px;
+        letter-spacing: 0.1px;
+        color: black;
+        background-color: #EBEBEB;
+        padding: 4px 5px; 
+        border-radius: 10px;
+        border: 1px solid #DCDCDC;
+        margin: 0px 2px 2px 0px;
+        }
+                                        
+        QComboBox::drop-down {
+        width: 19px;
+        border: none;
+        background: transparent;
+        }
+
+        QComboBox::down-arrow {
+        image: url("Картинки/Вниз.png");
+        width: 17px;
+        height: 17px;
+        }""")
 
         # Вываливающийся список
         self.combo_box_add_or_not = QComboBox()
         self.combo_box_add_or_not.addItems(["Добавить новый / Обновить существующий",
                                             "Добавить данные к существующему"])
-        label_btn_layout.addWidget(self.combo_box_add_or_not)
+        self.combo_box_add_or_not.setStyleSheet("""
+                QComboBox {
+                font-family: "Verdana"; 
+                font-weight: 500;
+                font-size: 14px;
+                letter-spacing: 0.1px;
+                color: black;
+                background-color: #EBEBEB;
+                padding: 4px 5px; 
+                border-radius: 10px;
+                border: 1px solid #DCDCDC;
+                margin: 2px 2px 8px 0px;
+                }
+
+                QComboBox::drop-down {
+                width: 19px;
+                border: none;
+                background: transparent;
+                }
+
+                QComboBox::down-arrow {
+                image: url("Картинки/Вниз.png");
+                width: 17px;
+                height: 17px;
+                }""")
+
+        # Левая колонка: два выпадающих списка (вертикально)
+        left_col = QVBoxLayout()
+        left_col.addWidget(self.combo_box_types)
+        left_col.addWidget(self.combo_box_add_or_not)
 
         # Кнопки
-        btn_load = QPushButton("Загрузить файл")
-        btn_load.clicked.connect(self.load_csv_file)
-        label_btn_layout.addWidget(btn_load)
+        self.btn_analyse = QPushButton(QIcon("Картинки/ПровестиАнализ.png"), " Провести анализ")
+        self.btn_analyse.setIconSize(QSize(17, 17))
+        self.btn_analyse.clicked.connect(self.run_analysis)
+        self.btn_analyse.setStyleSheet("""
+                                        QPushButton {
+                                        font-family: "Verdana"; 
+                                        font-weight: 500;
+                                        font-size: 14px;
+                                        letter-spacing: 0.1px;
+                                        color: black;
+                                        padding: 5px 0px; 
+                                        border-radius: 10px;
+                                        border: 1px solid #9B4DFF;
+                                        margin: 0px 0px 2px 2px;
+                                        background: qlineargradient(
+                                            x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #FFFFFF,
+                                            stop:1 #EBEBEB
+                                            );
+                                        }
 
-        btn_analyse = QPushButton("Провести анализ")
-        btn_analyse.clicked.connect(self.run_analysis)
-        label_btn_layout.addWidget(btn_analyse)
+                                        QPushButton:hover { background-color: #D7D7D7; }
+                                        QPushButton:pressed { background-color: #C8C8C8; }
+                                        QPushButton:disabled { background-color: #373737; color: #888; }
+                                        }""")
 
-        layout.addLayout(label_btn_layout)
+        self.btn_load = QPushButton(QIcon("Картинки/ЗагрузитьФайл.png"), " Загрузить файл")
+        self.btn_load.setIconSize(QSize(17, 17))
+        self.btn_load.clicked.connect(self.load_csv_file)
+        self.btn_load.setStyleSheet("""
+                        QPushButton {
+                        font-family: "Verdana"; 
+                        font-weight: 500;
+                        font-size: 14px;
+                        letter-spacing: 0.1px;
+                        color: black;
+                        padding: 5px 0px; 
+                        border-radius: 10px;
+                        border: 1px solid #9B4DFF;
+                        margin: 2px 0px 8px 2px;
+                        background: qlineargradient(
+                            x1:0, y1:0, x2:0, y2:1,
+                            stop:0 #FFFFFF,
+                            stop:1 #EBEBEB
+                            );
+                        }
+                                        
+                        QPushButton:hover { background-color: #D7D7D7; }
+                        QPushButton:pressed { background-color: #C8C8C8; }
+                        QPushButton:disabled { background-color: #373737; color: #888; }
+                        }""")
+
+        # Правая колонка: две кнопки (вертикально)
+        right_col = QVBoxLayout()
+        right_col.addWidget(self.btn_analyse)
+        right_col.addWidget(self.btn_load)
+
+        # Собираем строку: слева списки, справа кнопки
+        row_layout.addLayout(left_col, stretch=5)
+        row_layout.addLayout(right_col, stretch=3)
+
+        layout.addLayout(row_layout)
 
         # Статус загрузки файлов
         self.status_files_label = QLabel("")
+        self.status_files_label.setStyleSheet("""
+                    font-family: "Verdana"; 
+                    font-weight: 500;
+                    font-size: 14px;
+                    letter-spacing: 0.1px;
+                    color: black;
+                """)
         layout.addWidget(self.status_files_label)
 
         # Обновляем статус
         self.update_file_status()
 
-        # Горизонтальная линия сразу после статуса
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setProperty("frameRole", "separator")
-        layout.addWidget(line)
-
         # Заголовок
         label_2 = QLabel("Статистика и анализ")
         label_2.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label_2.setStyleSheet("font-size: 16px; padding: 8px 0px; font-style: italic;")
-        layout.addWidget(label_2)
+        label_2.setStyleSheet("""
+                    QLabel {
+                        font-family: "Verdana"; 
+                        font-weight: 500;
+                        font-size: 14px;
+                        letter-spacing: 0.1px;
+                        color: black;
+                        background-color: #FAFAFA;
+                        padding: 7px 65px; 
+                        border-radius: 10px;
+                        border: 1px solid #C8C8C8;
+                        margin: 8px 0px 8px 0px;
+                    }
+                """)
+        layout.addWidget(label_2, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Создаем вкладки для анализа датасетов
         self.static_tabs = QTabWidget()
-        self.static_tabs.setStyleSheet("""
-                    QTabBar::tab { font-size: 14px; }
-                """)
+        self.static_tabs.setStyleSheet("""QTabBar::tab { font-size: 14px; }""")
         layout.addWidget(self.static_tabs)
 
         # Вкладка со всеми заказами
         self.create_static_order_full_tab()
-        # Вкладка с заказами с отбором
-        self.create_static_order_selection_tab()
 
         # Вкладка со всеми просмотрами
         self.create_static_views_full_tab()
-        # Вкладка с просмотрами с отбором
-        self.create_static_views_selection_tab()
 
         # Вкладка со всем избранным
         self.create_static_favorites_full_tab()
-        # Вкладка с избранным с отбором
-        self.create_static_favorites_selection_tab()
 
         # Формируем статистику заказов
         self.analyze_orders_full_dataset()
-        self.analyze_orders_selection_dataset()
 
         # Формируем статистику просмотров
         self.analyze_views_full_dataset()
-        self.analyze_views_selection_dataset()
 
         # Формируем статистику добавлений
         self.analyze_favorites_full_dataset()
-        self.analyze_favorites_selection_dataset()
 
         # Название вкладки
         self.tabs.addTab(tab, "Обработка датасета")
 
+    # -------------------------------------------ВКЛАДКА ОБУЧЕНИЕ МОДЕЛИ------------------------------------------------
+    def create_train_model_widgets_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        tab.setLayout(layout)
+
+        # Заголовок
+        label_1 = QLabel("Параметры для обучения модели")
+        label_1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label_1.setStyleSheet("font-size: 16px; padding: 8px 0px; font-style: italic;")
+        layout.addWidget(label_1)
+
+        # Основной layout для параметров (два столбца)
+        grid_layout = QGridLayout()
+
+        # Параметры BPR-MF
+        self.embedding_dim_input = QSpinBox()
+        self.embedding_dim_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.embedding_dim_input.setRange(0, 10000)
+        self.embedding_dim_input.setValue(64)
+
+        self.epochs_input = QSpinBox()
+        self.epochs_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.epochs_input.setRange(0, 10000)
+        self.epochs_input.setValue(20)
+
+        self.batch_size_input = QSpinBox()
+        self.batch_size_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.batch_size_input.setRange(0, 10000)
+        self.batch_size_input.setValue(4096)
+
+        self.lr_input = QDoubleSpinBox()
+        self.lr_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.lr_input.setRange(0, 1)
+        self.lr_input.setDecimals(3)
+        self.lr_input.setValue(2e-3)
+
+        self.weight_decay_input = QDoubleSpinBox()
+        self.weight_decay_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.weight_decay_input.setRange(0, 1)
+        self.weight_decay_input.setDecimals(6)
+        self.weight_decay_input.setValue(1e-6)
+
+        self.bpr_reg_input = QDoubleSpinBox()
+        self.bpr_reg_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.bpr_reg_input.setRange(0, 1)
+        self.bpr_reg_input.setDecimals(4)
+        self.bpr_reg_input.setValue(1e-4)
+
+        self.seed_input = QSpinBox()
+        self.seed_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.seed_input.setRange(0, 10000)
+        self.seed_input.setValue(42)
+
+        # Параметры EASE^R
+        self.ease_lambda_input = QSpinBox()
+        self.ease_lambda_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.ease_lambda_input.setRange(0, 10000)
+        self.ease_lambda_input.setValue(200)
+
+        self.max_items_for_ease_input = QSpinBox()
+        self.max_items_for_ease_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.max_items_for_ease_input.setRange(0, 100000)
+        self.max_items_for_ease_input.setValue(15000)
+
+        # Остальные параметры
+        self.w_view_item = QDoubleSpinBox()
+        self.w_view_item.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.w_view_item.setRange(0, 10)
+        self.w_view_item.setDecimals(1)
+        self.w_view_item.setValue(1.0)
+
+        self.w_favorite = QDoubleSpinBox()
+        self.w_favorite.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.w_favorite.setRange(0, 10)
+        self.w_favorite.setDecimals(1)
+        self.w_favorite.setValue(3.0)
+
+        self.w_purchase = QDoubleSpinBox()
+        self.w_purchase.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.w_purchase.setRange(0, 10)
+        self.w_purchase.setDecimals(1)
+        self.w_purchase.setValue(5.0)
+
+        self.top_rec = QSpinBox()
+        self.top_rec.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.top_rec.setRange(0, 100)
+        self.top_rec.setValue(10)
+
+        self.min_user_interactions_for_eval = QSpinBox()
+        self.min_user_interactions_for_eval.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.min_user_interactions_for_eval.setRange(0, 100)
+        self.min_user_interactions_for_eval.setValue(2)
+
+        # Заполнение первой колонки
+        grid_layout.addWidget(QLabel("Вес покупки:"), 0, 0)
+        grid_layout.addWidget(self.w_purchase, 0, 1)
+
+        grid_layout.addWidget(QLabel("Вес избранного:"), 1, 0)
+        grid_layout.addWidget(self.w_favorite, 1, 1)
+
+        grid_layout.addWidget(QLabel("Вес просмотра:"), 2, 0)
+        grid_layout.addWidget(self.w_view_item, 2, 1)
+
+        grid_layout.addWidget(QLabel("Количество рекомендаций:"), 3, 0)
+        grid_layout.addWidget(self.top_rec, 3, 1)
+
+        grid_layout.addWidget(QLabel("Количество эпох:"), 4, 0)
+        grid_layout.addWidget(self.epochs_input, 4, 1)
+
+        grid_layout.addWidget(QLabel("Скорость обучения:"), 5, 0)
+        grid_layout.addWidget(self.lr_input, 5, 1)
+
+        grid_layout.addWidget(QLabel("Инициализатор случайных чисел:"), 6, 0)
+        grid_layout.addWidget(self.seed_input, 6, 1)
+
+        # Заполнение второй колонки
+        grid_layout.addWidget(QLabel("Регуляризация BPR:"), 0, 2)
+        grid_layout.addWidget(self.bpr_reg_input, 0, 3)
+
+        grid_layout.addWidget(QLabel("Регуляризация L2:"), 1, 2)
+        grid_layout.addWidget(self.weight_decay_input, 1, 3)
+
+        grid_layout.addWidget(QLabel("Регуляризация EASE^R:"), 2, 2)
+        grid_layout.addWidget(self.ease_lambda_input, 2, 3)
+
+        grid_layout.addWidget(QLabel("Лимит товаров EASE^R:"), 3, 2)
+        grid_layout.addWidget(self.max_items_for_ease_input, 3, 3)
+
+        grid_layout.addWidget(QLabel("Размер обучающего пакета:"), 4, 2)
+        grid_layout.addWidget(self.batch_size_input, 4, 3)
+
+        grid_layout.addWidget(QLabel("Размерность векторов:"), 5, 2)
+        grid_layout.addWidget(self.embedding_dim_input, 5, 3)
+
+        grid_layout.addWidget(QLabel("Минимум действий для оценки:"), 6, 2)
+        grid_layout.addWidget(self.min_user_interactions_for_eval, 6, 3)
+
+        # Горизонтальная линия
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setProperty("frameRole", "separator")
+
+        # Кнопки: добавляем кнопку слева
+        label_btn_layout = QHBoxLayout()
+
+        # Кнопка для остановки обучения (дополнительная кнопка)
+        btn_settings = QPushButton(QIcon("Картинки/СтандартныеНастройки.png"), " Стандартные настройки")
+        btn_settings.setIconSize(QSize(17, 17))
+        btn_settings.clicked.connect(self.standart_settigs)
+        label_btn_layout.addWidget(btn_settings)
+
+        # Кнопка для начала обучения
+        btn_load = QPushButton(QIcon("Картинки/НачатьОбучение.png"), " Начать обучение")
+        btn_load.setIconSize(QSize(17, 17))
+        btn_load.clicked.connect(train_recommender)
+        label_btn_layout.addWidget(btn_load)
+
+        layout.addLayout(grid_layout)
+        layout.addWidget(line)
+        layout.addLayout(label_btn_layout)  # Помещаем обе кнопки внизу
+
+        # Название вкладки
+        self.tabs.addTab(tab, "Обучение модели")
+
     # -------------------------------------------ЗАГРУЗКА ФАЙЛОВ-----------------------------------------------------
     def load_csv_file(self):
+        """Загрузка исходных CSV/1C файлов, обработка и сохранение в папку `ВходныеДанные`.
+
+        ВАЖНО: интерфейс и названия файлов/типов не меняем — только уменьшаем дублирование кода.
+        """
 
         # Статус бар
         self.status_label.setText("Обработка данных...")
 
-        # Получаем выбранный тип данных из выпадающего списка
         selected_type = self.combo_box_types.currentText()
         mode = self.combo_box_add_or_not.currentText()
 
-        # Окно выбора файла
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Выберите CSV файл",
             "",
-            "CSV files (*.csv);;All files (*)"
+            "CSV files (*.csv);;All files (*)",
         )
 
-        if file_path:  # если файл выбран
+        if not file_path:
+            self.status_label.setText(" Не хочешь, как хочешь...")
+            return
 
-            try:
+        try:
+            input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+            os.makedirs(input_dir, exist_ok=True)
 
-                # === РАЗДЕЛЕНИЕ ПО ТИПАМ ===
-                if selected_type == "Заказы клиентов из Mindbox":
+            # --- helpers (локально, чтобы не засорять класс лишними методами) ---
+            def _save(df: pd.DataFrame, save_path: str) -> None:
+                df.to_csv(save_path, index=False, sep="|", encoding="utf-8-sig")
 
-                    # Считываем CSV
-                    df = self.read_csv_auto_encoding(file_path=file_path, sep=';')
-                    df_full, df_selection = self.process_orders_file(df)
-
-                    if df_full is None:
-                        return
-
-                    if df_selection is None:
-                        return
-
-                    # Создаем папку InputData в корне проекта, если не существует
-                    input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-                    os.makedirs(input_dir, exist_ok=True)
-
-                    filename_full = "ЗаказыОригинал.csv"
-                    save_path_full = os.path.join(input_dir, filename_full)
-
-                    filename_selection = "ЗаказыОтбор.csv"
-                    save_path_selection = os.path.join(input_dir, filename_selection)
-
-                    # РЕЖИМ 1: ПЕРЕЗАПИСЬ
-                    if mode == "Добавить новый / Обновить существующий":
-                        df_full.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-                        df_selection.to_csv(save_path_selection, index=False, sep="|", encoding="utf-8-sig")
-
-                    # РЕЖИМ 2: ДОБАВИТЬ К СУЩЕСТВУЮЩЕМУ
-                    elif mode == "Добавить данные к существующему":
-
-                        # ---- FULL ----
-                        if os.path.exists(save_path_full):
-                            try:
-                                df_old_full = pd.read_csv(save_path_full, sep="|", encoding="utf-8-sig")
-                                df_new_full = pd.concat([df_old_full, df_full], ignore_index=True)
-                            except Exception:
-                                df_new_full = df_full
-                        else:
-                            df_new_full = df_full
-
-                        df_new_full.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-
-                        # ---- SELECTION ----
-                        if os.path.exists(save_path_selection):
-                            try:
-                                df_old_sel = pd.read_csv(save_path_selection, sep="|", encoding="utf-8-sig")
-                                df_new_sel = pd.concat([df_old_sel, df_selection], ignore_index=True)
-                            except Exception:
-                                df_new_sel = df_selection
-                        else:
-                            df_new_sel = df_selection
-
-                        df_new_sel.to_csv(save_path_selection, index=False, sep="|", encoding="utf-8-sig")
-
-                elif selected_type == "Просмотры товаров и категорий из Mindbox":
-
-                    df = self.read_csv_auto_encoding(file_path=file_path, sep=';')
-                    df_full, df_selection = self.process_views_file(df)
-
-                    if df_full is None:
-                        return
-
-                    if df_selection is None:
-                        return
-
-                    # Создаем папку InputData в корне проекта, если не существует
-                    input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-                    os.makedirs(input_dir, exist_ok=True)
-
-                    filename_full = "ПросмотрыОригинал.csv"
-                    save_path_full = os.path.join(input_dir, filename_full)
-
-                    filename_selection = "ПросмотрыОтбор.csv"
-                    save_path_selection = os.path.join(input_dir, filename_selection)
-
-                    # РЕЖИМ 1: ПЕРЕЗАПИСЬ
-                    if mode == "Добавить новый / Обновить существующий":
-                        df_full.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-                        df_selection.to_csv(save_path_selection, index=False, sep="|", encoding="utf-8-sig")
-
-                    # РЕЖИМ 2: ДОБАВИТЬ К СУЩЕСТВУЮЩЕМУ
-                    elif mode == "Добавить данные к существующему":
-
-                        # ---- FULL ----
-                        if os.path.exists(save_path_full):
-                            try:
-                                df_old_full = pd.read_csv(save_path_full, sep="|", encoding="utf-8-sig")
-                                df_new_full = pd.concat([df_old_full, df_full], ignore_index=True)
-                            except Exception:
-                                df_new_full = df_full
-                        else:
-                            df_new_full = df_full
-
-                        df_new_full.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-
-                        # ---- SELECTION ----
-                        if os.path.exists(save_path_selection):
-                            try:
-                                df_old_sel = pd.read_csv(save_path_selection, sep="|", encoding="utf-8-sig")
-                                df_new_sel = pd.concat([df_old_sel, df_selection], ignore_index=True)
-                            except Exception:
-                                df_new_sel = df_selection
-                        else:
-                            df_new_sel = df_selection
-
-                        df_new_sel.to_csv(save_path_selection, index=False, sep="|", encoding="utf-8-sig")
-
-                elif selected_type == "Добавление товаров в избранное из Mindbox":
-
-                    df = self.read_csv_auto_encoding(file_path=file_path, sep=';')
-                    df_full, df_selection = self.process_favorites_file(df)
-
-                    if df_full is None:
-                        return
-
-                    if df_selection is None:
-                        return
-
-                    # Создаем папку InputData в корне проекта, если не существует
-                    input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-                    os.makedirs(input_dir, exist_ok=True)
-
-                    filename_full = "ИзбранноеОригинал.csv"
-                    save_path_full = os.path.join(input_dir, filename_full)
-
-                    filename_selection = "ИзбранноеОтбор.csv"
-                    save_path_selection = os.path.join(input_dir, filename_selection)
-
-                    # РЕЖИМ 1: ПЕРЕЗАПИСЬ
-                    if mode == "Добавить новый / Обновить существующий":
-                        df_full.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-                        df_selection.to_csv(save_path_selection, index=False, sep="|", encoding="utf-8-sig")
-
-                    # РЕЖИМ 2: ДОБАВИТЬ К СУЩЕСТВУЮЩЕМУ
-                    elif mode == "Добавить данные к существующему":
-
-                        # ---- FULL ----
-                        if os.path.exists(save_path_full):
-                            try:
-                                df_old_full = pd.read_csv(save_path_full, sep="|", encoding="utf-8-sig")
-                                df_new_full = pd.concat([df_old_full, df_full], ignore_index=True)
-                            except Exception:
-                                df_new_full = df_full
-                        else:
-                            df_new_full = df_full
-
-                        df_new_full.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-
-                        # ---- SELECTION ----
-                        if os.path.exists(save_path_selection):
-                            try:
-                                df_old_sel = pd.read_csv(save_path_selection, sep="|", encoding="utf-8-sig")
-                                df_new_sel = pd.concat([df_old_sel, df_selection], ignore_index=True)
-                            except Exception:
-                                df_new_sel = df_selection
-                        else:
-                            df_new_sel = df_selection
-
-                        df_new_sel.to_csv(save_path_selection, index=False, sep="|", encoding="utf-8-sig")
-
-                elif selected_type == "Номенклатура из 1С":
-
-                    # Считываем CSV
-                    df = self.read_csv_auto_encoding(file_path=file_path, sep='|')
-                    df = self.process_nomenclature_file(df)
-
-                    if df is None:
-                        return
-
-                    # Создаем папку InputData в корне проекта, если не существует
-                    input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-                    os.makedirs(input_dir, exist_ok=True)
-
-                    # Сохраняем файл в папку InputData с оригинальным именем
-                    filename_full = "Номенклатура.csv"
-                    save_path_full = os.path.join(input_dir, filename_full)
-                    df.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-
-                elif selected_type == "Категории сайта из 1С":
-
-                    # Считываем CSV
-                    df = self.read_csv_auto_encoding(file_path=file_path, sep='|')
-                    df = self.process_categories_file(df)
-
-                    if df is None:
-                        return
-
-                    # Создаем папку InputData в корне проекта, если не существует
-                    input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-                    os.makedirs(input_dir, exist_ok=True)
-
-                    # Сохраняем файл в папку InputData с оригинальным именем
-                    filename_full = "КатегорииСайта.csv"
-                    save_path_full = os.path.join(input_dir, filename_full)
-                    df.to_csv(save_path_full, index=False, sep="|", encoding="utf-8-sig")
-
-                else:
-                    self.show_custom_message(title="Ошибка",
-                                             text="Неизвестный тип данных",
-                                             image_path="Картинки/Неудача.png")
-                    self.status_label.setText(" Неизвестный тип данных")
+            def _append_or_overwrite(df: pd.DataFrame, save_path: str) -> None:
+                if mode == "Добавить новый / Обновить существующий":
+                    _save(df, save_path)
                     return
 
-                # Обновляем на форме статус загрузки
-                self.update_file_status()
+                # mode == "Добавить данные к существующему"
+                if os.path.exists(save_path):
+                    try:
+                        df_old = pd.read_csv(save_path, sep="|", encoding="utf-8-sig")
+                        df = pd.concat([df_old, df], ignore_index=True)
+                    except Exception:
+                        # Если файл поврежден/кодировка/структура — просто перезапишем
+                        pass
+                _save(df, save_path)
 
-                self.show_custom_message(title="Выполнено",
-                                         text="Файл успешно загружен и сохранен",
-                                         image_path="Картинки/Успех.png")
+            def _process_pair(
+                reader_sep: str,
+                processor_fn,
+                filename_full: str,
+                filename_selection: str,
+            ) -> None:
+                df_src = self.read_csv_auto_encoding(file_path=file_path, sep=reader_sep)
+                df_full, df_selection = processor_fn(df_src)
 
-                self.status_label.setText(" Обработка завершена")
+                if df_full is None or df_selection is None:
+                    return
 
-            except Exception as e:
-                self.show_custom_message(title="Ошибка",
-                                         text=f"Не удалось загрузить файл:\n{str(e)}",
-                                         image_path="Картинки/Неудача.png")
+                save_path_full = os.path.join(input_dir, filename_full)
+                save_path_selection = os.path.join(input_dir, filename_selection)
 
-                # Статус бар
-                self.status_label.setText(" Ошибка обработки")
+                _append_or_overwrite(df_full, save_path_full)
+                _append_or_overwrite(df_selection, save_path_selection)
 
-        else:
-            self.status_label.setText(" Не хочешь, как хочешь...")
+            def _process_single(reader_sep: str, processor_fn, filename: str) -> None:
+                df_src = self.read_csv_auto_encoding(file_path=file_path, sep=reader_sep)
+                df_res = processor_fn(df_src)
+                if df_res is None:
+                    return
+                save_path_full = os.path.join(input_dir, filename)
+                _save(df_res, save_path_full)
+
+            # --- routing по типу ---
+            if selected_type == "Заказы клиентов из Mindbox":
+                _process_pair(
+                    reader_sep=";",
+                    processor_fn=self.process_orders_file,
+                    filename_full="ЗаказыОригинал.csv",
+                    filename_selection="ЗаказыОтбор.csv",
+                )
+
+            elif selected_type == "Просмотры товаров и категорий из Mindbox":
+                _process_pair(
+                    reader_sep=";",
+                    processor_fn=self.process_views_file,
+                    filename_full="ПросмотрыОригинал.csv",
+                    filename_selection="ПросмотрыОтбор.csv",
+                )
+
+            elif selected_type == "Добавление товаров в избранное из Mindbox":
+                _process_pair(
+                    reader_sep=";",
+                    processor_fn=self.process_favorites_file,
+                    filename_full="ИзбранноеОригинал.csv",
+                    filename_selection="ИзбранноеОтбор.csv",
+                )
+
+            elif selected_type == "Номенклатура из 1С":
+                _process_single(
+                    reader_sep="|",
+                    processor_fn=self.process_nomenclature_file,
+                    filename="Номенклатура.csv",
+                )
+
+            elif selected_type == "Категории сайта из 1С":
+                _process_single(
+                    reader_sep="|",
+                    processor_fn=self.process_categories_file,
+                    filename="КатегорииСайта.csv",
+                )
+
+            else:
+                self.show_custom_message(
+                    title="Ошибка",
+                    text="Неизвестный тип данных",
+                    image_path="Картинки/Неудача.png",
+                )
+                self.status_label.setText(" Неизвестный тип данных")
+                return
+
+            # Обновляем статус + вкладки статистики
+            self.update_file_status()
+
+            # Пересчитываем статистику (как было)
+            self.analyze_orders_full_dataset()
+            self.analyze_orders_selection_dataset()
+            self.analyze_views_full_dataset()
+            self.analyze_views_selection_dataset()
+            self.analyze_favorites_full_dataset()
+            self.analyze_favorites_selection_dataset()
+
+            self.status_label.setText(" Обработка завершена")
+
+        except Exception as e:
+            self.show_custom_message(
+                title="Ошибка",
+                text=f"Не удалось загрузить файл:\n{str(e)}",
+                image_path="Картинки/Неудача.png",
+            )
+            self.status_label.setText(" Ошибка обработки")
 
     # -------------------------------------------АВТОМАТИЧЕСКАЯ КОДИРОВКА-----------------------------------------------
     def read_csv_auto_encoding(self, file_path: str, sep: str):
@@ -1400,7 +1597,7 @@ class MainWindow(QMainWindow):
         self.order_full_stats_label = QLabel("")
         self.main_order_full_layout.addWidget(self.order_full_stats_label)
 
-        self.static_tabs.addTab(tab, "Заказы (все)")
+        self.static_tabs.addTab(tab, "Заказы")
 
     def create_static_order_selection_tab(self):
 
@@ -1423,7 +1620,7 @@ class MainWindow(QMainWindow):
         self.views_full_stats_label = QLabel("")
         self.main_views_full_layout.addWidget(self.views_full_stats_label)
 
-        self.static_tabs.addTab(tab, "Просмотры (все)")
+        self.static_tabs.addTab(tab, "Просмотры")
 
     def create_static_views_selection_tab(self):
 
@@ -1446,7 +1643,7 @@ class MainWindow(QMainWindow):
         self.favorites_full_stats_label = QLabel("")
         self.main_favorites_full_layout.addWidget(self.favorites_full_stats_label)
 
-        self.static_tabs.addTab(tab, "Избранное (все)")
+        self.static_tabs.addTab(tab, "Избранное")
 
     def create_static_favorites_selection_tab(self):
 
@@ -2494,6 +2691,87 @@ class MainWindow(QMainWindow):
                 clear_layout(item.layout())
                 item.layout().deleteLater()
 
+    # -------------------------------------------СТАНДАРТНЫЕ НАСТРОЙКИ--------------------------------------------------
+    def standart_settigs(self):
+        # Параметры BPR-MF
+        self.embedding_dim_input = QSpinBox()
+        self.embedding_dim_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.embedding_dim_input.setRange(0, 10000)
+        self.embedding_dim_input.setValue(64)
+
+        self.epochs_input = QSpinBox()
+        self.epochs_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.epochs_input.setRange(0, 10000)
+        self.epochs_input.setValue(20)
+
+        self.batch_size_input = QSpinBox()
+        self.batch_size_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.batch_size_input.setRange(0, 10000)
+        self.batch_size_input.setValue(4096)
+
+        self.lr_input = QDoubleSpinBox()
+        self.lr_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.lr_input.setRange(0, 1)
+        self.lr_input.setDecimals(3)
+        self.lr_input.setValue(2e-3)
+
+        self.weight_decay_input = QDoubleSpinBox()
+        self.weight_decay_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.weight_decay_input.setRange(0, 1)
+        self.weight_decay_input.setDecimals(6)
+        self.weight_decay_input.setValue(1e-6)
+
+        self.bpr_reg_input = QDoubleSpinBox()
+        self.bpr_reg_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.bpr_reg_input.setRange(0, 1)
+        self.bpr_reg_input.setDecimals(4)
+        self.bpr_reg_input.setValue(1e-4)
+
+        self.seed_input = QSpinBox()
+        self.seed_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.seed_input.setRange(0, 10000)
+        self.seed_input.setValue(42)
+
+        # Параметры EASE^R
+        self.ease_lambda_input = QSpinBox()
+        self.ease_lambda_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.ease_lambda_input.setRange(0, 10000)
+        self.ease_lambda_input.setValue(200)
+
+        self.max_items_for_ease_input = QSpinBox()
+        self.max_items_for_ease_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.max_items_for_ease_input.setRange(0, 100000)
+        self.max_items_for_ease_input.setValue(15000)
+
+        # Остальные параметры
+        self.w_view_item = QDoubleSpinBox()
+        self.w_view_item.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.w_view_item.setRange(0, 10)
+        self.w_view_item.setDecimals(1)
+        self.w_view_item.setValue(1.0)
+
+        self.w_favorite = QDoubleSpinBox()
+        self.w_favorite.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.w_favorite.setRange(0, 10)
+        self.w_favorite.setDecimals(1)
+        self.w_favorite.setValue(3.0)
+
+        self.w_purchase = QDoubleSpinBox()
+        self.w_purchase.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.w_purchase.setRange(0, 10)
+        self.w_purchase.setDecimals(1)
+        self.w_purchase.setValue(5.0)
+
+        self.top_rec = QSpinBox()
+        self.top_rec.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.top_rec.setRange(0, 100)
+        self.top_rec.setValue(10)
+
+        self.min_user_interactions_for_eval = QSpinBox()
+        self.min_user_interactions_for_eval.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.min_user_interactions_for_eval.setRange(0, 100)
+        self.min_user_interactions_for_eval.setValue(2)
+
     # -------------------------------------------ЛИШНЕЕ-----------------------------------------------------------------
     def create_basic_widgets_tab(self):
         """Создаем вкладку с базовыми виджетами"""
@@ -2804,15 +3082,19 @@ if __name__ == "__main__":
 
                                         * {
                                             font-size: 14px;
-                                            font-family: "Roboto";
+                                            font-family: "Verdana";
+                                            letter-spacing: 0.1px;
                                         }
 
-                                        QTabWidget::pane { border: 1px solid #EBEBEB; }
+                                        QTabWidget::pane { 
+                                            border: 1px solid #EBEBEB;
+                                        }
+                                        
                                         QTabBar::tab { 
                                             background: #EBEBEB; 
                                             color: black; 
                                             padding: 6px 10px;
-                                            border-radius: 7px;
+                                            border-radius: 10px;
                                             font-family: "Roboto";
                                         }
                                         QTabBar::tab:selected { background: #DCDCDC; }
@@ -2823,12 +3105,18 @@ if __name__ == "__main__":
                                         }
 
                                         QPushButton {
-                                            background-color: #E6E6E6;
-                                            border: 1px solid #D7D7D7;
+                                            font-weight: 500;
+                                            border: 1px solid #9B4DFF;
                                             padding: 6px 10px;
-                                            border-radius: 7px;
+                                            border-radius: 10px;
                                             color: black;
+                                            background: qlineargradient(
+                                                x1:0, y1:0, x2:0, y2:1,
+                                                stop:0 #FFFFFF,
+                                                stop:1 #EBEBEB
+                                            );
                                         }
+                                        
                                         QPushButton:hover { background-color: #D7D7D7; }
                                         QPushButton:pressed { background-color: #C8C8C8; }
                                         QPushButton:disabled { background-color: #373737; color: #888; }
@@ -2837,7 +3125,7 @@ if __name__ == "__main__":
                                             background-color: #EBEBEB;
                                             color: black;
                                             border: 1px solid #D7D7D7;
-                                            border-radius: 7px;
+                                            border-radius: 10px;
                                             padding: 4px;
                                         }
                                         
