@@ -14,21 +14,13 @@ PADDING = 3
 SUN_ICON_PATH = "Картинки/Солнце.png"
 MOON_ICON_PATH = "Картинки/Луна.png"
 
-BG_ON = QColor("#505050")
+BG_ON = QColor("#5F5F5F")
 BG_OFF = QColor("#EBEBEB")
 KNOB_CIRCLE_OFF = QColor("#FAFAFA")
-KNOB_CIRCLE_ON = QColor("#3C3C3C")
+KNOB_CIRCLE_ON = QColor("#464646")
 
 
 class ThemeSwitch(QWidget):
-    """
-    Custom theme switch widget (sun/moon) with animated knob.
-
-    External interface is kept intact:
-      - Signal: themeChanged(bool)
-      - Methods: toggle()
-      - Property: knob_pos (pyqtProperty)
-    """
 
     themeChanged = pyqtSignal(bool)
 
