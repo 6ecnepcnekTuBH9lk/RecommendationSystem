@@ -908,6 +908,8 @@ def export_recommendations_to_excel(aboba):
             filter_seen=True,
             device_str="cuda",
             include_discount_card=True,
+            out_csv_format1="Модель/InternetMagazin.csv",
+            out_csv_kanzler_ml="Модель/Mindbox.csv",
         )
 
         aboba._recs_excel_cache = None

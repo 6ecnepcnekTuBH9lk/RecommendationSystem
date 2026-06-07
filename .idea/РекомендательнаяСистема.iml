@@ -7,8 +7,9 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv3101" />
       <excludeFolder url="file://$MODULE_DIR$/.venv310_ new" />
       <excludeFolder url="file://$MODULE_DIR$/.venv310aboba" />
+      <excludeFolder url="file://$MODULE_DIR$/venv" />
     </content>
-    <orderEntry type="inheritedJdk" />
+    <orderEntry type="jdk" jdkName="Python 3.12 (RecommendationSystem)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

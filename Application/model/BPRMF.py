@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from openpyxl import Workbook
+import csv
 import re
 from difflib import SequenceMatcher
 
@@ -1246,6 +1247,8 @@ def export_recommendations_excel(
     filter_seen: bool = True,
     batch_users: int = 1024,
     chunksize_seen: int = 500_000,
+    out_csv_format1: Optional[str] = "Модель/Рекомендации_format1.csv",
+    out_csv_kanzler_ml: Optional[str] = "Модель/Kanzler.ML.csv",
     device_str: str = "cuda",
 ) -> str:
 
@@ -1447,6 +1450,8 @@ def export_recommendations_excel(
 
     if k is None:
         k = int(getattr(cfg, "topk", 10))
+    csv_min_k = 10 if (out_csv_format1 or out_csv_kanzler_ml) else 1
+    k = max(int(csv_min_k), int(k))
     k = max(1, min(int(k), num_items))
 
     data_dir = getattr(cfg, "data_dir", ".venv/ВходныеДанные")
@@ -1456,7 +1461,9 @@ def export_recommendations_excel(
     discount_cards: Dict[str, str] = {}
     emails: Dict[str, str] = {}
     phones: Dict[str, str] = {}
-    if include_discount_card or include_email or include_phone:
+    need_csv = bool(out_csv_format1) or bool(out_csv_kanzler_ml)
+
+    if include_discount_card or include_email or include_phone or need_csv:
         discount_cards, emails, phones = _load_user_fields(data_dir)
 
     user_seen: Optional[List[set]] = None
@@ -1491,6 +1498,23 @@ def export_recommendations_excel(
 
     ws.append(header)
 
+    # --- CSV outputs (additional to Excel) ---
+    csv1_f = csvml_f = None
+    csv1_w = csvml_w = None
+
+    if out_csv_format1:
+        os.makedirs(os.path.dirname(out_csv_format1) or ".", exist_ok=True)
+        csv1_f = open(out_csv_format1, "w", newline="", encoding="utf-8-sig")
+        csv1_w = csv.writer(csv1_f, delimiter=";")
+        csv1_w.writerow(["CustomerID", "ProductID"])
+
+    if out_csv_kanzler_ml:
+        os.makedirs(os.path.dirname(out_csv_kanzler_ml) or ".", exist_ok=True)
+        csvml_f = open(out_csv_kanzler_ml, "w", newline="", encoding="utf-8-sig")
+        csvml_w = csv.writer(csvml_f, delimiter=";")
+        csvml_w.writerow(["CustomerMindboxId", "Quantity", "ProductGroupOffline1C", "CustomFieldKoefficient"])
+
+
     for start in range(0, num_users, batch_users):
         end = min(num_users, start + batch_users)
 
@@ -1504,7 +1528,8 @@ def export_recommendations_excel(
                 if s:
                     scores[bi, torch.tensor(list(s), device=device, dtype=torch.long)] = -1e9
 
-        top = torch.topk(scores, k=k, dim=1)
+        cand_k = min(scores.shape[1], max(k * 5, k))
+        top = torch.topk(scores, k=cand_k, dim=1)
         top_idx = top.indices.detach().cpu().numpy()
         top_val = top.values.detach().cpu().numpy()
 
@@ -1561,6 +1586,25 @@ def export_recommendations_excel(
                 out_scores.append(0.0)
                 if include_item_names:
                     out_names.append("")
+            # --- CSV format #1: CustomerID=discount card, ProductID=comma-separated codes ---
+            if csv1_w is not None:
+                customer_id = str(discount_cards.get(mindbox_id, "") or "")
+                product_id = ",".join([str(x) for x in out_codes[:k]])
+                csv1_w.writerow([customer_id, product_id])
+
+            # --- CSV Kanzler ML: one row per recommended item ---
+            if csvml_w is not None:
+                def _fmt_coef_ru(val: float) -> str:
+                    try:
+                        return f"{float(val):.2f}".replace(".", ",")
+                    except Exception:
+                        return ""
+                for code_val, sc_val in zip(out_codes[:k], out_scores[:k]):
+                    code_val = str(code_val or "")
+                    if not code_val:
+                        continue
+                    csvml_w.writerow([mindbox_id, 1, code_val, _fmt_coef_ru(sc_val)])
+
 
             for j in range(k):
                 row.append(out_codes[j])
@@ -1572,6 +1616,13 @@ def export_recommendations_excel(
             ws.append(row)
 
     wb.save(out_xlsx)
+
+    # close CSV files
+    if csv1_f is not None:
+        csv1_f.close()
+    if csvml_f is not None:
+        csvml_f.close()
+
     return out_xlsx
 
 
