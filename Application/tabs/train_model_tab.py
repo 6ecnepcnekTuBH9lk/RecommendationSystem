@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+import time
+
 import pandas as pd
 import shutil
 from Application.model import BPRMF as BPRMF_module
@@ -590,7 +592,19 @@ def _enrich_orders_with_city_and_weather(aboba, orders_df: pd.DataFrame, weather
 # -------------------------------------------ФОРМИРУЕМ ИТОГОВЫЙ ДАТАСЕТ ДЛЯ ОБУЧЕНИЯ------------------------------------
 def _prepare_training_data_dir(aboba) -> str:
 
+    def _ts() -> str:
+        return time.strftime("%d-%m-%Y %H:%M:%S")
+
+    def _n(x: int) -> str:
+        return f"{int(x):,}".replace(",", ".")
+
+    def _dbg(tag: str, df: pd.DataFrame, extra: str = "") -> None:
+        msg = f"[{_ts()}] [FILTER DEBUG] {tag}: { _n(len(df)) } строк"
+        if extra:
+            msg += f" | {extra}"
+
     base_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+
     if not _any_order_filters_set(aboba):
         return "ВходныеДанные"
 
@@ -599,7 +613,6 @@ def _prepare_training_data_dir(aboba) -> str:
 
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
-
     os.makedirs(out_dir, exist_ok=True)
 
     f = _get_current_order_filters(aboba)
@@ -613,43 +626,100 @@ def _prepare_training_data_dir(aboba) -> str:
     d_from = _parse_date(f["date_from"])
     d_to = _parse_date(f["date_to"])
 
-    def _apply_date(df: pd.DataFrame) -> pd.DataFrame:
+    # делаем date_to "включительно на весь день", если в данных есть время
+    if d_to is not None:
+        d_to = d_to.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    if d_from is not None:
+        d_from = d_from.normalize()
+
+    def _apply_date(df: pd.DataFrame, tag: str = "") -> pd.DataFrame:
         if "Дата" not in df.columns:
             return df
+
         df = df.copy()
-        df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce", dayfirst=True)
-        if d_from is not None:
-            df = df[df["Дата"] >= d_from]
-        if d_to is not None:
-            df = df[df["Дата"] <= d_to]
+        src = df["Дата"].astype("string")
+
+        # Маски форматов
+        m_iso = src.str.match(r"^\d{4}-\d{2}-\d{2}")  # 2025-03-04 или 2025-03-04 00:00:00
+        m_dot = src.str.contains(r"\.", regex=True)  # 04.03.2025 или 04.03.2025 00:00:00
+
+        dt = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+        # 1) ISO -> dayfirst=False (иначе месяц/день меняются местами)
+        if m_iso.any():
+            dt.loc[m_iso] = pd.to_datetime(src.loc[m_iso], errors="coerce", dayfirst=False)
+
+        # 2) dd.mm.yyyy -> dayfirst=True
+        if m_dot.any():
+            dt.loc[m_dot] = pd.to_datetime(src.loc[m_dot], errors="coerce", dayfirst=True)
+
+        # 3) Остальное (если осталось) -> пробуем обычный парсинг без dayfirst
+        rest = dt.isna() & src.notna() & (src.str.strip() != "")
+        if rest.any():
+            dt.loc[rest] = pd.to_datetime(src.loc[rest], errors="coerce", dayfirst=False)
+
+        # применяем фильтр периода
+        if d_from is not None or d_to is not None:
+            ok = pd.Series(True, index=df.index)
+
+            if d_from is not None:
+                ok &= (dt >= d_from)
+            if d_to is not None:
+                ok &= (dt <= d_to)
+
+            # если хочешь НЕ терять строки с битой датой — оставляем NaT
+            ok |= dt.isna()
+            df = df[ok]
+
+        # дату оставляем как в исходнике (чтобы не портить формат в ФильтрованныеДанные)
+        df["Дата"] = src.loc[df.index]
         return df
 
     def _apply_kind(df: pd.DataFrame) -> pd.DataFrame:
-        if not f["kinds"] or "ВидНоменклатуры" not in df.columns:
+        kinds = f.get("kinds") or []
+        if not kinds or "ВидНоменклатуры" not in df.columns:
             return df
         df = df.copy()
-        if f["kind_mode"] == "Не в группе":
-            return df[~df["ВидНоменклатуры"].isin(f["kinds"])]
-        return df[df["ВидНоменклатуры"].isin(f["kinds"])]
+        if f.get("kind_mode") == "Не в группе":
+            return df[~df["ВидНоменклатуры"].isin(kinds)]
+        return df[df["ВидНоменклатуры"].isin(kinds)]
 
     def _apply_store(df: pd.DataFrame) -> pd.DataFrame:
-        if not f["stores"] or "Магазин" not in df.columns:
+        stores = f.get("stores") or []
+        if not stores or "Магазин" not in df.columns:
             return df
         df = df.copy()
-        if f["store_mode"] == "Не в группе":
-            return df[~df["Магазин"].isin(f["stores"])]
-        return df[df["Магазин"].isin(f["stores"])]
+        if f.get("store_mode") == "Не в группе":
+            return df[~df["Магазин"].isin(stores)]
+        return df[df["Магазин"].isin(stores)]
 
     # --- Заказы ---
     p_orders = os.path.join(base_dir, "Заказы.csv")
     if os.path.isfile(p_orders):
         df = pd.read_csv(p_orders, sep="|", dtype=str)
-        df = _apply_date(df)
+        _dbg("orders loaded", df)
+
+        df = _apply_date(df, tag="orders")
+        _dbg("orders after _apply_date", df)
+
         df = _apply_kind(df)
+        _dbg("orders after _apply_kind", df)
+
         df = _apply_store(df)
+        _dbg("orders after _apply_store", df)
+
+        # полезные доп. метрики (чтобы сравнивать со статистикой)
+        try:
+            qty_sum = pd.to_numeric(df.get("Количество"), errors="coerce").fillna(0).sum()
+            uniq_orders = df.get("НомерЗаказа", pd.Series(dtype=str)).nunique()
+            _dbg("orders sanity", df, extra=f"sum(Количество)={_n(qty_sum)}; uniq(НомерЗаказа)={_n(uniq_orders)}")
+        except Exception:
+            pass
 
         weather_path = os.path.join(base_dir, "Погода.csv")
+        before_enrich = len(df)
         df = _enrich_orders_with_city_and_weather(aboba, df, weather_path)
+        _dbg("orders after _enrich_orders_with_city_and_weather", df, extra=f"delta={_n(len(df) - before_enrich)}")
 
         df.to_csv(os.path.join(out_dir, "Заказы.csv"), sep="|", index=False)
 
@@ -657,16 +727,36 @@ def _prepare_training_data_dir(aboba) -> str:
     p_views = os.path.join(base_dir, "Просмотры.csv")
     if os.path.isfile(p_views):
         df = pd.read_csv(p_views, sep="|", dtype=str)
-        df = _apply_date(df)
+        _dbg("views loaded", df)
+
+        df = _apply_date(df, tag="views")
+        _dbg("views after _apply_date", df)
+
         df = _apply_kind(df)
+        _dbg("views after _apply_kind", df)
+
         df.to_csv(os.path.join(out_dir, "Просмотры.csv"), sep="|", index=False)
 
     # --- Избранное (дата + вид номенклатуры) ---
     p_favs = os.path.join(base_dir, "Избранное.csv")
     if os.path.isfile(p_favs):
         df = pd.read_csv(p_favs, sep="|", dtype=str)
-        df = _apply_date(df)
+        _dbg("favs loaded", df)
+
+        df = _apply_date(df, tag="favs")
+        _dbg("favs after _apply_date", df)
+
         df = _apply_kind(df)
+        _dbg("favs after _apply_kind", df)
+
+        # полезное для сверки
+        try:
+            uniq_users = df.get("MindboxID", pd.Series(dtype=str)).nunique()
+            uniq_items = df.get("КодНоменклатуры", pd.Series(dtype=str)).nunique()
+            _dbg("favs sanity", df, extra=f"uniq(MindboxID)={_n(uniq_users)}; uniq(КодНоменклатуры)={_n(uniq_items)}")
+        except Exception:
+            pass
+
         df.to_csv(os.path.join(out_dir, "Избранное.csv"), sep="|", index=False)
 
     # --- Справочники (копируем как есть, чтобы тренер не сломался) ---

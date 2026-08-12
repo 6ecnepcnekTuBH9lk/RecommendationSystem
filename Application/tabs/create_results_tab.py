@@ -13,6 +13,10 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
 
 from Application.photo.photo_processing import (_ensure_photo_map, _set_photo_cell)
 
+from Application.settings.settings_and_filter import (
+    get_selected_list_values
+)
+
 from Application.settings.set_status import (set_status_processing, schedule_status_reset, show_custom_message,
                                              set_status_error, set_status_ok)
 
@@ -212,9 +216,9 @@ def create_result_widgets_tab(aboba):
     """)
     left_layout.addWidget(aboba.label_123, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-    aboba.purchases_table = QTableWidget(0, 5)
+    aboba.purchases_table = QTableWidget(0, 6)
     aboba.purchases_table.setHorizontalHeaderLabels([
-        "Фото", "Код номенклатуры", "Название номенклатуры", "Взаимодействие", "Дата"
+        "Фото", "Код", "Название", "Коллекция", "Взаимодействие", "Дата"
     ])
     aboba.purchases_table.verticalHeader().setVisible(False)
     aboba.purchases_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -224,6 +228,7 @@ def create_result_widgets_tab(aboba):
     aboba.purchases_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
     aboba.purchases_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
     aboba.purchases_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+    aboba.purchases_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
     aboba.purchases_table.setGridStyle(Qt.PenStyle.SolidLine)
     aboba.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
 
@@ -245,9 +250,9 @@ def create_result_widgets_tab(aboba):
     """)
     right_layout.addWidget(aboba.label_recs, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-    aboba.recs_table = QTableWidget(0, 4)
+    aboba.recs_table = QTableWidget(0, 7)
     aboba.recs_table.setHorizontalHeaderLabels([
-        "Фото", "Код номенклатуры", "Название номенклатуры", "Коэффициент"
+        "Фото", "Код", "Название", "Коллекция", "Коэффициент", "Конверсия", "Остаток"
     ])
     aboba.recs_table.verticalHeader().setVisible(False)
     aboba.recs_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -256,6 +261,9 @@ def create_result_widgets_tab(aboba):
     aboba.recs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
     aboba.recs_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
     aboba.recs_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+    aboba.recs_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+    aboba.recs_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+    aboba.recs_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
     aboba.recs_table.setGridStyle(Qt.PenStyle.SolidLine)
     aboba.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")
 
@@ -340,8 +348,12 @@ def show_purchase_history_clicked(aboba):
             for r, row in enumerate(df.itertuples(index=False)):
                 code = str(row.КодНоменклатуры)
                 name = str(row.НазваниеНоменклатуры)
+                collection = str(getattr(row, "Коллекция", "") or "").strip()
                 interaction = str(row.Взаимодействие)
                 dt_text = str(row.ДатаВзаимодействия)
+
+                if collection.lower() == "nan":
+                    collection = ""
 
                 it = QTableWidgetItem(code)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -351,13 +363,17 @@ def show_purchase_history_clicked(aboba):
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 aboba.purchases_table.setItem(r, 2, it)
 
-                it = QTableWidgetItem(interaction)
+                it = QTableWidgetItem(collection)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 aboba.purchases_table.setItem(r, 3, it)
 
-                it = QTableWidgetItem(dt_text)
+                it = QTableWidgetItem(interaction)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 aboba.purchases_table.setItem(r, 4, it)
+
+                it = QTableWidgetItem(dt_text)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                aboba.purchases_table.setItem(r, 5, it)
 
                 _set_photo_cell(aboba, aboba.purchases_table, r, code, gen)
 
@@ -375,10 +391,22 @@ def show_purchase_history_clicked(aboba):
             for r, row in enumerate(recs_df.itertuples(index=False)):
                 code = str(row.КодНоменклатуры)
                 name = str(row.НазваниеНоменклатуры)
+                collection = str(getattr(row, "Коллекция", "") or "").strip()
                 coef = str(getattr(row, "Коэффициент", "") or "").strip()
+                conversion = str(getattr(row, "Конверсия", "") or "").strip()
+                stock = str(getattr(row, "Остаток", "") or "").strip()
+
+                if collection.lower() == "nan":
+                    collection = ""
 
                 if coef.lower() == "nan":
                     coef = ""
+
+                if conversion.lower() == "nan":
+                    conversion = ""
+
+                if stock.lower() == "nan":
+                    stock = ""
 
                 it = QTableWidgetItem(code)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -388,9 +416,21 @@ def show_purchase_history_clicked(aboba):
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 aboba.recs_table.setItem(r, 2, it)
 
-                it = QTableWidgetItem(coef)
+                it = QTableWidgetItem(collection)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 aboba.recs_table.setItem(r, 3, it)
+
+                it = QTableWidgetItem(coef)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                aboba.recs_table.setItem(r, 4, it)
+
+                it = QTableWidgetItem(conversion)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                aboba.recs_table.setItem(r, 5, it)
+
+                it = QTableWidgetItem(stock)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                aboba.recs_table.setItem(r, 6, it)
 
                 _set_photo_cell(aboba, aboba.recs_table, r, code, gen)
 
@@ -577,6 +617,14 @@ def _load_client_interactions(aboba, mindbox_id: str):
         "Избранное": os.path.join(data_dir, "Избранное.csv"),
     }
 
+    result_cols = [
+        "КодНоменклатуры",
+        "НазваниеНоменклатуры",
+        "Коллекция",
+        "Взаимодействие",
+        "ДатаВзаимодействия",
+    ]
+
     frames = []
 
     for label, path in paths.items():
@@ -587,12 +635,24 @@ def _load_client_interactions(aboba, mindbox_id: str):
         extra = ["ТипТовара"] if label == "Просмотр" else []
         need = set(base_cols + extra)
 
-        df = pd.read_csv(path, sep="|", encoding="utf-8-sig", dtype=str, usecols=lambda c: c in need)
+        df = pd.read_csv(
+            path,
+            sep="|",
+            encoding="utf-8-sig",
+            dtype=str,
+            usecols=lambda c: c in need
+        )
+
         if df.empty or "MindboxID" not in df.columns or "КодНоменклатуры" not in df.columns:
             continue
 
-        # clean ID
-        df["MindboxID"] = df["MindboxID"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+        df["MindboxID"] = (
+            df["MindboxID"]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
         df = df[df["MindboxID"] == str(mindbox_id).strip()]
         if df.empty:
             continue
@@ -602,41 +662,122 @@ def _load_client_interactions(aboba, mindbox_id: str):
             if df.empty:
                 continue
 
-        out = df[["КодНоменклатуры"] + (["Дата"] if "Дата" in df.columns else [])].copy()
-        out["КодНоменклатуры"] = out["КодНоменклатуры"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        out["Взаимодействие"] = label
-        frames.append(out)
+        cols = ["КодНоменклатуры"]
+        if "Дата" in df.columns:
+            cols.append("Дата")
+
+        part = df[cols].copy()
+
+        part["КодНоменклатуры"] = (
+            part["КодНоменклатуры"]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
+        part["Взаимодействие"] = label
+        frames.append(part)
 
     if not frames:
-        return pd.DataFrame(
-            columns=["КодНоменклатуры", "НазваниеНоменклатуры", "Взаимодействие", "ДатаВзаимодействия"])
+        return pd.DataFrame(columns=result_cols)
 
     out = pd.concat(frames, ignore_index=True)
 
-    # Дата: парсим (оставляем только дату) и сортируем по убыванию
+    # Дата: парсим устойчиво, даже если в файлах смешанные форматы дат
     if "Дата" in out.columns:
-        out["_dt"] = pd.to_datetime(out["Дата"], errors="coerce", dayfirst=True).dt.normalize()
+        raw_dates = (
+            out["Дата"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
+        try:
+            parsed_dates = pd.to_datetime(
+                raw_dates,
+                errors="coerce",
+                dayfirst=True,
+                format="mixed"
+            )
+        except TypeError:
+            parsed_dates = pd.to_datetime(
+                raw_dates,
+                errors="coerce",
+                dayfirst=True
+            )
+
+        for fmt in [
+            "%Y-%m-%d",
+            "%Y-%m-%d %H:%M:%S",
+            "%d.%m.%Y",
+            "%d.%m.%Y %H:%M:%S",
+        ]:
+            mask = parsed_dates.isna() & raw_dates.ne("")
+            if mask.any():
+                parsed_dates.loc[mask] = pd.to_datetime(
+                    raw_dates.loc[mask],
+                    errors="coerce",
+                    format=fmt
+                )
+
+        out["_dt"] = parsed_dates.dt.normalize()
         out = out.sort_values("_dt", ascending=False, na_position="last")
     else:
         out["_dt"] = pd.NaT
 
-    # Подтягиваем название номенклатуры
-    _ensure_item_name_map(aboba)
-    name_map = aboba._name_by_code or {}
-    out["НазваниеНоменклатуры"] = out["КодНоменклатуры"].map(name_map).fillna("")
+    # Название номенклатуры
+    try:
+        _ensure_item_name_map(aboba)
+        name_map = getattr(aboba, "_name_by_code", {}) or {}
+    except Exception:
+        name_map = {}
 
-    # Формат даты для таблицы
+    out["НазваниеНоменклатуры"] = (
+        out["КодНоменклатуры"]
+        .map(name_map)
+        .fillna("")
+    )
+
+    # Коллекция номенклатуры
+    try:
+        _ensure_item_collection_map(aboba)
+        collection_map = getattr(aboba, "_collection_by_code", {}) or {}
+    except Exception:
+        collection_map = {}
+
+    out["Коллекция"] = (
+        out["КодНоменклатуры"]
+        .map(collection_map)
+        .fillna("")
+    )
+
     def _fmt_dt(x):
         if pd.isna(x):
             return ""
-        # если время нулевое — выводим только дату
         if x.hour == 0 and x.minute == 0 and x.second == 0:
             return x.strftime("%d.%m.%Y")
         return x.strftime("%d.%m.%Y %H:%M:%S")
 
     out["ДатаВзаимодействия"] = out["_dt"].map(_fmt_dt)
 
-    return out[["КодНоменклатуры", "НазваниеНоменклатуры", "Взаимодействие", "ДатаВзаимодействия"]]
+    # Удаляем дубли взаимодействий
+    # В истории одна и та же покупка/просмотр/избранное не должны отображаться несколько раз,
+    # если совпадают товар, тип взаимодействия и дата.
+    dedup_cols = [
+        "КодНоменклатуры",
+        "Взаимодействие",
+        "ДатаВзаимодействия",
+    ]
+
+    out = out.drop_duplicates(subset=dedup_cols, keep="first").copy()
+
+    # Гарантируем наличие всех колонок перед return
+    for col in result_cols:
+        if col not in out.columns:
+            out[col] = ""
+
+    return out[result_cols]
 
 
 # -------------------------------------------ПОЛУЧАЕМ НАЗВАНИЕ НОМЕНКЛАТУРЫ ПО КОДУ-------------------------------------
@@ -690,10 +831,116 @@ def _ensure_item_name_map(aboba):
     )
 
 
+def _format_stock_value_ui(v) -> str:
+    if v is None:
+        return "0"
+
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "null", "<na>", "-"):
+        return "0"
+
+    s = s.replace(",", ".").replace(" ", "")
+
+    try:
+        num = pd.to_numeric(s, errors="coerce")
+        if pd.isna(num):
+            return "0"
+        return str(int(round(float(num))))
+    except Exception:
+        return "0"
+
+
+def _ensure_item_stock_map(aboba):
+    if getattr(aboba, "_stock_by_code", None) is not None:
+        return
+
+    aboba._stock_by_code = {}
+
+    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    if not os.path.isfile(nom_path):
+        return
+
+    df = pd.read_csv(nom_path, sep="|", encoding="utf-8-sig", dtype=str)
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+
+    if "КодНоменклатуры" not in df.columns or "Остаток" not in df.columns:
+        return
+
+    df["КодНоменклатуры"] = (
+        df["КодНоменклатуры"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    df["Остаток"] = df["Остаток"].map(_format_stock_value_ui)
+
+    df = df[df["КодНоменклатуры"] != ""]
+    df = df.drop_duplicates("КодНоменклатуры", keep="last")
+
+    aboba._stock_by_code = df.set_index("КодНоменклатуры")["Остаток"].to_dict()
+
+
+def _ensure_item_collection_map(aboba):
+    if getattr(aboba, "_collection_by_code", None) is not None:
+        return
+
+    aboba._collection_by_code = {}
+
+    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    if not os.path.isfile(nom_path):
+        return
+
+    df = pd.read_csv(nom_path, sep="|", encoding="utf-8-sig", dtype=str)
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+
+    if "КодНоменклатуры" not in df.columns or "Коллекция" not in df.columns:
+        return
+
+    df["КодНоменклатуры"] = (
+        df["КодНоменклатуры"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    df["Коллекция"] = (
+        df["Коллекция"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+    )
+
+    df = df[df["КодНоменклатуры"] != ""]
+    df = df.drop_duplicates("КодНоменклатуры", keep="last")
+
+    aboba._collection_by_code = df.set_index("КодНоменклатуры")["Коллекция"].to_dict()
+
+
+def _format_conversion_value_ui(v) -> str:
+    """Форматирует значение конверсии из Excel как процент для таблицы."""
+    if v is None:
+        return ""
+
+    s = str(v).strip().replace("%", "").replace(",", ".")
+    if not s or s.lower() in ("nan", "none", "null", "<na>", "-"):
+        return ""
+
+    try:
+        num = float(s)
+    except Exception:
+        return ""
+
+    text = f"{num:.2f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",") + "%"
+
+
 # -------------------------------------------РЕКОМЕНДАЦИИ ИЗ EXCEL------------------------------------------------------
 def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.DataFrame:
     path = os.path.join(os.getcwd(), "Модель", "Рекомендации.xlsx")
-    empty_cols = ["КодНоменклатуры", "НазваниеНоменклатуры", "Коэффициент"]
+    empty_cols = ["КодНоменклатуры", "НазваниеНоменклатуры", "Коллекция", "Коэффициент", "Конверсия", "Остаток"]
 
     if not os.path.isfile(path):
         return pd.DataFrame(columns=empty_cols)
@@ -720,7 +967,7 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
     if "MindboxID" in df.columns:
         client_rows = df[df["MindboxID"] == mb].copy()
 
-    # 2) fallback по карте
+    # 2) fallback по дисконтной карте
     if client_rows.empty and "ДисконтнаяКарта" in df.columns:
         cards = _get_discount_cards_for_mindbox(mb)
         if cards:
@@ -729,18 +976,13 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
     if client_rows.empty:
         return pd.DataFrame(columns=empty_cols)
 
-    # Обычно строка одна, но для "длинного" формата могут быть несколько
     row = client_rows.iloc[0]
-
-    # ---------- ПАРСИНГ ----------
-    # recs: list of tuples (code, coef, conf)
     recs = []
 
-    # A) "длинный" формат: есть столбец КодНоменклатуры
+    # A) длинный формат
     if "КодНоменклатуры" in client_rows.columns:
         long_df = client_rows.copy()
 
-        # коэффициент
         coef_col = None
         for cand in ["Коэффициент", "Score", "score"]:
             if cand in long_df.columns:
@@ -750,8 +992,40 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
             coef_col = "Коэффициент"
             long_df[coef_col] = ""
 
-        long_df = long_df[["КодНоменклатуры", coef_col]].rename(
-            columns={coef_col: "Коэффициент"}
+        conversion_col = None
+        for cand in ["Конверсия", "Conversion", "conversion"]:
+            if cand in long_df.columns:
+                conversion_col = cand
+                break
+        if conversion_col is None:
+            conversion_col = "Конверсия"
+            long_df[conversion_col] = ""
+
+        stock_col = None
+        for cand in ["Остаток", "ОстатокТовара", "Stock", "stock"]:
+            if cand in long_df.columns:
+                stock_col = cand
+                break
+        if stock_col is None:
+            stock_col = "Остаток"
+            long_df[stock_col] = ""
+
+        collection_col = None
+        for cand in ["Коллекция", "Collection", "collection"]:
+            if cand in long_df.columns:
+                collection_col = cand
+                break
+        if collection_col is None:
+            collection_col = "Коллекция"
+            long_df[collection_col] = ""
+
+        long_df = long_df[["КодНоменклатуры", collection_col, coef_col, conversion_col, stock_col]].rename(
+            columns={
+                collection_col: "Коллекция",
+                coef_col: "Коэффициент",
+                conversion_col: "Конверсия",
+                stock_col: "Остаток",
+            }
         )
 
         long_df = long_df[long_df["КодНоменклатуры"].astype(str).str.len() > 0]
@@ -760,30 +1034,33 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
         recs = list(
             zip(
                 long_df["КодНоменклатуры"].tolist(),
+                long_df["Коллекция"].tolist(),
                 long_df["Коэффициент"].tolist(),
+                long_df["Конверсия"].tolist(),
+                long_df["Остаток"].tolist(),
             )
         )
 
-    # B) "широкий" формат: КодНоменклатуры_1, Коэффициент_1, УверенностьПокупки_1, ...
+    # B) широкий формат: КодНоменклатуры_1, Коллекция_1, Коэффициент_1, Остаток_1, ...
     else:
         import re as _re
 
         code_cols = {}
+        collection_cols = {}
         coef_cols = {}
+        conversion_cols = {}
+        stock_cols = {}
 
         for c in df.columns:
             c_str = str(c).strip()
 
-            # индекс берём по цифрам в конце (поддержка "..._1" и "... 1")
             m = _re.search(r"(\d+)$", c_str.replace(" ", ""))
             if not m:
                 continue
-            idx = int(m.group(1))
 
-            # нормализуем "базу" имени без хвостового индекса
+            idx = int(m.group(1))
             base = _re.sub(r"[_\s-]*\d+$", "", c_str.lower()).replace(" ", "")
 
-            # код товара
             if (
                     "кодноменклатуры" in base
                     or ("код" in base and "номенклат" in base)
@@ -793,11 +1070,18 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
             ):
                 code_cols[idx] = c
 
-            # коэффициент
+            if "коллекция" in base or "collection" in base:
+                collection_cols[idx] = c
+
             if "коэффициент" in base or "коэфф" in base or "score" in base or "вес" in base:
                 coef_cols[idx] = c
 
-        # fallback: если коды не нашли, пробуем "Рекомендация1", ...
+            if "конверсия" in base or "conversion" in base:
+                conversion_cols[idx] = c
+
+            if "остаток" in base or "stock" in base:
+                stock_cols[idx] = c
+
         if not code_cols:
             for c in df.columns:
                 m = _re.search(r"(\d+)$", str(c).replace(" ", ""))
@@ -815,16 +1099,32 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
             if not code:
                 continue
 
+            collection = str(row.get(collection_cols[i], "")).strip() if i in collection_cols else ""
             coef = str(row.get(coef_cols[i], "")).strip() if i in coef_cols else ""
+            conversion = str(row.get(conversion_cols[i], "")).strip() if i in conversion_cols else ""
+            stock = str(row.get(stock_cols[i], "")).strip() if i in stock_cols else ""
+
+            if collection.lower() == "nan":
+                collection = ""
+
             if coef.lower() == "nan":
                 coef = ""
 
-            recs.append((code, coef))
+            if conversion.lower() == "nan":
+                conversion = ""
+
+            if stock.lower() == "nan":
+                stock = ""
+
+            recs.append((code, collection, coef, conversion, stock))
 
     if not recs:
         return pd.DataFrame(columns=empty_cols)
 
-    out = pd.DataFrame(recs, columns=["КодНоменклатуры", "Коэффициент"])
+    out = pd.DataFrame(
+        recs,
+        columns=["КодНоменклатуры", "Коллекция", "Коэффициент", "Конверсия", "Остаток"]
+    )
 
     out["КодНоменклатуры"] = (
         out["КодНоменклатуры"]
@@ -833,13 +1133,45 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
         .str.replace(r"\.0$", "", regex=True)
     )
 
+    out["Коллекция"] = (
+        out["Коллекция"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+    )
+
+    out["Конверсия"] = out["Конверсия"].map(_format_conversion_value_ui)
+    out["Остаток"] = out["Остаток"].map(_format_stock_value_ui)
+
     # подтягиваем названия
     _ensure_item_name_map(aboba)
     name_map = aboba._name_by_code or {}
     out["НазваниеНоменклатуры"] = out["КодНоменклатуры"].map(name_map).fillna("")
 
-    # порядок столбцов
-    return out[["КодНоменклатуры", "НазваниеНоменклатуры", "Коэффициент"]]
+    # fallback по коллекциям из Номенклатура.csv, если в Excel коллекция пустая
+    _ensure_item_collection_map(aboba)
+    collection_map = getattr(aboba, "_collection_by_code", {}) or {}
+
+    mask_empty_collection = out["Коллекция"].astype(str).str.strip().isin(["", "nan", "None", "<NA>"])
+    out.loc[mask_empty_collection, "Коллекция"] = (
+        out.loc[mask_empty_collection, "КодНоменклатуры"]
+        .map(collection_map)
+        .fillna("")
+    )
+
+    # fallback по остаткам из Номенклатура.csv, если в Excel остаток пустой
+    _ensure_item_stock_map(aboba)
+    stock_map = getattr(aboba, "_stock_by_code", {}) or {}
+
+    mask_empty_stock = out["Остаток"].astype(str).str.strip().isin(["", "nan", "None", "<NA>"])
+    out.loc[mask_empty_stock, "Остаток"] = (
+        out.loc[mask_empty_stock, "КодНоменклатуры"]
+        .map(stock_map)
+        .fillna("0")
+        .map(_format_stock_value_ui)
+    )
+
+    return out[["КодНоменклатуры", "НазваниеНоменклатуры", "Коллекция", "Коэффициент", "Конверсия", "Остаток"]]
 
 
 # -------------------------------------------КЭШИРУЕМ EXCEL С РЕКОМЕНДАЦИЯМИ--------------------------------------------
@@ -892,7 +1224,41 @@ def _get_discount_cards_for_mindbox(mindbox_id: str) -> list[str]:
 # -------------------------------------------ВЫГРУЗИТЬ РЕКОМЕНДАЦИИ В EXCEL-----------------------------------------
 def export_recommendations_to_excel(aboba):
 
-    set_status_processing(aboba, "Идёт формирование рекомендаций...")
+    # Количество клиентов берём с вкладки «Обработка датасета»
+    max_export_users_widget = getattr(
+        aboba,
+        "max_export_users_input",
+        None
+    )
+
+    if max_export_users_widget is not None:
+        max_export_users = int(max_export_users_widget.value())
+    else:
+        max_export_users = 1000
+
+    # Виды номенклатуры, которые разрешены в итоговой выгрузке
+    export_kind_widget = getattr(
+        aboba,
+        "export_kind_filter",
+        None
+    )
+
+    if export_kind_widget is not None:
+        export_item_kinds = get_selected_list_values(
+            export_kind_widget
+        )
+    else:
+        export_item_kinds = []
+
+    if max_export_users == 0:
+        status_text = "Идёт формирование рекомендаций для всех клиентов..."
+    else:
+        status_text = (
+            f"Идёт формирование рекомендаций для "
+            f"{max_export_users:,} клиентов..."
+        ).replace(",", " ")
+
+    set_status_processing(aboba, status_text)
 
     # чтобы статус и иконка успели отрисоваться до тяжёлой операции
     aboba.status_label.repaint()
@@ -910,6 +1276,8 @@ def export_recommendations_to_excel(aboba):
             include_discount_card=True,
             out_csv_format1="Модель/InternetMagazin.csv",
             out_csv_kanzler_ml="Модель/Mindbox.csv",
+            max_export_users=max_export_users,
+            export_item_kinds=export_item_kinds,
         )
 
         aboba._recs_excel_cache = None

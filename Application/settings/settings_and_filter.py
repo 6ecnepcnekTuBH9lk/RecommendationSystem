@@ -30,6 +30,21 @@ def save_order_filter_settings(aboba):
             "kinds_selected": get_selected_list_values(aboba.filter_kind)
             if hasattr(aboba, "filter_kind") else [],
 
+            # Количество наиболее лояльных клиентов в выгрузке.
+            # 0 означает выгрузку всех клиентов.
+            "max_export_users": (
+                int(aboba.max_export_users_input.value())
+                if hasattr(aboba, "max_export_users_input")
+                else 1000
+            ),
+
+            # Виды номенклатуры, разрешённые в итоговых рекомендациях
+            "export_kinds_selected": (
+                get_selected_list_values(aboba.export_kind_filter)
+                if hasattr(aboba, "export_kind_filter")
+                else []
+            ),
+
             # 2) сохраняем карту склад -> город
             "store_city_map": store_city_map,
         }
@@ -131,6 +146,24 @@ def update_filter_summary(aboba):
     stores = get_selected_list_values(aboba.filter_store) if hasattr(aboba, "filter_store") else []
     if stores:
         parts.append(f"Магазин ({store_mode}) --> {_fmt_many(stores)}")
+
+    # Актуальные сезоны (коллекции)
+    seasons = get_selected_list_values(aboba.filter_season) if hasattr(aboba, "filter_season") else []
+    if seasons:
+        parts.append(f"Актуальные сезоны --> {_fmt_many(seasons)}")
+
+    # Виды номенклатуры для итоговой выгрузки
+    export_kinds = (
+        get_selected_list_values(aboba.export_kind_filter)
+        if hasattr(aboba, "export_kind_filter")
+        else []
+    )
+
+    if export_kinds:
+        parts.append(
+            "Виды в рекомендациях (только выгрузка) --> "
+            f"{_fmt_many(export_kinds)}"
+        )
 
     text_out = "Отбор: " + ("; ".join(parts) if parts else "не установлен")
 

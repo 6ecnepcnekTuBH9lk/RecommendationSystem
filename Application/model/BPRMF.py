@@ -743,7 +743,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
             want_cols = [
                 "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
                 "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
-                "Марка", "ГруппаСоставов", "ВидАссортимента"
+                "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
             ]
             cols = [c for c in want_cols if c in nom.columns]
             if "КодНоменклатуры" in cols:
@@ -872,9 +872,6 @@ def _similarity_score(old_meta: Dict[str, str], new_meta: Dict[str, str]) -> flo
 
 
 def _load_item_names(data_dir: str) -> Dict[str, str]:
-    """
-    Optional: item_code -> name mapping from Номенклатура.csv (if present).
-    """
     nom_path = os.path.join(data_dir, "Номенклатура.csv")
     if not os.path.isfile(nom_path):
         return {}
@@ -885,14 +882,107 @@ def _load_item_names(data_dir: str) -> Dict[str, str]:
 
     if "КодНоменклатуры" not in nom.columns:
         return {}
-    name_col = "НазваниеНаСайте" if "НазваниеНаСайте" in nom.columns else None
-    if name_col is None:
+
+    have_site = "НазваниеНаСайте" in nom.columns
+    have_nom = "Номенклатура" in nom.columns
+    if not (have_site or have_nom):
         return {}
 
-    sub = nom[["КодНоменклатуры", name_col]].dropna()
+    cols = ["КодНоменклатуры"]
+    if have_site: cols.append("НазваниеНаСайте")
+    if have_nom: cols.append("Номенклатура")
+
+    sub = nom[cols].copy()
     sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
-    sub[name_col] = sub[name_col].astype(str)
-    return dict(zip(sub["КодНоменклатуры"].tolist(), sub[name_col].tolist()))
+
+    def _clean(v) -> str:
+        if v is None:
+            return ""
+        s = str(v).strip()
+        if not s or s.lower() in ("nan", "none", "null", "<na>", "-"):
+            return ""
+        return s
+
+    # выбираем имя построчно: НазваниеНаСайте -> Номенклатура
+    if have_site:
+        sub["__site"] = sub["НазваниеНаСайте"].map(_clean)
+    else:
+        sub["__site"] = ""
+
+    if have_nom:
+        sub["__nom"] = sub["Номенклатура"].map(_clean)
+    else:
+        sub["__nom"] = ""
+
+    sub["__name"] = sub["__site"]
+    sub.loc[sub["__name"] == "", "__name"] = sub.loc[sub["__name"] == "", "__nom"]
+
+    sub = sub[sub["__name"] != ""]
+    sub = sub.drop_duplicates("КодНоменклатуры", keep="last")
+
+    return dict(zip(sub["КодНоменклатуры"].tolist(), sub["__name"].tolist()))
+
+
+def _format_stock_value(v) -> str:
+    """
+    Приводит Остаток к целому строковому виду:
+      10.0 -> "10"
+      10,0 -> "10"
+      пусто/NaN -> "0"
+    """
+    if v is None:
+        return "0"
+
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "null", "<na>", "-"):
+        return "0"
+
+    s = s.replace(",", ".").replace(" ", "")
+
+    try:
+        num = pd.to_numeric(s, errors="coerce")
+        if pd.isna(num):
+            return "0"
+        return str(int(round(float(num))))
+    except Exception:
+        return "0"
+
+
+def _load_item_stocks(data_dir: str) -> Dict[str, str]:
+    """
+    Загружает остатки из ВходныеДанные/Номенклатура.csv:
+      КодНоменклатуры -> Остаток
+    """
+    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    if not os.path.isfile(nom_path):
+        return {}
+
+    try:
+        nom = _read_csv_pipe(nom_path)
+    except Exception:
+        return {}
+
+    nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
+
+    if "КодНоменклатуры" not in nom.columns or "Остаток" not in nom.columns:
+        return {}
+
+    sub = nom[["КодНоменклатуры", "Остаток"]].copy()
+
+    sub["КодНоменклатуры"] = (
+        sub["КодНоменклатуры"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    sub["Остаток"] = sub["Остаток"].map(_format_stock_value)
+
+    sub = sub[sub["КодНоменклатуры"] != ""]
+    sub = sub.drop_duplicates("КодНоменклатуры", keep="last")
+
+    return dict(zip(sub["КодНоменклатуры"].tolist(), sub["Остаток"].tolist()))
 
 
 def _user_seen_items_from_processed(data_dir: str, mindbox_id: str, item2idx: Dict[str, int],
@@ -1233,6 +1323,243 @@ def _build_user_seen_sets(
     return seen
 
 
+def _load_historical_item_conversion(
+    data_dir: str,
+    item_kind_by_code: Dict[str, str],
+    window_days: int = 30,
+    prior_strength: float = 20.0,
+    chunksize: int = 500_000,
+) -> Tuple[Dict[str, float], float]:
+    """
+    Рассчитывает историческую конверсию товара из просмотра в покупку.
+
+    Конверсия считается по уникальным парам пользователь-товар:
+      - пользователь просмотрел карточку номенклатуры;
+      - затем купил этот же товар не позднее window_days дней.
+
+    Для устойчивости применяется байесовское сглаживание относительно
+    средней конверсии вида номенклатуры. Для новых товаров без просмотров
+    используется средняя конверсия их вида, а при её отсутствии — общая.
+
+    Возвращает:
+      КодНоменклатуры -> конверсия в процентах;
+      общая конверсия в процентах.
+    """
+    views_path = _path_csv(data_dir, "Просмотры")
+    orders_path = _path_csv(data_dir, "Заказы")
+    nom_path = _path_csv(data_dir, "Номенклатура")
+
+    if not os.path.isfile(views_path) or not os.path.isfile(orders_path):
+        print(f"[{_now()}] Историческая конверсия не рассчитана: отсутствуют Просмотры.csv или Заказы.csv.")
+        return {}, 0.0
+
+    def _mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    cache_key = (
+        os.path.abspath(views_path), _mtime(views_path),
+        os.path.abspath(orders_path), _mtime(orders_path),
+        os.path.abspath(nom_path), _mtime(nom_path),
+        int(window_days), float(prior_strength),
+    )
+
+    cache = getattr(_load_historical_item_conversion, "_cache", None)
+    if isinstance(cache, dict) and cache.get("key") == cache_key:
+        return cache.get("values", {}), float(cache.get("global", 0.0))
+
+    def _clean_id(s: pd.Series) -> pd.Series:
+        return (
+            s.astype("string")
+            .fillna("")
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
+    def _parse_dates(s: pd.Series) -> pd.Series:
+        raw = s.astype("string").fillna("").str.strip()
+        try:
+            return pd.to_datetime(raw, errors="coerce", dayfirst=True, format="mixed")
+        except TypeError:
+            return pd.to_datetime(raw, errors="coerce", dayfirst=True)
+
+    print(f"\n[{_now()}] Расчёт исторической конверсии товаров:")
+    print(f"- Окно после просмотра: {int(window_days)} дней")
+    print(f"- Сглаживание: {float(prior_strength):g} условных наблюдений")
+
+    # 1. Первая дата просмотра для каждой уникальной пары пользователь-товар.
+    view_parts: List[pd.DataFrame] = []
+    view_columns = {"MindboxID", "КодНоменклатуры", "Дата", "ТипТовара"}
+
+    for chunk in pd.read_csv(
+        views_path,
+        sep="|",
+        dtype=str,
+        encoding="utf-8-sig",
+        usecols=lambda c: c in view_columns,
+        chunksize=chunksize,
+    ):
+        if chunk.empty or not {"MindboxID", "КодНоменклатуры", "Дата"}.issubset(chunk.columns):
+            continue
+
+        if "ТипТовара" in chunk.columns:
+            chunk = chunk[
+                chunk["ТипТовара"].astype("string").fillna("").str.strip().eq("Номенклатура")
+            ]
+            if chunk.empty:
+                continue
+
+        part = pd.DataFrame({
+            "MindboxID": _clean_id(chunk["MindboxID"]),
+            "КодНоменклатуры": _clean_id(chunk["КодНоменклатуры"]),
+            "ДатаПросмотра": _parse_dates(chunk["Дата"]),
+        })
+
+        part = part[
+            part["MindboxID"].ne("")
+            & part["КодНоменклатуры"].ne("")
+            & part["ДатаПросмотра"].notna()
+        ]
+        if part.empty:
+            continue
+
+        part = (
+            part.groupby(["MindboxID", "КодНоменклатуры"], as_index=False, sort=False)["ДатаПросмотра"]
+            .min()
+        )
+        view_parts.append(part)
+
+    if not view_parts:
+        print(f"[{_now()}] Историческая конверсия не рассчитана: нет корректных просмотров номенклатуры.")
+        return {}, 0.0
+
+    first_views = pd.concat(view_parts, ignore_index=True)
+    del view_parts
+
+    first_views = (
+        first_views.groupby(["MindboxID", "КодНоменклатуры"], as_index=False, sort=False)["ДатаПросмотра"]
+        .min()
+    )
+
+    viewer_counts = first_views.groupby("КодНоменклатуры", sort=False).size().astype(np.int64)
+    first_view_series = first_views.set_index(["MindboxID", "КодНоменклатуры"])["ДатаПросмотра"]
+
+    # 2. Ищем покупку после просмотра в пределах заданного окна.
+    converted_parts: List[pd.DataFrame] = []
+    order_columns = {"MindboxID", "КодНоменклатуры", "Дата"}
+    max_delta = pd.Timedelta(days=int(window_days))
+
+    for chunk in pd.read_csv(
+        orders_path,
+        sep="|",
+        dtype=str,
+        encoding="utf-8-sig",
+        usecols=lambda c: c in order_columns,
+        chunksize=chunksize,
+    ):
+        if chunk.empty or not order_columns.issubset(chunk.columns):
+            continue
+
+        part = pd.DataFrame({
+            "MindboxID": _clean_id(chunk["MindboxID"]),
+            "КодНоменклатуры": _clean_id(chunk["КодНоменклатуры"]),
+            "ДатаПокупки": _parse_dates(chunk["Дата"]),
+        })
+
+        part = part[
+            part["MindboxID"].ne("")
+            & part["КодНоменклатуры"].ne("")
+            & part["ДатаПокупки"].notna()
+        ]
+        if part.empty:
+            continue
+
+        keys = pd.MultiIndex.from_frame(part[["MindboxID", "КодНоменклатуры"]])
+        part["ДатаПросмотра"] = first_view_series.reindex(keys).to_numpy()
+
+        valid = (
+            part["ДатаПросмотра"].notna()
+            & part["ДатаПокупки"].ge(part["ДатаПросмотра"])
+            & part["ДатаПокупки"].le(part["ДатаПросмотра"] + max_delta)
+        )
+
+        if valid.any():
+            converted_parts.append(
+                part.loc[valid, ["MindboxID", "КодНоменклатуры"]].drop_duplicates()
+            )
+
+    if converted_parts:
+        converted_pairs = pd.concat(converted_parts, ignore_index=True).drop_duplicates()
+        buyer_counts = converted_pairs.groupby("КодНоменклатуры", sort=False).size().astype(np.int64)
+        converted_pair_count = int(len(converted_pairs))
+    else:
+        buyer_counts = pd.Series(dtype=np.int64)
+        converted_pair_count = 0
+
+    # 3. Байесовское сглаживание по виду номенклатуры.
+    stats_index = viewer_counts.index.union(buyer_counts.index)
+    stats = pd.DataFrame(index=stats_index)
+    stats["Просмотры"] = viewer_counts.reindex(stats_index).fillna(0).astype(float)
+    stats["Покупатели"] = buyer_counts.reindex(stats_index).fillna(0).astype(float)
+    stats["ВидНоменклатуры"] = [
+        _norm_text(item_kind_by_code.get(str(code), ""))
+        for code in stats.index
+    ]
+
+    total_viewers = float(stats["Просмотры"].sum())
+    total_buyers = float(stats["Покупатели"].sum())
+    global_rate = total_buyers / total_viewers if total_viewers > 0 else 0.0
+
+    kind_stats = (
+        stats[stats["ВидНоменклатуры"].ne("")]
+        .groupby("ВидНоменклатуры", sort=False)[["Просмотры", "Покупатели"]]
+        .sum()
+    )
+    kind_rates = {
+        str(kind): (float(row["Покупатели"]) / float(row["Просмотры"]))
+        for kind, row in kind_stats.iterrows()
+        if float(row["Просмотры"]) > 0
+    }
+
+    stats["PriorRate"] = [
+        kind_rates.get(str(kind), global_rate)
+        for kind in stats["ВидНоменклатуры"]
+    ]
+    stats["Conversion"] = (
+        stats["Покупатели"] + float(prior_strength) * stats["PriorRate"]
+    ) / (
+        stats["Просмотры"] + float(prior_strength)
+    )
+
+    conversion_by_code: Dict[str, float] = {
+        str(code): round(float(rate) * 100.0, 4)
+        for code, rate in stats["Conversion"].items()
+    }
+
+    # Новая номенклатура без собственной истории получает среднее по своему виду.
+    for code, kind in item_kind_by_code.items():
+        code_s = str(code).strip()
+        if not code_s or code_s in conversion_by_code:
+            continue
+        kind_n = _norm_text(kind)
+        conversion_by_code[code_s] = round(kind_rates.get(kind_n, global_rate) * 100.0, 4)
+
+    global_pct = round(global_rate * 100.0, 4)
+
+    print(f"- Уникальных пар пользователь-товар с просмотром: {len(first_views):,}".replace(",", " "))
+    print(f"- Покупок после просмотра в окне: {converted_pair_count:,}".replace(",", " "))
+    print(f"- Общая историческая конверсия: {global_pct:.2f}%\n")
+
+    _load_historical_item_conversion._cache = {
+        "key": cache_key,
+        "values": conversion_by_code,
+        "global": global_pct,
+    }
+    return conversion_by_code, global_pct
+
+
 # -------------------------------------------ВЫГРУЗКА В ЭКСЕЛЬ----------------------------------------------------------
 @torch.no_grad()
 def export_recommendations_excel(
@@ -1249,6 +1576,8 @@ def export_recommendations_excel(
     chunksize_seen: int = 500_000,
     out_csv_format1: Optional[str] = "Модель/Рекомендации_format1.csv",
     out_csv_kanzler_ml: Optional[str] = "Модель/Kanzler.ML.csv",
+    export_item_kinds: Optional[List[str]] = None,
+    max_export_users: Optional[int] = 1000,
     device_str: str = "cuda",
 ) -> str:
 
@@ -1257,6 +1586,14 @@ def export_recommendations_excel(
         s = s.astype("string").str.strip()
         s = s.str.replace(r"\.0$", "", regex=True)
         s = s.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "<NA>": pd.NA})
+        return s
+
+    def _clean_name(v) -> str:
+        if v is None:
+            return ""
+        s = str(v).strip()
+        if not s or s.lower() in ("nan", "none", "null", "<na>", "-"):
+            return ""
         return s
 
     def _load_user_fields(data_dir: str) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
@@ -1308,6 +1645,231 @@ def export_recommendations_excel(
 
         return cards, emails, phones
 
+    def _normalize_phone(value) -> str:
+        """
+        Приводит телефон к виду 79XXXXXXXXX.
+
+        Примеры:
+          +7 (916) 123-45-67 -> 79161234567
+          8 916 123-45-67   -> 79161234567
+          9161234567        -> 79161234567
+        """
+        digits = re.sub(r"\D+", "", str(value or ""))
+
+        if len(digits) == 10:
+            digits = "7" + digits
+        elif len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+
+        return digits
+
+    def _rank_users_by_loyalty(
+            data_dir: str,
+            user2idx: Dict[str, int],
+            idx2user: List[str],
+            phones: Dict[str, str],
+            chunksize: int = 500_000,
+            require_phone: bool = True,
+    ) -> List[int]:
+        """
+        Возвращает индексы пользователей, отсортированные от наиболее
+        лояльных к наименее лояльным.
+
+        Используется взвешенный показатель:
+          покупки   * w_purchase;
+          избранное * w_favorite;
+          просмотры * w_view_item.
+
+        Для покупок учитывается Количество, ограниченное от 1 до 10.
+        Просмотры учитываются только для ТипТовара = Номенклатура.
+        """
+        users_count = len(idx2user)
+
+        purchase_activity = np.zeros(users_count, dtype=np.float64)
+        favorite_activity = np.zeros(users_count, dtype=np.float64)
+        view_activity = np.zeros(users_count, dtype=np.float64)
+
+        def _accumulate_activity(
+                file_name: str,
+                target: np.ndarray,
+                use_quantity: bool = False,
+                only_nomenclature_views: bool = False,
+        ) -> None:
+            path = _path_csv(data_dir, file_name)
+            if not os.path.isfile(path):
+                return
+
+            needed_columns = {"MindboxID"}
+
+            if use_quantity:
+                needed_columns.add("Количество")
+
+            if only_nomenclature_views:
+                needed_columns.add("ТипТовара")
+
+            reader = pd.read_csv(
+                path,
+                sep="|",
+                dtype=str,
+                encoding="utf-8-sig",
+                usecols=lambda column: column in needed_columns,
+                chunksize=chunksize,
+            )
+
+            for chunk in reader:
+                if chunk.empty or "MindboxID" not in chunk.columns:
+                    continue
+
+                # В просмотрах учитываем только карточки номенклатуры,
+                # а не категории и прочие сущности.
+                if (
+                        only_nomenclature_views
+                        and "ТипТовара" in chunk.columns
+                ):
+                    chunk = chunk[
+                        chunk["ТипТовара"]
+                        .astype(str)
+                        .str.strip()
+                        .eq("Номенклатура")
+                    ]
+
+                    if chunk.empty:
+                        continue
+
+                mapped_users = (
+                    _clean_str_series(chunk["MindboxID"])
+                    .map(user2idx)
+                )
+
+                valid_mask = mapped_users.notna()
+                if not valid_mask.any():
+                    continue
+
+                user_indices = (
+                    mapped_users.loc[valid_mask]
+                    .astype(np.int64)
+                    .to_numpy()
+                )
+
+                if use_quantity and "Количество" in chunk.columns:
+                    values = (
+                        pd.to_numeric(
+                            chunk.loc[valid_mask, "Количество"],
+                            errors="coerce",
+                        )
+                        .fillna(1)
+                        .clip(lower=1, upper=10)
+                        .astype(float)
+                        .to_numpy()
+                    )
+
+                    grouped = (
+                        pd.DataFrame({
+                            "u_idx": user_indices,
+                            "value": values,
+                        })
+                        .groupby("u_idx", sort=False)["value"]
+                        .sum()
+                    )
+                else:
+                    grouped = (
+                        pd.Series(user_indices)
+                        .value_counts(sort=False)
+                    )
+
+                grouped_indices = grouped.index.to_numpy(dtype=np.int64)
+                grouped_values = grouped.to_numpy(dtype=np.float64)
+
+                target[grouped_indices] += grouped_values
+
+        # Покупки имеют наибольший приоритет.
+        _accumulate_activity(
+            file_name="Заказы",
+            target=purchase_activity,
+            use_quantity=True,
+        )
+
+        _accumulate_activity(
+            file_name="Избранное",
+            target=favorite_activity,
+        )
+
+        _accumulate_activity(
+            file_name="Просмотры",
+            target=view_activity,
+            only_nomenclature_views=True,
+        )
+
+        purchase_weight = float(getattr(cfg, "w_purchase", 10.0))
+        favorite_weight = float(getattr(cfg, "w_favorite", 2.0))
+        view_weight = float(getattr(cfg, "w_view_item", 0.1))
+
+        loyalty_scores = (
+                purchase_activity * purchase_weight
+                + favorite_activity * favorite_weight
+                + view_activity * view_weight
+        )
+
+        total_activity = (
+                purchase_activity
+                + favorite_activity
+                + view_activity
+        )
+
+        # Сначала оставляем пользователей хотя бы с одним взаимодействием.
+        eligible_indices = np.flatnonzero(total_activity > 0)
+
+        # Для InternetMagazin.csv нужен непустой телефон.
+        # Поэтому при формировании этого файла исключаем клиентов,
+        # которых интернет-магазин не сможет идентифицировать.
+        if require_phone:
+            valid_phone_mask = np.fromiter(
+                (
+                    bool(
+                        _normalize_phone(
+                            phones.get(str(mindbox_id), "")
+                        )
+                    )
+                    for mindbox_id in idx2user
+                ),
+                dtype=bool,
+                count=users_count,
+            )
+
+            eligible_indices = eligible_indices[
+                valid_phone_mask[eligible_indices]
+            ]
+
+        if eligible_indices.size == 0:
+            return []
+
+        # np.lexsort использует последний ключ как главный:
+        # 1. LoyaltyScore;
+        # 2. покупки;
+        # 3. избранное;
+        # 4. просмотры.
+        order = np.lexsort((
+            -view_activity[eligible_indices],
+            -favorite_activity[eligible_indices],
+            -purchase_activity[eligible_indices],
+            -loyalty_scores[eligible_indices],
+        ))
+
+        ranked_indices = eligible_indices[order].astype(int).tolist()
+
+        print(f"\n[{_now()}] Отбор наиболее лояльных клиентов:")
+        print(
+            f"- Пользователей в модели: "
+            f"{users_count:,}".replace(",", " ")
+        )
+        print(
+            f"- Пользователей с историей"
+            f"{' и номером телефона' if require_phone else ''}: "
+            f"{len(ranked_indices):,}".replace(",", " ")
+        )
+
+        return ranked_indices
+
     mappings_path = os.path.join(model_dir, "mappings.json")
     ckpt_path = os.path.join(model_dir, "bprmf.pt")
 
@@ -1356,7 +1918,7 @@ def export_recommendations_excel(
             want_cols = [
                 "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
                 "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
-                "Марка", "ГруппаСоставов", "ВидАссортимента"
+                "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
             ]
             cols = [c for c in want_cols if c in nom_cur.columns]
             sub = nom_cur[cols].copy()
@@ -1448,15 +2010,115 @@ def export_recommendations_excel(
         old_to_new_cache[code_old] = out
         return out
 
+    def _kind_for_export(
+            code_out: str,
+            code_old: str = "",
+    ) -> str:
+        """
+        Возвращает ВидНоменклатуры итогового товара после сезонного
+        сопоставления.
+        """
+        code_out = str(code_out or "").strip()
+        code_old = str(code_old or "").strip()
+
+        if code_out:
+            current_meta = new_meta_by_code.get(code_out, {}) or {}
+            kind = _clean_name(
+                current_meta.get("ВидНоменклатуры")
+            )
+            if kind:
+                return kind
+
+            trained_meta = train_item_meta.get(code_out, {}) or {}
+            kind = _clean_name(
+                trained_meta.get("ВидНоменклатуры")
+            )
+            if kind:
+                return kind
+
+        if code_old:
+            old_meta = train_item_meta.get(code_old, {}) or {}
+            kind = _clean_name(
+                old_meta.get("ВидНоменклатуры")
+            )
+            if kind:
+                return kind
+
+        return ""
+
     if k is None:
         k = int(getattr(cfg, "topk", 10))
     csv_min_k = 10 if (out_csv_format1 or out_csv_kanzler_ml) else 1
     k = max(int(csv_min_k), int(k))
     k = max(1, min(int(k), num_items))
 
-    data_dir = getattr(cfg, "data_dir", ".venv/ВходныеДанные")
+    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
+
+    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
+
+    # Нормализуем выбранные пользователем виды номенклатуры.
+    # Пустое множество означает, что ограничение не применяется.
+    export_kind_names = sorted({
+        _norm_text(value)
+        for value in (export_item_kinds or [])
+        if _norm_text(value)
+    })
+
+    export_kind_keys = {
+        value.upper()
+        for value in export_kind_names
+    }
+
+    if export_kind_names:
+        print(
+            f"[{_now()}] Виды номенклатуры в итоговой выгрузке: "
+            + ", ".join(export_kind_names)
+        )
+    else:
+        print(
+            f"[{_now()}] Ограничение по виду номенклатуры "
+            f"в итоговой выгрузке не установлено."
+        )
+
+    item_names: Dict[str, str] = (
+        _load_item_names(data_dir)
+        if include_item_names
+        else {}
+    )
 
     item_names: Dict[str, str] = _load_item_names(data_dir) if include_item_names else {}
+
+    # Остатки берём из текущей номенклатуры, потому что после сезонного сопоставления
+    # код товара может быть заменён на товар из актуальной коллекции.
+    current_data_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+    item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)
+
+    # fallback на cfg.data_dir
+    if not item_stocks:
+        item_stocks = _load_item_stocks(data_dir)
+
+    # Вид номенклатуры нужен для сглаживания конверсии и fallback новых товаров.
+    item_kind_by_code: Dict[str, str] = {}
+    for code, meta in train_item_meta.items():
+        item_kind_by_code[str(code)] = _norm_text((meta or {}).get("ВидНоменклатуры", ""))
+    for code, meta in new_meta_by_code.items():
+        item_kind_by_code[str(code)] = _norm_text((meta or {}).get("ВидНоменклатуры", ""))
+
+    # Для расчёта используем только текущие обработанные файлы.
+    conversion_data_dir = current_data_dir
+    if not (
+        os.path.isfile(_path_csv(conversion_data_dir, "Просмотры"))
+        and os.path.isfile(_path_csv(conversion_data_dir, "Заказы"))
+    ):
+        conversion_data_dir = data_dir
+
+    historical_conversion_by_code, historical_conversion_global = _load_historical_item_conversion(
+        data_dir=conversion_data_dir,
+        item_kind_by_code=item_kind_by_code,
+        window_days=30,
+        prior_strength=20.0,
+        chunksize=chunksize_seen,
+    )
 
     discount_cards: Dict[str, str] = {}
     emails: Dict[str, str] = {}
@@ -1466,7 +2128,38 @@ def export_recommendations_excel(
     if include_discount_card or include_email or include_phone or need_csv:
         discount_cards, emails, phones = _load_user_fields(data_dir)
 
+    # Ограничение количества клиентов в итоговой выгрузке.
+    # None или значение <= 0 означает выгрузку всех подходящих клиентов.
+    export_user_limit: Optional[int] = None
+
+    if max_export_users is not None:
+        try:
+            parsed_limit = int(max_export_users)
+            if parsed_limit > 0:
+                export_user_limit = parsed_limit
+        except (TypeError, ValueError):
+            export_user_limit = None
+
+    # Клиенты располагаются от наиболее лояльных к наименее лояльным.
+    # Если создаётся InternetMagazin.csv, участвуют только клиенты
+    # с корректным номером телефона.
+    ranked_user_indices = _rank_users_by_loyalty(
+        data_dir=data_dir,
+        user2idx=user2idx,
+        idx2user=idx2user,
+        phones=phones,
+        chunksize=chunksize_seen,
+        require_phone=bool(out_csv_format1),
+    )
+
+    if not ranked_user_indices:
+        raise ValueError(
+            "Не найдены пользователи с историей взаимодействий "
+            "и корректным номером телефона."
+        )
+
     user_seen: Optional[List[set]] = None
+
     if filter_seen:
         user_seen = _build_user_seen_sets(
             data_dir=data_dir,
@@ -1476,6 +2169,52 @@ def export_recommendations_excel(
         )
 
     item_vec = model.item_vec_all().to(device)  # [I, d]
+
+    # Маска товаров, разрешённых выбранным видом номенклатуры.
+    # Она применяется до torch.topk, поэтому модель будет выбиратьАМ
+    # лучшие рекомендации именно среди выбранных видов.
+    export_kind_mask = None
+
+    if export_kind_keys:
+        allowed_items = np.zeros(
+            num_items,
+            dtype=np.bool_
+        )
+
+        for item_index, old_code_value in enumerate(idx2item):
+            code_old = str(old_code_value)
+            code_out = _map_old_code_to_active(code_old)
+
+            kind_value = _kind_for_export(
+                code_out,
+                code_old
+            )
+
+            kind_key = _norm_text(kind_value).upper()
+
+            if kind_key in export_kind_keys:
+                allowed_items[item_index] = True
+
+        allowed_count = int(allowed_items.sum())
+
+        if allowed_count == 0:
+            raise ValueError(
+                "В модели не найдено товаров выбранных видов "
+                "номенклатуры: "
+                + ", ".join(export_kind_names)
+            )
+
+        export_kind_mask = torch.tensor(
+            allowed_items,
+            dtype=torch.bool,
+            device=device,
+        )
+
+        print(
+            f"[{_now()}] Товаров выбранных видов, доступных "
+            f"для ранжирования: {allowed_count:,}"
+            .replace(",", " ")
+        )
 
     os.makedirs(os.path.dirname(out_xlsx) or ".", exist_ok=True)
     wb = Workbook(write_only=True)
@@ -1493,10 +2232,24 @@ def export_recommendations_excel(
         header.append(f"КодНоменклатуры_{r}")
         if include_item_names:
             header.append(f"НазваниеНоменклатуры_{r}")
+        header.append(f"Коллекция_{r}")
         if include_scores:
             header.append(f"Коэффициент_{r}")
+        header.append(f"Конверсия_{r}")
+        header.append(f"Остаток_{r}")
 
     ws.append(header)
+
+    # --- Статистика по коллекциям в итоговом Excel-файле ---
+    collection_counts: Dict[str, int] = {}
+
+    def _add_collection_to_stats(collection_value: str) -> None:
+        coll = _clean_name(collection_value)
+
+        if not coll:
+            coll = "Без коллекции"
+
+        collection_counts[coll] = collection_counts.get(coll, 0) + 1
 
     # --- CSV outputs (additional to Excel) ---
     csv1_f = csvml_f = None
@@ -1514,27 +2267,68 @@ def export_recommendations_excel(
         csvml_w = csv.writer(csvml_f, delimiter=";")
         csvml_w.writerow(["CustomerMindboxId", "Quantity", "ProductGroupOffline1C", "CustomFieldKoefficient"])
 
+    exported_users = 0
+    stop_export = False
 
-    for start in range(0, num_users, batch_users):
-        end = min(num_users, start + batch_users)
+    for batch_start in range(
+            0,
+            len(ranked_user_indices),
+            batch_users,
+    ):
+        if stop_export:
+            break
 
-        u_idx = torch.arange(start, end, device=device, dtype=torch.long)
-        u_emb = model.user_emb(u_idx)      # [B, d]
-        scores = u_emb @ item_vec.t()      # [B, I]
+        batch_user_indices = ranked_user_indices[
+                             batch_start:batch_start + batch_users
+                             ]
+
+        if not batch_user_indices:
+            continue
+
+        u_idx = torch.tensor(
+            batch_user_indices,
+            device=device,
+            dtype=torch.long,
+        )
+
+        u_emb = model.user_emb(u_idx)  # [B, d]
+        scores = u_emb @ item_vec.t()  # [B, I]
 
         if filter_seen and user_seen is not None:
-            for bi, uu in enumerate(range(start, end)):
-                s = user_seen[uu]
-                if s:
-                    scores[bi, torch.tensor(list(s), device=device, dtype=torch.long)] = -1e9
+            for bi, uu in enumerate(batch_user_indices):
+                seen_items = user_seen[uu]
 
-        cand_k = min(scores.shape[1], max(k * 5, k))
+                if seen_items:
+                    scores[
+                        bi,
+                        torch.tensor(
+                            list(seen_items),
+                            device=device,
+                            dtype=torch.long,
+                        )
+                    ] = -1e9
+
+        # Убираем из ранжирования все виды номенклатуры,
+        # которые пользователь не выбрал для выгрузки.
+        if export_kind_mask is not None:
+            scores[:, ~export_kind_mask] = -1e9
+
+        # Берём больше кандидатов, потому что часть товаров будет отсеяна по остатку < 100
+        cand_k = min(scores.shape[1], max(k * 100, 1000, k))
         top = torch.topk(scores, k=cand_k, dim=1)
         top_idx = top.indices.detach().cpu().numpy()
         top_val = top.values.detach().cpu().numpy()
 
-        for bi, uu in enumerate(range(start, end)):
+        for bi, uu in enumerate(batch_user_indices):
+            if (
+                    export_user_limit is not None
+                    and exported_users >= export_user_limit
+            ):
+                stop_export = True
+                break
+
             mindbox_id = str(idx2user[uu])
+
             row: List[object] = [mindbox_id]
 
             if include_discount_card:
@@ -1550,12 +2344,105 @@ def export_recommendations_excel(
             used = set()
             out_codes: List[str] = []
             out_names: List[str] = []
+            out_collections: List[str] = []
             out_scores: List[float] = []
+            out_conversions: List[float] = []
+            out_stocks: List[str] = []
+
+            def _stock_for_code(code: str) -> str:
+                code = str(code or "").strip()
+                if not code:
+                    return ""
+
+                # основной источник — текущая Номенклатура.csv
+                val = item_stocks.get(code)
+                if val is not None:
+                    return _format_stock_value(val)
+
+                # fallback — метаданные текущего каталога
+                meta = new_meta_by_code.get(code, {}) or {}
+                return _format_stock_value(meta.get("Остаток", 0))
+
+            def _stock_to_int(stock_value) -> int:
+                """
+                Преобразует остаток к int для фильтрации:
+                  "150" -> 150
+                  "150.0" -> 150
+                  "150,0" -> 150
+                  пусто/NaN -> 0
+                """
+                try:
+                    return int(_format_stock_value(stock_value))
+                except Exception:
+                    return 0
+
+            def _collection_for_code(code_out: str, code_old: str = "") -> str:
+                """
+                Возвращает коллекцию итогового товара после сезонного сопоставления.
+                Сначала ищем по итоговому коду в текущей Номенклатура.csv,
+                затем в метаданных обучения.
+                """
+                code_out = str(code_out or "").strip()
+                code_old = str(code_old or "").strip()
+
+                if code_out:
+                    meta = new_meta_by_code.get(code_out, {}) or {}
+                    coll = _clean_name(meta.get("Коллекция"))
+                    if coll:
+                        return coll
+
+                    meta = train_item_meta.get(code_out, {}) or {}
+                    coll = _clean_name(meta.get("Коллекция"))
+                    if coll:
+                        return coll
+
+                if code_old:
+                    meta = train_item_meta.get(code_old, {}) or {}
+                    coll = _clean_name(meta.get("Коллекция"))
+                    if coll:
+                        return coll
+
+                return ""
+
+            def _kind_for_code(
+                code_out: str,
+                code_old: str = "",
+            ) -> str:
+                return _kind_for_export(
+                    code_out,
+                    code_old
+                )
+
+            def _is_autumn_winter_collection(collection_value: str) -> bool:
+                """
+                True для любых коллекций Осень-Зима любого года:
+                  Осень-Зима 2024
+                  Осень-Зима 2025
+                  Осень-Зима 2025 переходящий остаток
+                  Осень-Зима 2026
+                """
+                coll = _norm_text(collection_value).upper()
+                return "ОСЕНЬ" in coll and "ЗИМА" in coll
+
+            def _is_gift_card_kind(kind_value: str) -> bool:
+                """
+                True для вида номенклатуры Подарочные карты.
+                """
+                kind = _norm_text(kind_value).upper()
+                return kind == "ПОДАРОЧНЫЕ КАРТЫ" or ("ПОДАРОЧН" in kind and "КАРТ" in kind)
+
 
             ptr = 0
+
             while len(out_codes) < k and ptr < len(rec_items):
                 code_old = str(idx2item[int(rec_items[ptr])])
                 score_old = float(rec_scores[ptr])
+
+                # Значение -1e9 используется для исключённых,
+                # уже просмотренных или запрещённых товаров.
+                if score_old <= -1e8:
+                    ptr += 1
+                    continue
 
                 code_out = _map_old_code_to_active(code_old)
 
@@ -1563,34 +2450,95 @@ def export_recommendations_excel(
                     ptr += 1
                     continue
 
+                collection_out = _collection_for_code(code_out, code_old)
+                kind_out = _kind_for_code(code_out, code_old)
+
+                # Отбор по видам номенклатуры, выбранным пользователем.
+                # Пустой список означает отсутствие ограничения.
+                if (
+                        export_kind_keys
+                        and _norm_text(kind_out).upper()
+                        not in export_kind_keys
+                ):
+                    ptr += 1
+                    continue
+
+                # Фильтр по коллекции: убираем всю Осень-Зиму любого года
+                if _is_autumn_winter_collection(collection_out):
+                    ptr += 1
+                    continue
+
+                # Фильтр по виду номенклатуры: убираем подарочные карты
+                if _is_gift_card_kind(kind_out):
+                    ptr += 1
+                    continue
+
+                stock_out = _stock_for_code(code_out)
+
+                # Фильтр по остатку: в выгрузку попадают только товары с остатком >= 100
+                if _stock_to_int(stock_out) < 100:
+                    ptr += 1
+                    continue
+
                 used.add(code_out)
                 out_codes.append(code_out)
                 out_scores.append(score_old)
+                out_collections.append(collection_out)
+                out_conversions.append(
+                    float(historical_conversion_by_code.get(code_out, historical_conversion_global))
+                )
+                out_stocks.append(stock_out)
 
                 if include_item_names:
-                    nm = item_names.get(code_out, "")
+                    nm = _clean_name(item_names.get(code_out, ""))
+
                     if not nm:
                         if code_out == code_old:
                             om = train_item_meta.get(code_old, {}) or {}
-                            nm = (om.get("НазваниеНаСайте") or om.get("Номенклатура") or "")
+                            nm = _clean_name(om.get("НазваниеНаСайте")) or _clean_name(om.get("Номенклатура"))
                         else:
-                            nm = (new_meta_by_code.get(code_out, {}) or {}).get("НазваниеНаСайте", "") \
-                                 or (new_meta_by_code.get(code_out, {}) or {}).get("Номенклатура", "")
+                            nm = _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("НазваниеНаСайте")) \
+                                 or _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("Номенклатура"))
+
                     out_names.append(nm)
 
                 ptr += 1
+
+            if not out_codes:
+                continue
 
             # добиваем до k, чтобы структура Excel не ломалась
             while len(out_codes) < k:
                 out_codes.append("")
                 out_scores.append(0.0)
+                out_collections.append("")
+                out_conversions.append(0.0)
+                out_stocks.append("")
                 if include_item_names:
                     out_names.append("")
             # --- CSV format #1: CustomerID=discount card, ProductID=comma-separated codes ---
+            # --- CSV InternetMagazin:
+            # CustomerID = номер телефона,
+            # ProductID = коды рекомендаций через запятую.
             if csv1_w is not None:
-                customer_id = str(discount_cards.get(mindbox_id, "") or "")
-                product_id = ",".join([str(x) for x in out_codes[:k]])
-                csv1_w.writerow([customer_id, product_id])
+                customer_id = _normalize_phone(
+                    phones.get(mindbox_id, "")
+                )
+
+                product_codes_csv = [
+                    str(code).strip()
+                    for code in out_codes[:k]
+                    if str(code or "").strip()
+                ]
+
+                product_id = ",".join(product_codes_csv)
+
+                # Пустые идентификаторы и пустые рекомендации не записываем.
+                if customer_id and product_id:
+                    csv1_w.writerow([
+                        customer_id,
+                        product_id,
+                    ])
 
             # --- CSV Kanzler ML: one row per recommended item ---
             if csvml_w is not None:
@@ -1605,17 +2553,59 @@ def export_recommendations_excel(
                         continue
                     csvml_w.writerow([mindbox_id, 1, code_val, _fmt_coef_ru(sc_val)])
 
-
             for j in range(k):
                 row.append(out_codes[j])
                 if include_item_names:
                     row.append(out_names[j])
+                row.append(out_collections[j])
                 if include_scores:
                     row.append(round(out_scores[j], 2))
+                # Историческая конверсия хранится только в Excel, в процентах.
+                row.append(round(out_conversions[j], 2) if out_codes[j] else "")
+                row.append(out_stocks[j])
+
+                # Считаем коллекции только по реально выгружаемым рекомендациям
+            for code_val, coll_val in zip(out_codes[:k], out_collections[:k]):
+                code_val = str(code_val or "").strip()
+
+                if not code_val:
+                    continue
+
+                _add_collection_to_stats(coll_val)
 
             ws.append(row)
+            exported_users += 1
 
+    print(
+        f"[{_now()}] В итоговые файлы выгружено клиентов: "
+        f"{exported_users:,}".replace(",", " ")
+    )
+
+    if (
+            export_user_limit is not None
+            and exported_users < export_user_limit
+    ):
+        print(
+            f"[{_now()}] Предупреждение: требовалось "
+            f"{export_user_limit:,}, но удалось сформировать рекомендации "
+            f"только для {exported_users:,} клиентов."
+            .replace(",", " ")
+        )
     wb.save(out_xlsx)
+
+    print("\n[RECS COLLECTIONS] Количество рекомендаций по коллекциям в Excel:")
+
+    if collection_counts:
+        total_recs = sum(collection_counts.values())
+
+        for coll, cnt in sorted(collection_counts.items(), key=lambda x: (-x[1], x[0])):
+            print(f"  {coll}: {cnt}")
+
+        print(f"  Итого рекомендаций: {total_recs}")
+    else:
+        print("  Нет рекомендаций для подсчёта.")
+
+    print()
 
     # close CSV files
     if csv1_f is not None:

@@ -4,10 +4,12 @@ import chardet
 import pandas as pd
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon, QPixmap
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                             QLineEdit, QComboBox, QListWidget, QFileDialog, QFrame, QAbstractItemView,
-                             QStackedWidget, QButtonGroup, QTableWidget, QHeaderView,
-                             QTableWidgetItem, QApplication)
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QComboBox, QListWidget, QFileDialog, QFrame,
+    QAbstractItemView, QStackedWidget, QButtonGroup,
+    QTableWidget, QHeaderView, QTableWidgetItem, QApplication,
+    QSpinBox)
 
 from Application.settings.settings_and_filter import (save_order_filter_settings, order_filters_settings_path,
                                                       dataset_paths, update_filter_summary, get_selected_list_values,
@@ -178,6 +180,33 @@ def create_input_data_widgets_tab(aboba):
 
     filters_layout.addLayout(kind_row)
 
+    # -------------------- ВИДЫ НОМЕНКЛАТУРЫ В РЕКОМЕНДАЦИЯХ --------------------
+    aboba.export_kind_filter = QListWidget()
+    aboba.export_kind_filter.setSelectionMode(
+        QAbstractItemView.SelectionMode.MultiSelection
+    )
+    aboba.export_kind_filter.setMaximumHeight(100)
+    aboba.export_kind_filter.setToolTip(
+        "Выберите виды номенклатуры, которые должны попасть в итоговые "
+        "рекомендации.\n"
+        "Можно выбрать несколько значений.\n"
+        "Если ничего не выбрано, ограничение не применяется."
+    )
+
+    export_kind_row = QHBoxLayout()
+    export_kind_row.setContentsMargins(0, 0, 0, 0)
+    export_kind_row.setSpacing(10)
+
+    lbl_export_kind = QLabel("Виды в рекомендациях:")
+    export_kind_row.addWidget(
+        lbl_export_kind,
+        0,
+        Qt.AlignmentFlag.AlignVCenter
+    )
+    export_kind_row.addWidget(aboba.export_kind_filter, 1)
+
+    filters_layout.addLayout(export_kind_row)
+
     # -------------------- МАГАЗИН (СКЛАД) --------------------
     aboba.store_mode = QComboBox()
     aboba.store_mode.addItems(["В группе", "Не в группе"])
@@ -216,6 +245,35 @@ def create_input_data_widgets_tab(aboba):
 
     filters_layout.addLayout(season_row)
 
+    # -------------------- КОЛИЧЕСТВО КЛИЕНТОВ В ВЫГРУЗКЕ --------------------
+    aboba.max_export_users_input = QSpinBox()
+
+    # 0 означает выгрузку всех подходящих клиентов
+    aboba.max_export_users_input.setRange(0, 1_000_000)
+    aboba.max_export_users_input.setSingleStep(100)
+    aboba.max_export_users_input.setValue(1000)
+    aboba.max_export_users_input.setSpecialValueText("Все клиенты")
+    aboba.max_export_users_input.setSuffix(" клиентов")
+    aboba.max_export_users_input.setToolTip(
+        "Количество наиболее лояльных клиентов, для которых будут "
+        "сформированы рекомендации.\n"
+        "Значение 0 означает выгрузку всех подходящих клиентов."
+    )
+
+    export_users_row = QHBoxLayout()
+    export_users_row.setContentsMargins(0, 0, 0, 0)
+    export_users_row.setSpacing(10)
+
+    lbl_export_users = QLabel("Клиентов в выгрузке:")
+    export_users_row.addWidget(
+        lbl_export_users,
+        0,
+        Qt.AlignmentFlag.AlignVCenter
+    )
+    export_users_row.addWidget(aboba.max_export_users_input, 1)
+
+    filters_layout.addLayout(export_users_row)
+
     # -------------------- ТАБЛИЦА СКЛАД -> ГОРОД --------------------
     aboba.store_city_table = QTableWidget()
     aboba.store_city_table.setColumnCount(2)
@@ -246,8 +304,14 @@ def create_input_data_widgets_tab(aboba):
     aboba.btn_reset.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
     aboba.btn_reset.clicked.connect(lambda: reset_order_filters(aboba))
 
+    aboba.btn_weather = QPushButton(QIcon("Картинки/Солнце.png"), " Загрузить погоду")
+    aboba.btn_weather.setIconSize(QSize(17, 17))
+    aboba.btn_weather.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
+    aboba.btn_weather.clicked.connect(lambda: _maybe_update_weather(aboba))
+
     btns.addWidget(aboba.btn_apply)
     btns.addWidget(aboba.btn_reset)
+    btns.addWidget(aboba.btn_weather)
 
     # Текущий отбор строкой
     aboba.filter_summary = QLineEdit()
@@ -391,6 +455,8 @@ def create_input_data_widgets_tab(aboba):
 
     refresh_season_values_from_nomenclature_file(aboba)
 
+    refresh_export_kind_values_from_nomenclature_file(aboba)
+
     # Формируем текстовую строку с настройками
     update_filter_summary(aboba)
 
@@ -516,6 +582,15 @@ def load_order_filter_settings(aboba):
         if hasattr(aboba, "filter_date_to"):
             aboba.filter_date_to.setText(str(data.get("date_to", "")))
 
+        # Восстанавливаем количество клиентов в выгрузке
+        if hasattr(aboba, "max_export_users_input"):
+            try:
+                max_export_users = int(data.get("max_export_users", 1000))
+            except (TypeError, ValueError):
+                max_export_users = 1000
+
+            aboba.max_export_users_input.setValue(max_export_users)
+
         if hasattr(aboba, "store_mode"):
             txt = str(data.get("store_mode", "В группе"))
             idx = aboba.store_mode.findText(txt)
@@ -528,9 +603,22 @@ def load_order_filter_settings(aboba):
             if idx >= 0:
                 aboba.kind_mode.setCurrentIndex(idx)
 
-        aboba._pending_store_selection = list(data.get("stores_selected", []))
-        aboba._pending_kind_selection = list(data.get("kinds_selected", []))
-        aboba._pending_season_selection = list(data.get("seasons_selected", []))
+        aboba._pending_store_selection = list(
+            data.get("stores_selected", [])
+        )
+
+        aboba._pending_kind_selection = list(
+            data.get("kinds_selected", [])
+        )
+
+        aboba._pending_season_selection = list(
+            data.get("seasons_selected", [])
+        )
+
+        # Отдельный отбор видов номенклатуры для итоговой выгрузки
+        aboba._pending_export_kind_selection = list(
+            data.get("export_kinds_selected", [])
+        )
 
         aboba._pending_store_city_map = dict(data.get("store_city_map", {}) or {})
         aboba._store_city_map = dict(aboba._pending_store_city_map)
@@ -551,8 +639,6 @@ def apply_filters_all_stats(aboba):
     analyze_orders_full_dataset(aboba)
     analyze_views_full_dataset(aboba)
     analyze_favorites_full_dataset(aboba)
-    set_status_ok(aboba, "Фильтры применены")
-    schedule_status_reset(aboba, 5)
 
 
 def save_and_apply_filters(aboba):
@@ -564,13 +650,14 @@ def save_and_apply_filters(aboba):
     if ok is False:
         return
 
-    set_status_processing(aboba, "Получение данных о погоде...")
-    QApplication.processEvents()
-    _maybe_update_weather(aboba)
-
     set_status_processing(aboba, "Применение фильтров...")
     QApplication.processEvents()
+
     apply_filters_all_stats(aboba)
+
+    set_status_ok(aboba, "Фильтры применены")
+    QApplication.processEvents()
+    schedule_status_reset(aboba, 5)
 
 
 def _masked_date_is_empty(le) -> bool:
@@ -611,6 +698,9 @@ def _maybe_update_weather(aboba):
 
     try:
         generate_weather_for_saved_coordinates(aboba, start_date=start_date, end_date=end_date)
+        set_status_ok(aboba, "Погода успешно загружена")
+        QApplication.processEvents()
+
     except Exception as e:
         show_custom_message(
             aboba,
@@ -622,8 +712,15 @@ def _maybe_update_weather(aboba):
 
 # -------------------------------------------КНОПКА "СБРОСИТЬ НАСТРОЙКИ"------------------------------------------------
 def reset_order_filters(aboba):
+
+    set_status_processing(aboba, "Сброс фильтров...")
+    QApplication.processEvents()
+
     aboba.filter_date_from.clear()
     aboba.filter_date_to.clear()
+
+    if hasattr(aboba, "max_export_users_input"):
+        aboba.max_export_users_input.setValue(1000)
 
     if hasattr(aboba, "store_mode"):
         aboba.store_mode.setCurrentIndex(0)
@@ -637,8 +734,14 @@ def reset_order_filters(aboba):
         aboba.filter_store.clearSelection()
     if hasattr(aboba, "filter_kind"):
         aboba.filter_kind.clearSelection()
+    if hasattr(aboba, "export_kind_filter"):
+        aboba.export_kind_filter.clearSelection()
 
     apply_filters_all_stats(aboba)
+
+    set_status_ok(aboba, "Фильтры сброшены")
+    QApplication.processEvents()
+    schedule_status_reset(aboba, 5)
 
 
 # -------------------------------------------ФОРМИРУЕМ СПИСОК ГОРОДОВ ДЛЯ ВЫБОРА----------------------------------------
@@ -744,12 +847,13 @@ def update_filter_controls_availability(aboba):
 
     # Блокируем ВЕСЬ отбор + кнопки
     for attr in (
-        "filter_date_from", "filter_date_to",
-        "kind_mode", "filter_kind",
-        "store_mode", "filter_store",
-        "store_city_table", "filter_season",
-        "btn_apply", "btn_reset",
-        "filter_summary",
+            "filter_date_from", "filter_date_to",
+            "kind_mode", "filter_kind",
+            "export_kind_filter",
+            "store_mode", "filter_store",
+            "store_city_table", "filter_season",
+            "btn_apply", "btn_weather", "btn_reset",
+            "filter_summary",
     ):
         w = getattr(aboba, attr, None)
         if w is not None:
@@ -796,6 +900,81 @@ def refresh_kind_values_from_loaded_files(aboba):
 
     if pending is not None:
         aboba._pending_kind_selection = None
+
+
+def refresh_export_kind_values_from_nomenclature_file(aboba):
+    """
+    Заполняет список видов номенклатуры для фильтра итоговой выгрузки.
+
+    Источник — текущий файл ВходныеДанные/Номенклатура.csv,
+    потому что рекомендации формируются по актуальному каталогу.
+    """
+    lw = getattr(aboba, "export_kind_filter", None)
+    if lw is None:
+        return
+
+    nom_path = os.path.join(
+        os.getcwd(),
+        "ВходныеДанные",
+        "Номенклатура.csv"
+    )
+
+    if not os.path.isfile(nom_path):
+        set_list_widget_items(aboba, lw, [], [])
+        return
+
+    kinds_set = set()
+
+    try:
+        df = pd.read_csv(
+            nom_path,
+            sep="|",
+            dtype=str,
+            encoding="utf-8-sig",
+            usecols=lambda column: column == "ВидНоменклатуры",
+        )
+
+        if "ВидНоменклатуры" in df.columns:
+            values = (
+                df["ВидНоменклатуры"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+            )
+
+            for value in values.tolist():
+                if (
+                    value
+                    and value.lower()
+                    not in ("nan", "none", "null", "<na>", "-")
+                ):
+                    kinds_set.add(value)
+
+    except Exception:
+        kinds_set = set()
+
+    kinds = sorted(kinds_set)
+
+    pending = getattr(
+        aboba,
+        "_pending_export_kind_selection",
+        None
+    )
+
+    if pending is not None:
+        current_selection = pending
+    else:
+        current_selection = get_selected_list_values(lw)
+
+    set_list_widget_items(
+        aboba,
+        lw,
+        kinds,
+        current_selection
+    )
+
+    if pending is not None:
+        aboba._pending_export_kind_selection = None
 
 
 def refresh_season_values_from_nomenclature_file(aboba):
@@ -873,6 +1052,7 @@ def set_order_filters_enabled(aboba, enabled: bool):
             "filter_store",
             "kind_mode",
             "filter_kind",
+            "export_kind_filter",
     ):
         w = getattr(aboba, attr, None)
         if w is not None:
@@ -885,6 +1065,10 @@ def set_order_filters_enabled(aboba, enabled: bool):
     btn_reset = getattr(aboba, "btn_reset", None)
     if btn_reset is not None:
         btn_reset.setEnabled(enabled)
+
+    btn_weather = getattr(aboba, "btn_weather", None)
+    if btn_weather is not None:
+        btn_weather.setEnabled(enabled)
 
 
 # ///////////////////////////////////////////АНАЛИЗ ФАЙЛОВ//////////////////////////////////////////////////////////
@@ -929,6 +1113,7 @@ def analyze_orders_full_dataset(aboba):
             update_filter_controls_availability(aboba)
             refresh_kind_values_from_loaded_files(aboba)
             refresh_season_values_from_nomenclature_file(aboba)
+            refresh_export_kind_values_from_nomenclature_file(aboba)
             update_filter_summary(aboba)
             vyvod_zaglyschek(
                 text="Файл ещё не загружен",
@@ -943,6 +1128,7 @@ def analyze_orders_full_dataset(aboba):
         update_filter_controls_availability(aboba)
         refresh_kind_values_from_loaded_files(aboba)
         refresh_season_values_from_nomenclature_file(aboba)
+        refresh_export_kind_values_from_nomenclature_file(aboba)
 
         # ----------------- Обновляем списки фильтров из данных -----------------
         # (сохраняем текущие выделения)
@@ -1872,6 +2058,7 @@ def load_csv_file(aboba):
         update_filter_controls_availability(aboba)
         refresh_kind_values_from_loaded_files(aboba)
         refresh_season_values_from_nomenclature_file(aboba)
+        refresh_export_kind_values_from_nomenclature_file(aboba)
         update_filter_summary(aboba)
 
         # Пересчитываем статистику

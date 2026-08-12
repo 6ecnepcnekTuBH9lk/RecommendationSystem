@@ -640,23 +640,27 @@ def process_nomenclature_file(aboba, df):
     required_columns = [
         "КодНоменклатуры", "Номенклатура", "НазваниеНаСайте", "ВидНоменклатуры",
         "ВидАссортимента", "Марка", "Коллекция", "СезонНоски", "ПолНоменклатуры",
-        "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа", "ТитульнаяФотография"
+        "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа",
+        "ТитульнаяФотография", "Остаток"
     ]
 
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(aboba, title="Ошибка",
-                            text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-                            image_path="Картинки/Неудача.png")
+        show_custom_message(
+            aboba,
+            title="Ошибка",
+            text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
+            image_path="Картинки/Неудача.png"
+        )
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
 
         return None
 
     # Удаляем строки, где КодНоменклатуры пустой, None, NaN или только пробелы
-    df = df[df["КодНоменклатуры"].notna()]  # убираем NaN
-    df = df[df["КодНоменклатуры"].astype(str).str.strip() != ""]  # убираем пустые и пробельные
+    df = df[df["КодНоменклатуры"].notna()].copy()
+    df = df[df["КодНоменклатуры"].astype(str).str.strip() != ""].copy()
 
     # Очистка категорий от точек и запятых
     for col in [
@@ -665,20 +669,37 @@ def process_nomenclature_file(aboba, df):
         df[col] = (
             df[col]
             .astype(str)
-            .str.replace(r"\.0$", "", regex=True)  # убираем только .0 в конце
-            .str.replace(r"[.,]", "", regex=True)  # убираем лишние знаки, если вдруг есть
+            .str.replace(r"\.0$", "", regex=True)
+            .str.replace(r"[.,]", "", regex=True)
             .str.strip()
         )
 
     # Заменяем все виды пустых значений на np.nan
     df = df.replace(["", " ", "  ", "None", "none", "NULL", "null", "-", "--", "nan"], np.nan)
 
+    # Приводим Остаток к целому числу
+    df["Остаток"] = (
+        df["Остаток"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .str.replace(r"\s+", "", regex=True)
+    )
+
+    df["Остаток"] = (
+        pd.to_numeric(df["Остаток"], errors="coerce")
+        .fillna(0)
+        .round()
+        .astype("int64")
+    )
+
     # Упорядочиваем колонки
     column_order = [
         "КодНоменклатуры", "Номенклатура", "НазваниеНаСайте", "ВидНоменклатуры",
         "ВидАссортимента", "Марка", "Коллекция", "СезонНоски", "ПолНоменклатуры",
-        "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа", "ТитульнаяФотография"
+        "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа",
+        "ТитульнаяФотография", "Остаток"
     ]
+
     df = df[column_order]
 
     df = df.sort_values(by="КодНоменклатуры", ascending=True)
@@ -1021,7 +1042,7 @@ def _download_weather_for_coordinates_file(aboba, coords_df: pd.DataFrame, start
         latitude = float(row["Широта"])
         longitude = float(row["Долгота"])
 
-        set_status_processing(aboba, f"Загрузка погоды: {city} ({idx}/{total})...")
+        set_status_processing(aboba, f"Получаем данные...{city} ({idx}/{total})...")
 
         if _qt is not None:
             _qt.processEvents()
