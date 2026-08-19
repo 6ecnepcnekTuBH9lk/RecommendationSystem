@@ -56,3 +56,61 @@ RecommendationSystem/
 ├── Картинки/
 ├── main.py
 └── README.md
+```
+
+## Требования
+
+Для запуска проекта требуется:
+
+- Python 3.10 или новее;
+- pip.
+
+Основные используемые библиотеки:
+
+- PyQt6;
+- pandas;
+- numpy;
+- PyTorch;
+- openpyxl;
+- requests;
+- chardet.
+
+## Установка
+
+Клонировать репозиторий:
+
+```bash
+git clone https://github.com/6ecnepcnekTuBH9lk/RecommendationSystem.git
+```
+
+Перейти в директорию проекта:
+
+```bash
+cd RecommendationSystem
+```
+
+Создать виртуальное окружение:
+
+```bash
+python -m venv .venv
+```
+
+Активировать виртуальное окружение в Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+Установить необходимые библиотеки:
+
+```bash
+pip install PyQt6 pandas numpy torch openpyxl requests chardet
+```
+
+## Запуск
+
+Запуск приложения выполняется из корневой директории проекта:
+
+```bash
+python main.py
+```
