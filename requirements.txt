@@ -1,0 +1,7 @@
+PyQt6==6.10.0
+pandas==2.3.3
+numpy==2.2.6
+torch==2.5.1
+openpyxl==3.1.5
+requests==2.32.5
+chardet==5.2.0

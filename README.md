@@ -104,7 +104,7 @@ python -m venv .venv
 Установить необходимые библиотеки:
 
 ```bash
-pip install PyQt6 pandas numpy torch openpyxl requests chardet
+pip install -r requirements.txt
 ```
 
 ## Запуск
