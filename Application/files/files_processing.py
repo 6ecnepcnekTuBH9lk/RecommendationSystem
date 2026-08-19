@@ -39,11 +39,8 @@ def _get_json_with_retry(
             resp.raise_for_status()
             return resp.json()
 
-
         except (Timeout, ConnectionError):
-
             pass
-
 
         except HTTPError as e:
             code = e.response.status_code if e.response is not None else None
