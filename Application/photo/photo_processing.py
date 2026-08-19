@@ -202,7 +202,6 @@ def _on_image_loaded(aboba, reply) -> None:
     ctype = str(ctype_raw or "").lower()
 
     err = reply.error()
-    err_str = reply.errorString()
 
     data = bytes(reply.readAll())
     reply.deleteLater()
