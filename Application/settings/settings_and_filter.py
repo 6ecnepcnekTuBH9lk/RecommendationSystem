@@ -4,8 +4,8 @@ import json
 import pandas as pd
 from PyQt6.QtWidgets import (QComboBox, QListWidget)
 
-from Application.settings.set_status import (set_status_processing, schedule_status_reset, show_custom_message,
-                                             set_status_error, set_status_ok)
+from Application.settings.set_status import (schedule_status_reset, show_custom_message,
+                                             set_status_error)
 
 
 # -------------------------------------------КНОПКА "СОХРАНИТЬ НАСТРОЙКИ"-----------------------------------------------

@@ -1,10 +1,8 @@
 import os
 import pandas as pd
 import re
-import requests
 from Application.model import BPRMF as BPRMF_module
 from PyQt6.QtCore import Qt, QSize
-from typing import Iterable, Optional
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QLineEdit, QComboBox, QFrame, QFormLayout, QGridLayout, QSizePolicy,

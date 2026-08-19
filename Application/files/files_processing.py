@@ -28,8 +28,6 @@ def _get_json_with_retry(
     backoff_base: float = 1.5,
 ) -> dict | None:
 
-    last_err = None
-
     for i in range(1, attempts + 1):
         try:
             resp = _HTTP.get(url, params=params, timeout=timeout)
@@ -41,19 +39,22 @@ def _get_json_with_retry(
             resp.raise_for_status()
             return resp.json()
 
-        except (Timeout, ConnectionError) as e:
-            last_err = e
+
+        except (Timeout, ConnectionError):
+
+            pass
+
 
         except HTTPError as e:
-            last_err = e
             code = e.response.status_code if e.response is not None else None
+
             # если это "обычная" 4xx — смысла ретраить нет
             if code is not None and 400 <= code < 500 and code != 429:
                 break
 
-        except (ValueError, RequestException) as e:
+        except (ValueError, RequestException):
             # ValueError — на случай json decode error
-            last_err = e
+            pass
 
         if i < attempts:
             # экспоненциальная пауза + небольшой jitter
@@ -835,7 +836,7 @@ def process_coordinates_file(aboba, df):
     # Сортировка
     df = df.sort_values(by="Город", ascending=True).reset_index(drop=True)
 
-    set_status_ok(aboba, f"Обработка завершена")
+    set_status_ok(aboba, "Обработка завершена")
     schedule_status_reset(aboba, 5)
 
     return df
