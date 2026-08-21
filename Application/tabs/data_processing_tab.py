@@ -1,5 +1,7 @@
 import os
 import json
+import sys
+import tempfile
 import chardet
 import pandas as pd
 from PyQt6.QtCore import Qt, QSize
@@ -1923,7 +1925,55 @@ def load_csv_file(aboba):
             return df
 
         def _save(df: pd.DataFrame, save_path: str) -> None:
-            df.to_csv(save_path, index=False, sep="|", encoding="utf-8-sig")
+            save_dir = os.path.dirname(os.path.abspath(save_path))
+            temp_fd = None
+            temp_path = None
+
+            try:
+                temp_fd, temp_path = tempfile.mkstemp(
+                    dir=save_dir,
+                    prefix=f".{os.path.basename(save_path)}.",
+                    suffix=".tmp",
+                )
+                try:
+                    os.close(temp_fd)
+                finally:
+                    # Не закрываем дескриптор повторно, если os.close() вызвал исключение.
+                    temp_fd = None
+
+                df.to_csv(temp_path, index=False, sep="|", encoding="utf-8-sig")
+                os.replace(temp_path, save_path)
+                temp_path = None
+            except BaseException:
+                cleanup_errors = []
+
+                if temp_fd is not None:
+                    try:
+                        os.close(temp_fd)
+                    except OSError as cleanup_error:
+                        cleanup_errors.append(("close", cleanup_error))
+
+                if temp_path is not None:
+                    try:
+                        os.remove(temp_path)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as cleanup_error:
+                        cleanup_errors.append(("remove", cleanup_error))
+
+                for cleanup_action, cleanup_error in cleanup_errors:
+                    try:
+                        print(
+                            "Temporary CSV cleanup failed "
+                            f"({cleanup_action}, path={temp_path!a}): "
+                            f"{cleanup_error!a}",
+                            file=sys.stderr,
+                        )
+                    except Exception:
+                        # Диагностика cleanup не должна скрывать исходную ошибку.
+                        pass
+
+                raise
 
         def _append_or_overwrite(df: pd.DataFrame, save_path: str) -> pd.DataFrame:
 
@@ -1933,13 +1983,9 @@ def load_csv_file(aboba):
 
             # mode == "Добавить данные к существующему"
             if os.path.exists(save_path):
-                try:
-                    df_old = pd.read_csv(save_path, sep="|", encoding="utf-8-sig", dtype=str)
-                    df_old = _sanitize_df(df_old)
-                    df = pd.concat([df_old, df], ignore_index=True)
-                except Exception:
-                    # Если файл поврежден/кодировка/структура — просто перезапишем
-                    pass
+                df_old = pd.read_csv(save_path, sep="|", encoding="utf-8-sig", dtype=str)
+                df_old = _sanitize_df(df_old)
+                df = pd.concat([df_old, df], ignore_index=True)
 
             _save(df, save_path)
             return df
