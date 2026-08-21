@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -708,69 +710,209 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
 
 
 # ============================= Saving / Loading =============================
+_MODEL_REQUIRED_CHECKPOINT_KEYS = {
+    "model_type",
+    "config",
+    "num_users",
+    "num_items",
+    "state_dict",
+}
+
+
+def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
+    if not isinstance(mappings, dict):
+        raise ValueError("mappings.json must contain a JSON object")
+
+    idx2user = mappings.get("idx2user")
+    idx2item = mappings.get("idx2item")
+    if not isinstance(idx2user, list):
+        raise ValueError("mappings.json field 'idx2user' must be a list")
+    if not isinstance(idx2item, list):
+        raise ValueError("mappings.json field 'idx2item' must be a list")
+
+    if not isinstance(checkpoint, dict):
+        raise ValueError("bprmf.pt must contain a checkpoint dictionary")
+    missing_keys = _MODEL_REQUIRED_CHECKPOINT_KEYS.difference(checkpoint)
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(f"bprmf.pt is missing required keys: {missing}")
+
+    if len(idx2user) != checkpoint["num_users"]:
+        raise ValueError(
+            "Model artifact mismatch: len(idx2user) does not equal num_users"
+        )
+    if len(idx2item) != checkpoint["num_items"]:
+        raise ValueError(
+            "Model artifact mismatch: len(idx2item) does not equal num_items"
+        )
+
+
+def _resolve_model_artifact_paths(model_dir: str) -> Tuple[str, str]:
+    out_dir = os.path.join(os.getcwd(), model_dir)
+    current_path = os.path.join(out_dir, "current.json")
+
+    if os.path.exists(current_path):
+        with open(current_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        if not isinstance(manifest, dict):
+            raise ValueError("Model current.json must contain a JSON object")
+        generation = manifest.get("generation")
+        if not isinstance(generation, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]+", generation
+        ):
+            raise ValueError("Model current.json contains an invalid generation")
+
+        artifact_dir = os.path.join(out_dir, "runs", generation)
+    else:
+        artifact_dir = out_dir
+
+    return (
+        os.path.join(artifact_dir, "mappings.json"),
+        os.path.join(artifact_dir, "bprmf.pt"),
+    )
+
+
+def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
+    try:
+        print(
+            f"[{_now()}] Failed to clean up model staging path '{path}': {error}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
 def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
 
     out_dir = os.path.join(os.getcwd(), "Модель")
     _ensure_dir(out_dir)
+    staging_root = os.path.join(out_dir, ".staging")
+    runs_dir = os.path.join(out_dir, "runs")
+    _ensure_dir(staging_root)
+    _ensure_dir(runs_dir)
 
-    with open(os.path.join(out_dir, "mappings.json"), "w", encoding="utf-8") as f:
-        json.dump({"idx2user": maps.idx2user, "idx2item": maps.idx2item}, f, ensure_ascii=False)
+    generation = uuid.uuid4().hex
+    staging_dir = os.path.join(staging_root, generation)
+    generation_dir = os.path.join(runs_dir, generation)
+    current_path = os.path.join(out_dir, "current.json")
+    manifest_temp_path = os.path.join(
+        out_dir,
+        f".current.{generation}.tmp",
+    )
 
-    ckpt = {
-        "model_type": "bprmf",
-        "config": cfg.__dict__,
-        "num_users": len(maps.idx2user),
-        "num_items": len(maps.idx2item),
-        "state_dict": model.state_dict(),
-    }
+    staging_created = False
+    generation_finalized = False
+    manifest_temp_created = False
 
-    # save item features for consistent inference/evaluation
-    feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
-    ckpt["feat2idx"] = feat2idx
-    ckpt["item_feat_mat"] = item_feat_np
-    ckpt["item_feature_cols"] = getattr(cfg, "item_feature_cols", [])
-    ckpt["max_item_features"] = int(getattr(cfg, "max_item_features", 32))
-
-    # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
-    # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
     try:
-        train_item_meta: Dict[str, Dict[str, str]] = {}
-        nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
-        if os.path.isfile(nom_path):
-            nom = _read_csv_pipe(nom_path)
-            nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
+        os.makedirs(staging_dir)
+        staging_created = True
+        mappings_path = os.path.join(staging_dir, "mappings.json")
+        checkpoint_path = os.path.join(staging_dir, "bprmf.pt")
 
-            want_cols = [
-                "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
-                "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
-                "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
-            ]
-            cols = [c for c in want_cols if c in nom.columns]
-            if "КодНоменклатуры" in cols:
-                sub = nom[cols].copy()
-                sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
-                sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
+        with open(mappings_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"idx2user": maps.idx2user, "idx2item": maps.idx2item},
+                f,
+                ensure_ascii=False,
+            )
 
-                for code in maps.idx2item:
-                    if code in sub.index:
-                        row = sub.loc[code].to_dict()
-                        # гарантируем строковые значения
-                        train_item_meta[str(code)] = {k: ("" if row.get(k) is None else str(row.get(k))) for k in
-                                                      row.keys()}
+        ckpt = {
+            "model_type": "bprmf",
+            "config": cfg.__dict__,
+            "num_users": len(maps.idx2user),
+            "num_items": len(maps.idx2item),
+            "state_dict": model.state_dict(),
+        }
 
-        ckpt["train_item_meta"] = train_item_meta
+        # save item features for consistent inference/evaluation
+        feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
+        ckpt["feat2idx"] = feat2idx
+        ckpt["item_feat_mat"] = item_feat_np
+        ckpt["item_feature_cols"] = getattr(cfg, "item_feature_cols", [])
+        ckpt["max_item_features"] = int(getattr(cfg, "max_item_features", 32))
 
+        # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
+        # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
+        try:
+            train_item_meta: Dict[str, Dict[str, str]] = {}
+            nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
+            if os.path.isfile(nom_path):
+                nom = _read_csv_pipe(nom_path)
+                nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
+
+                want_cols = [
+                    "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
+                    "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
+                    "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
+                ]
+                cols = [c for c in want_cols if c in nom.columns]
+                if "КодНоменклатуры" in cols:
+                    sub = nom[cols].copy()
+                    sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
+                    sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
+
+                    for code in maps.idx2item:
+                        if code in sub.index:
+                            row = sub.loc[code].to_dict()
+                            # гарантируем строковые значения
+                            train_item_meta[str(code)] = {
+                                k: ("" if row.get(k) is None else str(row.get(k)))
+                                for k in row.keys()
+                            }
+
+            ckpt["train_item_meta"] = train_item_meta
+
+        except Exception:
+            ckpt["train_item_meta"] = {}
+
+        with open(mappings_path, "r", encoding="utf-8") as f:
+            saved_mappings = json.load(f)
+        _validate_model_artifacts(saved_mappings, ckpt)
+
+        with open(checkpoint_path, "wb") as f:
+            torch.save(ckpt, f)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if not os.path.isfile(checkpoint_path) or os.path.getsize(checkpoint_path) <= 0:
+            raise OSError("Failed to create a complete bprmf.pt checkpoint")
+
+        os.rename(staging_dir, generation_dir)
+        generation_finalized = True
+
+        with open(manifest_temp_path, "w", encoding="utf-8") as f:
+            manifest_temp_created = True
+            json.dump({"generation": generation}, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(manifest_temp_path, current_path)
+        manifest_temp_created = False
     except Exception:
+        if (
+            staging_created
+            and not generation_finalized
+            and os.path.isdir(staging_dir)
+        ):
+            try:
+                shutil.rmtree(staging_dir)
+            except OSError as cleanup_error:
+                _diagnose_artifact_cleanup_error(staging_dir, cleanup_error)
 
-        ckpt["train_item_meta"] = {}
-
-    torch.save(ckpt, os.path.join(out_dir, "bprmf.pt"))
+        if manifest_temp_created and os.path.exists(manifest_temp_path):
+            try:
+                os.remove(manifest_temp_path)
+            except OSError as cleanup_error:
+                _diagnose_artifact_cleanup_error(
+                    manifest_temp_path, cleanup_error
+                )
+        raise
 
 
 def _load_artifacts(model_dir: str = "Модель") -> Tuple[Dict[str, List[str]], dict]:
-    out_dir = os.path.join(os.getcwd(), model_dir)
-    mappings_path = os.path.join(out_dir, "mappings.json")
-    ckpt_path = os.path.join(out_dir, "bprmf.pt")
+    mappings_path, ckpt_path = _resolve_model_artifact_paths(model_dir)
 
     if not (os.path.isfile(mappings_path) and os.path.isfile(ckpt_path)):
         raise FileNotFoundError("Не найдена обученная модель, необходимо выполнить обучение.")
@@ -779,6 +921,7 @@ def _load_artifacts(model_dir: str = "Модель") -> Tuple[Dict[str, List[str
         maps_json = json.load(f)
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    _validate_model_artifacts(maps_json, ckpt)
     return maps_json, ckpt
 
 
@@ -1928,21 +2071,12 @@ def export_recommendations_excel(
 
         return ranked_indices
 
-    mappings_path = os.path.join(model_dir, "mappings.json")
-    ckpt_path = os.path.join(model_dir, "bprmf.pt")
-
-    if not (os.path.isfile(mappings_path) and os.path.isfile(ckpt_path)):
-        raise FileNotFoundError(f"Не найдены файлы модели: {mappings_path} и/или {ckpt_path}")
-
-    with open(mappings_path, "r", encoding="utf-8") as f:
-        maps_json = json.load(f)
+    maps_json, ckpt = _load_artifacts(model_dir)
 
     idx2user: List[str] = maps_json["idx2user"]
     idx2item: List[str] = maps_json["idx2item"]
     user2idx = {u: i for i, u in enumerate(idx2user)}
     item2idx = {it: i for i, it in enumerate(idx2item)}
-
-    ckpt = torch.load(ckpt_path, map_location="cpu")
 
     device = torch.device(device_str if (device_str == "cpu" or torch.cuda.is_available()) else "cpu")
     model, cfg, num_users, num_items = _build_model_from_ckpt(ckpt, device)
