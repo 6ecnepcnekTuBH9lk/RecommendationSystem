@@ -1094,7 +1094,7 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
 
 # ============================= Training entry point (UI button) =============================
 
-def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
+def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
     cfg = cfg or TrainConfig()
     _set_seed(cfg.seed)
 
@@ -1110,7 +1110,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
         for p in missing:
             print(f"  - {p}")
         print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
-        return
+        return False
 
     orders = _read_csv_pipe(orders_path)
     views = _read_csv_pipe(views_path)
@@ -1128,7 +1128,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
     events = _collect_user_item_events(orders, views, fav, maps, cfg)
     if len(events) == 0:
         print(f"[{_now()}] Не найдено взаимодействий пользователь-товар.")
-        return
+        return False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device_label = "GPU (графический процессор, видеокарта)" if device.type == "cuda" else "CPU (центральный процессор)"
@@ -1136,6 +1136,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
 
     model, _splits = train_bprmf(maps, events, cfg, device)
     _save_artifacts(cfg, maps, model)
+    return True
 
 
 def train_recommender(*_args, **_kwargs) -> None:
@@ -1156,6 +1157,9 @@ def train_recommender(*_args, **_kwargs) -> None:
 
 
 # ============================= CLI =============================
+
+TRAIN_EXIT_SUCCESS = 0
+TRAIN_EXIT_NO_DATA = 2
 
 
 def _load_train_config_from_json(path: str) -> TrainConfig:
@@ -2616,14 +2620,25 @@ def export_recommendations_excel(
     return out_xlsx
 
 
-if __name__ == "__main__":
-    do_train, mindbox, k, config_path = _parse_cli(sys.argv[1:])
+def main(argv: Optional[List[str]] = None) -> int:
+    do_train, mindbox, k, config_path = _parse_cli(
+        sys.argv[1:] if argv is None else argv
+    )
 
     if do_train:
         cfg = _load_train_config_from_json(config_path) if config_path else TrainConfig()
-        _train_in_this_process(cfg)
-        # hard-exit helps avoid rare native crashes during Python shutdown on Windows
-        os._exit(0)
+        trained = _train_in_this_process(cfg)
+        return TRAIN_EXIT_SUCCESS if trained else TRAIN_EXIT_NO_DATA
 
     if mindbox is not None:
         print_recommendations(mindbox, k=k)
+
+    return TRAIN_EXIT_SUCCESS
+
+
+if __name__ == "__main__":
+    cli_args = sys.argv[1:]
+    if "--train" in cli_args:
+        # hard-exit helps avoid rare native crashes during Python shutdown on Windows
+        os._exit(main(cli_args))
+    raise SystemExit(main(cli_args))
