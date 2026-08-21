@@ -1163,19 +1163,67 @@ TRAIN_EXIT_NO_DATA = 2
 
 
 def _load_train_config_from_json(path: str) -> TrainConfig:
-    cfg = TrainConfig()
     if not path:
-        return cfg
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Apply only known fields (ignore everything else)
-        allowed = set(cfg.__dict__.keys())
-        for k, v in data.items():
-            if k in allowed:
-                setattr(cfg, k, v)
-    except Exception as e:
-        print(f"[{_now()}] WARNING: failed to load train config from '{path}': {e}. Using defaults.")
+        raise ValueError("Train config path must not be empty")
+
+    cfg = TrainConfig()
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise TypeError("Train config root must be a JSON object")
+
+    string_fields = {"data_dir", "early_stop_metric", "feature_norm"}
+    boolean_fields = {"early_stop", "use_item_features"}
+    integer_fields = {
+        "embedding_dim",
+        "epochs",
+        "batch_size",
+        "n_neg",
+        "seed",
+        "topk",
+        "min_user_interactions_for_eval",
+        "early_stop_patience",
+        "early_stop_min_epochs",
+        "max_item_features",
+    }
+    float_fields = {
+        "w_view_item",
+        "w_favorite",
+        "w_purchase",
+        "lr",
+        "weight_decay",
+        "bpr_reg",
+        "early_stop_min_delta",
+        "feature_dropout",
+        "feature_scale",
+        "feat_reg_mult",
+    }
+    list_fields = {"item_feature_cols"}
+
+    allowed = set(cfg.__dict__.keys())
+    for key, value in data.items():
+        if key not in allowed:
+            continue
+
+        if key in string_fields and not isinstance(value, str):
+            raise TypeError(f"Train config field '{key}' must be a string")
+        if key in boolean_fields and type(value) is not bool:
+            raise TypeError(f"Train config field '{key}' must be a boolean")
+        if key in integer_fields and type(value) is not int:
+            raise TypeError(f"Train config field '{key}' must be an integer")
+        if key in float_fields:
+            if type(value) not in (int, float):
+                raise TypeError(f"Train config field '{key}' must be a number")
+            value = float(value)
+        if key in list_fields and (
+            not isinstance(value, list)
+            or any(not isinstance(item, str) for item in value)
+        ):
+            raise TypeError(f"Train config field '{key}' must be a list of strings")
+
+        setattr(cfg, key, value)
+
     return cfg
 
 
@@ -1187,6 +1235,12 @@ def _parse_cli(argv: List[str]) -> Tuple[bool, Optional[str], int, Optional[str]
 
     if "--config" in argv:
         i = argv.index("--config")
+        if do_train and (
+            i + 1 >= len(argv)
+            or not argv[i + 1]
+            or argv[i + 1].startswith("--")
+        ):
+            raise ValueError("--config requires a path")
         if i + 1 < len(argv):
             config_path = argv[i + 1]
 
@@ -2626,7 +2680,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if do_train:
-        cfg = _load_train_config_from_json(config_path) if config_path else TrainConfig()
+        cfg = (
+            _load_train_config_from_json(config_path)
+            if config_path is not None
+            else TrainConfig()
+        )
         trained = _train_in_this_process(cfg)
         return TRAIN_EXIT_SUCCESS if trained else TRAIN_EXIT_NO_DATA
 

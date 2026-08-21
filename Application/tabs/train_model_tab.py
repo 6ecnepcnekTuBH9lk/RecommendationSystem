@@ -503,14 +503,15 @@ def start_training_process(aboba):
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(cfg_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        # if something goes wrong, fall back to defaults in trainer
-        cfg_path = None
         if hasattr(aboba, "train_log"):
             aboba.train_log.append(f"Не удалось сформировать перечень входных параметров обучения из формы: {e}\n")
+        set_status_error(aboba, "Не удалось подготовить параметры обучения")
+        schedule_status_reset(aboba, 5)
+        aboba.start_train.setEnabled(True)
+        return
 
     args = ["-u", script, "--train"]
-    if cfg_path:
-        args += ["--config", cfg_path]
+    args += ["--config", cfg_path]
 
     aboba.train_proc.setArguments(args)
 
