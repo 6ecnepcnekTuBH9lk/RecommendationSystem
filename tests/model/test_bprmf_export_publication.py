@@ -1,4 +1,5 @@
 import csv
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -150,6 +151,65 @@ def test_inference_error_keeps_existing_outputs_byte_for_byte(
 
     _assert_old_outputs(paths, old_bytes)
     _assert_no_export_temps(tmp_path)
+
+
+def test_broken_selected_collection_settings_preserve_existing_outputs(
+    tmp_path, monkeypatch
+):
+    real_settings_loader = BPRMF._load_selected_collections_from_settings
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    (settings_dir / "filter_settings.json").write_text(
+        '{"seasons_selected": [',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_selected_collections_from_settings",
+        real_settings_loader,
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        _run_export(paths)
+
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
+def test_missing_selected_collection_settings_still_allow_export(
+    tmp_path, monkeypatch
+):
+    real_settings_loader = BPRMF._load_selected_collections_from_settings
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_selected_collections_from_settings",
+        real_settings_loader,
+    )
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+
+def test_valid_empty_selected_collection_settings_still_allow_export(
+    tmp_path, monkeypatch
+):
+    real_settings_loader = BPRMF._load_selected_collections_from_settings
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    (settings_dir / "filter_settings.json").write_text(
+        json.dumps({"seasons_selected": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_selected_collections_from_settings",
+        real_settings_loader,
+    )
+
+    assert _run_export(paths) == str(paths["xlsx"])
 
 
 def test_current_stock_read_error_does_not_fallback_or_publish(

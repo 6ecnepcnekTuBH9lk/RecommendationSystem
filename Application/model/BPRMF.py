@@ -973,14 +973,11 @@ def _load_selected_collections_from_settings() -> List[str]:
     path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
     if not os.path.isfile(path):
         return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        vals = data.get("collections_selected") or data.get("seasons_selected") or []
-        out = [_norm_text(v) for v in vals if _norm_text(v)]
-        return out
-    except Exception:
-        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    vals = data.get("collections_selected") or data.get("seasons_selected") or []
+    out = [_norm_text(v) for v in vals if _norm_text(v)]
+    return out
 
 
 def _similarity_score(old_meta: Dict[str, str], new_meta: Dict[str, str]) -> float:
