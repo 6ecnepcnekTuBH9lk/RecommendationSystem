@@ -834,37 +834,38 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
 
         # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
         # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
-        try:
-            train_item_meta: Dict[str, Dict[str, str]] = {}
-            nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
-            if os.path.isfile(nom_path):
-                nom = _read_csv_pipe(nom_path)
-                nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
+        train_item_meta: Dict[str, Dict[str, str]] = {}
+        nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
+        if os.path.isfile(nom_path):
+            nom = _read_csv_pipe(nom_path)
+            nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
 
-                want_cols = [
-                    "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
-                    "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
-                    "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
-                ]
-                cols = [c for c in want_cols if c in nom.columns]
-                if "КодНоменклатуры" in cols:
-                    sub = nom[cols].copy()
-                    sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
-                    sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
+            if "КодНоменклатуры" not in nom.columns:
+                raise ValueError(
+                    "Номенклатура.csv не содержит обязательную колонку "
+                    "КодНоменклатуры"
+                )
 
-                    for code in maps.idx2item:
-                        if code in sub.index:
-                            row = sub.loc[code].to_dict()
-                            # гарантируем строковые значения
-                            train_item_meta[str(code)] = {
-                                k: ("" if row.get(k) is None else str(row.get(k)))
-                                for k in row.keys()
-                            }
+            want_cols = [
+                "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
+                "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
+                "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
+            ]
+            cols = [c for c in want_cols if c in nom.columns]
+            sub = nom[cols].copy()
+            sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
+            sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
 
-            ckpt["train_item_meta"] = train_item_meta
+            for code in maps.idx2item:
+                if code in sub.index:
+                    row = sub.loc[code].to_dict()
+                    # гарантируем строковые значения
+                    train_item_meta[str(code)] = {
+                        k: ("" if row.get(k) is None else str(row.get(k)))
+                        for k in row.keys()
+                    }
 
-        except Exception:
-            ckpt["train_item_meta"] = {}
+        ckpt["train_item_meta"] = train_item_meta
 
         with open(mappings_path, "r", encoding="utf-8") as f:
             saved_mappings = json.load(f)

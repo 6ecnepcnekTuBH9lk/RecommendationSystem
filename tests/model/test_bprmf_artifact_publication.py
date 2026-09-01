@@ -3,6 +3,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import torch
 
@@ -23,6 +24,15 @@ def _synthetic_mappings(generation="new"):
         idx2user=[f"{generation}-user"],
         item2idx={f"{generation}-item": 0},
         idx2item=[f"{generation}-item"],
+    )
+
+
+def _metadata_mappings(items):
+    return BPRMF.Mappings(
+        user2idx={"synthetic-user": 0},
+        idx2user=["synthetic-user"],
+        item2idx={item: index for index, item in enumerate(items)},
+        idx2item=list(items),
     )
 
 
@@ -143,6 +153,226 @@ def test_checkpoint_preparation_error_keeps_current_generation(
     assert mappings["idx2user"] == ["generation-a-user"]
     assert checkpoint["state_dict"]["generation"] == "generation-a"
     assert list((_model_dir / ".staging").iterdir()) == []
+
+
+def test_missing_nomenclature_publishes_empty_train_item_meta(
+    tmp_path, monkeypatch, lightweight_artifact_preparation
+):
+    monkeypatch.chdir(tmp_path)
+
+    BPRMF._save_artifacts(
+        BPRMF.TrainConfig(data_dir=str(tmp_path / "missing-data")),
+        _metadata_mappings(["A"]),
+        _SyntheticModel(),
+    )
+
+    _mappings, checkpoint = BPRMF._load_artifacts()
+    assert checkpoint["train_item_meta"] == {}
+    assert (tmp_path / "Модель" / "current.json").is_file()
+
+
+def test_valid_nomenclature_preserves_train_item_meta_semantics(
+    tmp_path, monkeypatch, lightweight_artifact_preparation
+):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "synthetic-data"
+    data_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "КодНоменклатуры": "A",
+                "Коллекция": "old-a",
+                "Марка": "brand-a",
+            },
+            {
+                "КодНоменклатуры": "A",
+                "Коллекция": "new-a",
+                "Марка": "brand-a-new",
+            },
+            {
+                "КодНоменклатуры": "B",
+                "Коллекция": "collection-b",
+                "Марка": "brand-b",
+            },
+            {
+                "КодНоменклатуры": "C",
+                "Коллекция": "collection-c",
+                "Марка": "brand-c",
+            },
+        ]
+    ).to_csv(
+        data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    BPRMF._save_artifacts(
+        BPRMF.TrainConfig(data_dir=str(data_dir)),
+        _metadata_mappings(["A", "B"]),
+        _SyntheticModel(),
+    )
+
+    _mappings, checkpoint = BPRMF._load_artifacts()
+    assert checkpoint["train_item_meta"] == {
+        "A": {
+            "Коллекция": "new-a",
+            "Марка": "brand-a-new",
+        },
+        "B": {
+            "Коллекция": "collection-b",
+            "Марка": "brand-b",
+        },
+    }
+
+
+def test_valid_empty_nomenclature_publishes_empty_train_item_meta(
+    tmp_path, monkeypatch, lightweight_artifact_preparation
+):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "synthetic-data"
+    data_dir.mkdir()
+    pd.DataFrame(
+        [{"КодНоменклатуры": "not-in-model", "Коллекция": "synthetic"}]
+    ).to_csv(
+        data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    BPRMF._save_artifacts(
+        BPRMF.TrainConfig(data_dir=str(data_dir)),
+        _metadata_mappings(["model-item"]),
+        _SyntheticModel(),
+    )
+
+    _mappings, checkpoint = BPRMF._load_artifacts()
+    assert checkpoint["train_item_meta"] == {}
+
+
+def test_train_item_meta_permission_error_keeps_current_generation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    model_dir, manifest_path, old_manifest_bytes = _prepare_current_generation(
+        tmp_path
+    )
+    data_dir = tmp_path / "synthetic-data"
+    data_dir.mkdir()
+    nomenclature_path = data_dir / "Номенклатура.csv"
+    nomenclature_path.write_text(
+        "КодНоменклатуры|Коллекция\nnew-item|synthetic\n",
+        encoding="utf-8-sig",
+    )
+
+    def fail_metadata_read(path):
+        assert Path(path) == nomenclature_path
+        raise PermissionError("synthetic train metadata failure")
+
+    monkeypatch.setattr(BPRMF, "_read_csv_pipe", fail_metadata_read)
+
+    with pytest.raises(PermissionError, match="synthetic train metadata failure"):
+        BPRMF._save_artifacts(
+            BPRMF.TrainConfig(
+                data_dir=str(data_dir),
+                use_item_features=False,
+            ),
+            _metadata_mappings(["new-item"]),
+            _SyntheticModel(),
+        )
+
+    assert manifest_path.read_bytes() == old_manifest_bytes
+    mappings, checkpoint = BPRMF._load_artifacts()
+    assert mappings["idx2user"] == ["generation-a-user"]
+    assert checkpoint["state_dict"]["generation"] == "generation-a"
+    assert list((model_dir / ".staging").iterdir()) == []
+
+
+def test_train_item_meta_propagates_parser_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "synthetic-data"
+    data_dir.mkdir()
+    (data_dir / "Номенклатура.csv").write_text(
+        "КодНоменклатуры|Коллекция\nnew-item|synthetic\n",
+        encoding="utf-8-sig",
+    )
+
+    def fail_metadata_read(path):
+        raise pd.errors.ParserError("synthetic train metadata parser failure")
+
+    monkeypatch.setattr(BPRMF, "_read_csv_pipe", fail_metadata_read)
+
+    with pytest.raises(
+        pd.errors.ParserError,
+        match="synthetic train metadata parser failure",
+    ):
+        BPRMF._save_artifacts(
+            BPRMF.TrainConfig(
+                data_dir=str(data_dir),
+                use_item_features=False,
+            ),
+            _metadata_mappings(["new-item"]),
+            _SyntheticModel(),
+        )
+
+
+def test_train_item_meta_propagates_processing_error_after_successful_read(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "synthetic-data"
+    data_dir.mkdir()
+    pd.DataFrame(
+        [{"КодНоменклатуры": "new-item", "Коллекция": "synthetic"}]
+    ).to_csv(
+        data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    def fail_drop_duplicates(self, *args, **kwargs):
+        raise RuntimeError("synthetic train metadata processing failure")
+
+    monkeypatch.setattr(pd.DataFrame, "drop_duplicates", fail_drop_duplicates)
+
+    with pytest.raises(
+        RuntimeError,
+        match="synthetic train metadata processing failure",
+    ):
+        BPRMF._save_artifacts(
+            BPRMF.TrainConfig(
+                data_dir=str(data_dir),
+                use_item_features=False,
+            ),
+            _metadata_mappings(["new-item"]),
+            _SyntheticModel(),
+        )
+
+
+def test_existing_nomenclature_without_item_code_column_is_rejected(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "synthetic-data"
+    data_dir.mkdir()
+    pd.DataFrame([{"Коллекция": "synthetic"}]).to_csv(
+        data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    with pytest.raises(ValueError, match="КодНоменклатуры"):
+        BPRMF._save_artifacts(
+            BPRMF.TrainConfig(
+                data_dir=str(data_dir),
+                use_item_features=False,
+            ),
+            _metadata_mappings(["new-item"]),
+            _SyntheticModel(),
+        )
 
 
 def test_partial_torch_save_keeps_current_generation(
