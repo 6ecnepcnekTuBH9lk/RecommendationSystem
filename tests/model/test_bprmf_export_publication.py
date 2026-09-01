@@ -25,7 +25,13 @@ class _SyntheticExportModel:
         return torch.ones((len(user_indices), 1), dtype=torch.float32)
 
 
-def _prepare_synthetic_export(tmp_path, monkeypatch, *, model=None):
+def _prepare_synthetic_export(
+    tmp_path,
+    monkeypatch,
+    *,
+    model=None,
+    train_item_meta=None,
+):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "synthetic-data"
     data_dir.mkdir()
@@ -52,7 +58,7 @@ def _prepare_synthetic_export(tmp_path, monkeypatch, *, model=None):
         "idx2user": ["user-1"],
         "idx2item": ["item-1"],
     }
-    checkpoint = {"train_item_meta": {}}
+    checkpoint = {"train_item_meta": train_item_meta or {}}
     export_model = model or _SyntheticExportModel()
 
     monkeypatch.setattr(
@@ -134,6 +140,27 @@ def _read_csv_rows(path):
         return list(csv.reader(file_object, delimiter=";"))
 
 
+def _read_xlsx_rows(path):
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        return list(workbook["Рекомендации"].iter_rows(values_only=True))
+    finally:
+        workbook.close()
+
+
+def _sequential_name_loader(results):
+    calls = []
+
+    def load(data_dir):
+        calls.append(Path(data_dir).resolve())
+        result = results[len(calls) - 1]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    return load, calls
+
+
 def test_inference_error_keeps_existing_outputs_byte_for_byte(
     tmp_path, monkeypatch
 ):
@@ -151,6 +178,197 @@ def test_inference_error_keeps_existing_outputs_byte_for_byte(
 
     _assert_old_outputs(paths, old_bytes)
     _assert_no_export_temps(tmp_path)
+
+
+def test_export_keeps_first_names_when_second_load_fails(
+    tmp_path, monkeypatch, capsys
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    loader, calls = _sequential_name_loader([
+        {"item-1": "First successful name"},
+        PermissionError("synthetic second item names failure"),
+    ])
+    monkeypatch.setattr(BPRMF, "_load_item_names", loader)
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    assert len(calls) == 2
+    assert _read_xlsx_rows(paths["xlsx"])[1][5] == "First successful name"
+    diagnostic = capsys.readouterr().err
+    assert diagnostic.count("Не удалось загрузить названия товаров") == 1
+    assert "synthetic second item names failure" in diagnostic
+
+
+def test_export_uses_second_names_when_first_load_fails(
+    tmp_path, monkeypatch, capsys
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    loader, calls = _sequential_name_loader([
+        PermissionError("synthetic first item names failure"),
+        {"item-1": "Second successful name"},
+    ])
+    monkeypatch.setattr(BPRMF, "_load_item_names", loader)
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    assert len(calls) == 2
+    assert _read_xlsx_rows(paths["xlsx"])[1][5] == "Second successful name"
+    diagnostic = capsys.readouterr().err
+    assert diagnostic.count("Не удалось загрузить названия товаров") == 1
+    assert "synthetic first item names failure" in diagnostic
+
+
+def test_export_both_name_loads_fail_once_and_use_training_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    paths = _prepare_synthetic_export(
+        tmp_path,
+        monkeypatch,
+        train_item_meta={
+            "item-1": {"НазваниеНаСайте": "Training fallback name"}
+        },
+    )
+    valid_loader, _calls = _sequential_name_loader([
+        {"item-1": "Baseline item name"},
+        {"item-1": "Baseline item name"},
+    ])
+    monkeypatch.setattr(BPRMF, "_load_item_names", valid_loader)
+    assert _run_export(paths) == str(paths["xlsx"])
+    baseline_csv1 = paths["csv1"].read_bytes()
+    baseline_csv2 = paths["csv2"].read_bytes()
+    capsys.readouterr()
+
+    failing_loader, calls = _sequential_name_loader([
+        PermissionError("synthetic first item names failure"),
+        pd.errors.ParserError("synthetic second item names failure"),
+    ])
+    monkeypatch.setattr(BPRMF, "_load_item_names", failing_loader)
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    assert len(calls) == 2
+    assert paths["csv1"].read_bytes() == baseline_csv1
+    assert paths["csv2"].read_bytes() == baseline_csv2
+    assert _read_xlsx_rows(paths["xlsx"])[1][5] == "Training fallback name"
+    diagnostic = capsys.readouterr().err
+    assert diagnostic.count("Не удалось загрузить названия товаров") == 1
+    assert "synthetic first item names failure" in diagnostic
+
+
+def test_export_name_failure_without_fallback_keeps_row_and_empty_name(
+    tmp_path, monkeypatch, capsys
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    failing_loader, _calls = _sequential_name_loader([
+        PermissionError("synthetic item names failure"),
+        PermissionError("synthetic item names failure"),
+    ])
+    monkeypatch.setattr(BPRMF, "_load_item_names", failing_loader)
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    row = _read_xlsx_rows(paths["xlsx"])[1]
+    assert row[4] == "item-1"
+    assert row[5] is None
+    assert _read_csv_rows(paths["csv1"])[1] == ["79001234567", "item-1"]
+    assert _read_csv_rows(paths["csv2"])[1][2] == "item-1"
+    assert capsys.readouterr().err.count(
+        "Не удалось загрузить названия товаров"
+    ) == 1
+
+
+def test_export_without_item_names_does_not_call_loader(tmp_path, monkeypatch):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+
+    def fail_if_called(data_dir):
+        raise AssertionError("item names loader must not be called")
+
+    monkeypatch.setattr(BPRMF, "_load_item_names", fail_if_called)
+
+    assert _run_export(paths, include_item_names=False) == str(paths["xlsx"])
+
+    rows = _read_xlsx_rows(paths["xlsx"])
+    assert "НазваниеНоменклатуры_1" not in rows[0]
+    assert _read_csv_rows(paths["csv1"])[1] == ["79001234567", "item-1"]
+
+
+def test_export_name_failure_uses_current_name_for_seasonally_mapped_item(
+    tmp_path, monkeypatch, capsys
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    cfg = BPRMF.TrainConfig(
+        data_dir=str(tmp_path / "synthetic-data"),
+        topk=1,
+    )
+    mappings = {
+        "idx2user": ["user-1"],
+        "idx2item": ["old-item"],
+    }
+    checkpoint = {
+        "train_item_meta": {
+            "old-item": {
+                "Коллекция": "Весна-Лето 2025",
+                "ВидНоменклатуры": "Jacket",
+                "НазваниеНаСайте": "Old item name",
+            }
+        }
+    }
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_artifacts",
+        lambda model_dir="Модель": (mappings, checkpoint),
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_build_model_from_ckpt",
+        lambda loaded_checkpoint, device: (
+            _SyntheticExportModel(),
+            cfg,
+            1,
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_selected_collections_from_settings",
+        lambda: ["Весна-Лето 2026"],
+    )
+    current_dir = tmp_path / "ВходныеДанные"
+    current_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "КодНоменклатуры": "new-item",
+                "Коллекция": "Весна-Лето 2026",
+                "ВидНоменклатуры": "Jacket",
+                "НазваниеНаСайте": "Current mapped name",
+                "Остаток": "150",
+            }
+        ]
+    ).to_csv(
+        current_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_item_stocks",
+        lambda data_dir: {"new-item": "150"},
+    )
+    failing_loader, _calls = _sequential_name_loader([
+        PermissionError("synthetic item names failure"),
+        PermissionError("synthetic item names failure"),
+    ])
+    monkeypatch.setattr(BPRMF, "_load_item_names", failing_loader)
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    row = _read_xlsx_rows(paths["xlsx"])[1]
+    assert row[4] == "new-item"
+    assert row[5] == "Current mapped name"
+    assert capsys.readouterr().err.count(
+        "Не удалось загрузить названия товаров"
+    ) == 1
 
 
 def test_broken_selected_collection_settings_preserve_existing_outputs(

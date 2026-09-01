@@ -1015,10 +1015,7 @@ def _load_item_names(data_dir: str) -> Dict[str, str]:
     nom_path = os.path.join(data_dir, "Номенклатура.csv")
     if not os.path.isfile(nom_path):
         return {}
-    try:
-        nom = _read_csv_pipe(nom_path)
-    except Exception:
-        return {}
+    nom = _read_csv_pipe(nom_path)
 
     if "КодНоменклатуры" not in nom.columns:
         return {}
@@ -1188,7 +1185,15 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
         return
 
     seen_idx = _user_seen_items_from_processed(cfg.data_dir, mindbox_id, item2idx, cfg)
-    names = _load_item_names(cfg.data_dir)
+    try:
+        names = _load_item_names(cfg.data_dir)
+    except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        print(
+            f"[{_now()}] Не удалось загрузить названия товаров: {exc}. "
+            "Рекомендации будут выведены без названий.",
+            file=sys.stderr,
+        )
+        names = {}
 
     num_users = int(ckpt["num_users"])
     num_items = int(ckpt["num_items"])
@@ -2370,13 +2375,42 @@ def export_recommendations_excel(
             f"в итоговой выгрузке не установлено."
         )
 
-    item_names: Dict[str, str] = (
-        _load_item_names(data_dir)
-        if include_item_names
-        else {}
-    )
+    item_names: Dict[str, str] = {}
+    item_names_warning_emitted = False
+    if include_item_names:
+        try:
+            item_names = _load_item_names(data_dir)
+        except (
+            OSError,
+            UnicodeError,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+        ) as exc:
+            print(
+                f"[{_now()}] Не удалось загрузить названия товаров: {exc}. "
+                "Выгрузка будет продолжена без актуальных названий.",
+                file=sys.stderr,
+            )
+            item_names_warning_emitted = True
 
-    item_names: Dict[str, str] = _load_item_names(data_dir) if include_item_names else {}
+    if include_item_names:
+        try:
+            second_item_names = _load_item_names(data_dir)
+        except (
+            OSError,
+            UnicodeError,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+        ) as exc:
+            if not item_names_warning_emitted:
+                print(
+                    f"[{_now()}] Не удалось загрузить названия товаров: {exc}. "
+                    "Выгрузка будет продолжена без актуальных названий.",
+                    file=sys.stderr,
+                )
+                item_names_warning_emitted = True
+        else:
+            item_names = second_item_names
 
     # Остатки берём из текущей номенклатуры, потому что после сезонного сопоставления
     # код товара может быть заменён на товар из актуальной коллекции.
