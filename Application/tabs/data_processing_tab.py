@@ -25,6 +25,23 @@ from Application.files.files_processing import (process_orders_file, process_vie
                                                 process_coordinates_file, generate_weather_for_saved_coordinates)
 
 
+def _refresh_filter_references_on_startup(aboba):
+    refresh_functions = (
+        refresh_kind_values_from_loaded_files,
+        refresh_season_values_from_nomenclature_file,
+        refresh_export_kind_values_from_nomenclature_file,
+    )
+
+    for refresh_function in refresh_functions:
+        try:
+            refresh_function(aboba)
+        except Exception as error:
+            set_status_error(
+                aboba,
+                f"Не удалось обновить справочник фильтров: {error}",
+            )
+
+
 # -------------------------------------------ВКЛАДКА ОБРАБОТКА ДАТАСЕТА-------------------------------------------------
 def create_input_data_widgets_tab(aboba):
     tab = QWidget()
@@ -452,12 +469,8 @@ def create_input_data_widgets_tab(aboba):
     # Настройка доступа к полям отбора
     update_filter_controls_availability(aboba)
 
-    # Обновляем виды номенклатуры в отборе
-    refresh_kind_values_from_loaded_files(aboba)
-
-    refresh_season_values_from_nomenclature_file(aboba)
-
-    refresh_export_kind_values_from_nomenclature_file(aboba)
+    # Обновляем справочники фильтров
+    _refresh_filter_references_on_startup(aboba)
 
     # Формируем текстовую строку с настройками
     update_filter_summary(aboba)
@@ -794,17 +807,14 @@ def refresh_store_city_table(aboba) -> None:
     stores_path = os.path.join(os.getcwd(), "ВходныеДанные", "СписокМагазинов.csv")
 
     stores: list[str] = []
-    if stores_path:
-        try:
-            df = pd.read_csv(stores_path, sep="|", encoding="utf-8-sig", dtype=str)
-            if not df.empty:
-                col = "Магазин" if "Магазин" in df.columns else df.columns[0]
-                s = df[col].dropna().astype(str).str.strip()
-                s = s[s != ""]
-                # Уникальные магазины
-                stores = pd.unique(s).tolist()
-        except Exception:
-            stores = []
+    if os.path.isfile(stores_path):
+        df = pd.read_csv(stores_path, sep="|", encoding="utf-8-sig", dtype=str)
+        if not df.empty:
+            col = "Магазин" if "Магазин" in df.columns else df.columns[0]
+            s = df[col].dropna().astype(str).str.strip()
+            s = s[s != ""]
+            # Уникальные магазины
+            stores = pd.unique(s).tolist()
 
     # Если файл пуст/не найден — таблицу всё равно покажем, но без строк
     aboba.store_city_table.setRowCount(len(stores))
@@ -892,15 +902,12 @@ def refresh_kind_values_from_loaded_files(aboba):
     for fp in files:
         if not os.path.isfile(fp):
             continue
-        try:
-            # читаем только колонку
-            df = pd.read_csv(fp, sep="|", dtype=str, usecols=["ВидНоменклатуры"])
-            for v in df["ВидНоменклатуры"].dropna().astype(str).tolist():
-                v = v.strip()
-                if v:
-                    kinds_set.add(v)
-        except Exception:
-            continue
+        # читаем только колонку
+        df = pd.read_csv(fp, sep="|", dtype=str, usecols=["ВидНоменклатуры"])
+        for v in df["ВидНоменклатуры"].dropna().astype(str).tolist():
+            v = v.strip()
+            if v:
+                kinds_set.add(v)
 
     kinds = sorted(kinds_set)
 
@@ -936,33 +943,29 @@ def refresh_export_kind_values_from_nomenclature_file(aboba):
 
     kinds_set = set()
 
-    try:
-        df = pd.read_csv(
-            nom_path,
-            sep="|",
-            dtype=str,
-            encoding="utf-8-sig",
-            usecols=lambda column: column == "ВидНоменклатуры",
+    df = pd.read_csv(
+        nom_path,
+        sep="|",
+        dtype=str,
+        encoding="utf-8-sig",
+        usecols=lambda column: column == "ВидНоменклатуры",
+    )
+
+    if "ВидНоменклатуры" in df.columns:
+        values = (
+            df["ВидНоменклатуры"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
         )
 
-        if "ВидНоменклатуры" in df.columns:
-            values = (
-                df["ВидНоменклатуры"]
-                .astype("string")
-                .fillna("")
-                .str.strip()
-            )
-
-            for value in values.tolist():
-                if (
-                    value
-                    and value.lower()
-                    not in ("nan", "none", "null", "<na>", "-")
-                ):
-                    kinds_set.add(value)
-
-    except Exception:
-        kinds_set = set()
+        for value in values.tolist():
+            if (
+                value
+                and value.lower()
+                not in ("nan", "none", "null", "<na>", "-")
+            ):
+                kinds_set.add(value)
 
     kinds = sorted(kinds_set)
 
@@ -999,14 +1002,11 @@ def refresh_season_values_from_nomenclature_file(aboba):
         return
 
     seasons_set = set()
-    try:
-        df = pd.read_csv(nom_path, sep="|", dtype=str, encoding="utf-8-sig", usecols=["Коллекция"])
-        for v in df["Коллекция"].dropna().astype(str).tolist():
-            v = v.strip()
-            if v and v.lower() not in ("nan", "none", "null", "-"):
-                seasons_set.add(v)
-    except Exception:
-        pass
+    df = pd.read_csv(nom_path, sep="|", dtype=str, encoding="utf-8-sig", usecols=["Коллекция"])
+    for v in df["Коллекция"].dropna().astype(str).tolist():
+        v = v.strip()
+        if v and v.lower() not in ("nan", "none", "null", "-"):
+            seasons_set.add(v)
 
     seasons = sorted(seasons_set)
 
