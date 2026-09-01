@@ -537,14 +537,11 @@ def _get_store_city_map(aboba) -> dict:
         return m
 
     # запасной вариант: из JSON настроек
-    try:
-        path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return dict(data.get("store_city_map", {}) or {})
-    except Exception:
-        pass
+    path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return dict(data.get("store_city_map", {}) or {})
 
     return {}
 

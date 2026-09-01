@@ -1,5 +1,8 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 from Application.tabs import train_model_tab
 
@@ -7,8 +10,10 @@ from Application.tabs import train_model_tab
 class _Button:
     def __init__(self):
         self.enabled = True
+        self.enabled_calls = []
 
     def setEnabled(self, enabled):
+        self.enabled_calls.append(enabled)
         self.enabled = enabled
 
 
@@ -159,6 +164,162 @@ def test_training_data_preparation_error_does_not_start_process(monkeypatch):
     assert window.start_train.enabled is True
     assert errors
     assert any("synthetic data preparation error" in msg for msg in window.train_log.messages)
+    assert len(_FakeProcess.instances) == 1
+    assert _FakeProcess.instances[0].started is False
+    assert _FakeProcess.instances[0].arguments is None
+
+
+def test_store_city_map_uses_existing_in_memory_map(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    (settings_dir / "filter_settings.json").write_text(
+        "{not valid json",
+        encoding="utf-8",
+    )
+    expected = {
+        "Магазин 1": "Москва",
+        "Магазин 2": "Санкт-Петербург",
+    }
+    window = SimpleNamespace(_store_city_map=expected)
+    open_mock = Mock(side_effect=AssertionError("settings file must not be read"))
+    monkeypatch.setattr(train_model_tab, "open", open_mock, raising=False)
+
+    result = train_model_tab._get_store_city_map(window)
+
+    assert result is expected
+    open_mock.assert_not_called()
+
+
+def test_store_city_map_missing_settings_file_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    window = SimpleNamespace(_store_city_map={})
+
+    result = train_model_tab._get_store_city_map(window)
+
+    assert result == {}
+
+
+def test_store_city_map_reads_valid_settings_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "filter_settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {"store_city_map": {"Магазин 1": "Москва", "Магазин 2": "Омск"}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    window = SimpleNamespace(_store_city_map={})
+
+    result = train_model_tab._get_store_city_map(window)
+
+    assert result == {"Магазин 1": "Москва", "Магазин 2": "Омск"}
+
+
+def test_store_city_map_existing_unreadable_settings_raises(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "filter_settings.json"
+    settings_path.write_text("synthetic existing settings", encoding="utf-8")
+    window = SimpleNamespace(_store_city_map={})
+
+    def fail_open(*args, **kwargs):
+        raise PermissionError("synthetic unreadable settings")
+
+    monkeypatch.setattr(train_model_tab, "open", fail_open, raising=False)
+
+    with pytest.raises(PermissionError, match="synthetic unreadable settings"):
+        train_model_tab._get_store_city_map(window)
+
+
+def test_store_city_map_malformed_json_raises(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "filter_settings.json"
+    settings_path.write_text("{not valid json", encoding="utf-8")
+    window = SimpleNamespace(_store_city_map={})
+
+    with pytest.raises(json.JSONDecodeError):
+        train_model_tab._get_store_city_map(window)
+
+
+def test_store_city_map_unexpected_json_structure_raises(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "filter_settings.json"
+    settings_path.write_text("[]", encoding="utf-8")
+    window = SimpleNamespace(_store_city_map={})
+
+    with pytest.raises(AttributeError):
+        train_model_tab._get_store_city_map(window)
+
+
+def test_broken_store_city_settings_does_not_start_training(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    (input_dir / "Заказы.csv").write_text(
+        "Магазин|Дата\nМагазин 1|2025-01-01\n",
+        encoding="utf-8",
+    )
+    settings_dir = tmp_path / "Настройки"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "filter_settings.json"
+    settings_path.write_text(
+        "synthetic existing settings",
+        encoding="utf-8",
+    )
+
+    window = _window_with_training_values()
+    window._store_city_map = {}
+    errors = _patch_training_ui(monkeypatch)
+    successes = []
+
+    monkeypatch.setattr(
+        train_model_tab,
+        "_any_order_filters_set",
+        lambda current_window: True,
+    )
+    monkeypatch.setattr(
+        train_model_tab,
+        "_get_current_order_filters",
+        lambda current_window: {
+            "date_from": "",
+            "date_to": "",
+            "kinds": [],
+            "stores": [],
+            "kind_mode": "В группе",
+            "store_mode": "В группе",
+        },
+    )
+    monkeypatch.setattr(
+        train_model_tab,
+        "set_status_ok",
+        lambda current_window, message: successes.append(message),
+    )
+
+    real_open = open
+
+    def fail_open(file, *args, **kwargs):
+        if str(file) == str(settings_path):
+            raise PermissionError("synthetic unreadable settings")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(train_model_tab, "open", fail_open, raising=False)
+
+    train_model_tab.start_training_process(window)
+
+    assert window.start_train.enabled is True
+    assert window.start_train.enabled_calls == [False, True]
+    assert errors == ["Не удалось подготовить параметры обучения"]
+    assert successes == []
+    assert any("synthetic unreadable settings" in msg for msg in window.train_log.messages)
     assert len(_FakeProcess.instances) == 1
     assert _FakeProcess.instances[0].started is False
     assert _FakeProcess.instances[0].arguments is None
