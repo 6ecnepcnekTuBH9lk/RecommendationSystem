@@ -322,10 +322,7 @@ def _build_item_feature_matrix(
     if not os.path.isfile(nom_path):
         return {}, item_feat_mat
 
-    try:
-        nom = _read_csv_pipe(nom_path)
-    except Exception:
-        return {}, item_feat_mat
+    nom = _read_csv_pipe(nom_path)
 
     if "КодНоменклатуры" not in nom.columns:
         return {}, item_feat_mat
