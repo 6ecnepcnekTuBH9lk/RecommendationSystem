@@ -5,8 +5,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -1761,6 +1763,105 @@ def _load_historical_item_conversion(
     return conversion_by_code, global_pct
 
 
+def _diagnose_export_cleanup_error(
+    operation: str,
+    path: str,
+    error: BaseException,
+) -> None:
+    try:
+        print(
+            f"[{_now()}] Failed to {operation} export resource "
+            f"'{path}': {error}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
+def _create_export_temp_path(target_path: str) -> str:
+    target_path = os.fspath(target_path)
+    target_dir = os.path.dirname(target_path) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    prefix = f".{os.path.basename(target_path)}."
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".tmp",
+        dir=target_dir,
+    )
+    try:
+        os.close(temp_fd)
+    except BaseException:
+        try:
+            os.remove(temp_path)
+        except OSError as cleanup_error:
+            _diagnose_export_cleanup_error(
+                "remove",
+                temp_path,
+                cleanup_error,
+            )
+        raise
+    return temp_path
+
+
+def _cleanup_export_temp(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as cleanup_error:
+        _diagnose_export_cleanup_error("remove", path, cleanup_error)
+
+
+def _close_export_csv_files(
+    resources: List[Tuple[str, object]],
+    primary_error: Optional[BaseException],
+) -> None:
+    first_error: Optional[BaseException] = None
+
+    def record_error(operation: str, path: str, error: BaseException) -> None:
+        nonlocal first_error
+        if primary_error is not None or first_error is not None:
+            _diagnose_export_cleanup_error(operation, path, error)
+        else:
+            first_error = error
+
+    for path, file_object in resources:
+        try:
+            file_object.flush()
+        except BaseException as flush_error:
+            record_error("flush", path, flush_error)
+
+        try:
+            file_object.close()
+        except BaseException as close_error:
+            record_error("close", path, close_error)
+
+    if primary_error is None and first_error is not None:
+        raise first_error
+
+
+def _validate_export_csv(path: str, expected_header: List[str]) -> None:
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        raise OSError(f"Failed to create a complete CSV export: {path}")
+
+    with open(path, "r", newline="", encoding="utf-8-sig") as file_object:
+        actual_header = next(csv.reader(file_object, delimiter=";"), None)
+    if actual_header != expected_header:
+        raise OSError(f"CSV export has an invalid header: {path}")
+
+
+def _validate_export_xlsx(path: str) -> None:
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        raise OSError(f"Failed to create a complete XLSX export: {path}")
+
+    with zipfile.ZipFile(path, "r") as archive:
+        bad_member = archive.testzip()
+    if bad_member is not None:
+        raise OSError(
+            f"XLSX export contains a corrupted ZIP member: {bad_member}"
+        )
+
+
 # -------------------------------------------ВЫГРУЗКА В ЭКСЕЛЬ----------------------------------------------------------
 @torch.no_grad()
 def export_recommendations_excel(
@@ -2408,404 +2509,497 @@ def export_recommendations_excel(
             .replace(",", " ")
         )
 
-    os.makedirs(os.path.dirname(out_xlsx) or ".", exist_ok=True)
-    wb = Workbook(write_only=True)
-    ws = wb.create_sheet("Рекомендации")
+    temp_paths: List[str] = []
+    csv_resources: List[Tuple[str, object]] = []
+    csv1_temp_path: Optional[str] = None
+    csvml_temp_path: Optional[str] = None
+    wb = None
 
-    header = ["MindboxID"]
-    if include_discount_card:
-        header.append("ДисконтнаяКарта")
-    if include_email:
-        header.append("Почта")
-    if include_phone:
-        header.append("Телефон")
+    try:
+        xlsx_temp_path = _create_export_temp_path(out_xlsx)
+        temp_paths.append(xlsx_temp_path)
 
-    for r in range(1, k + 1):
-        header.append(f"КодНоменклатуры_{r}")
-        if include_item_names:
-            header.append(f"НазваниеНоменклатуры_{r}")
-        header.append(f"Коллекция_{r}")
-        if include_scores:
-            header.append(f"Коэффициент_{r}")
-        header.append(f"Конверсия_{r}")
-        header.append(f"Остаток_{r}")
+        if out_csv_format1:
+            csv1_temp_path = _create_export_temp_path(out_csv_format1)
+            temp_paths.append(csv1_temp_path)
 
-    ws.append(header)
+        if out_csv_kanzler_ml:
+            csvml_temp_path = _create_export_temp_path(out_csv_kanzler_ml)
+            temp_paths.append(csvml_temp_path)
 
-    # --- Статистика по коллекциям в итоговом Excel-файле ---
-    collection_counts: Dict[str, int] = {}
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Рекомендации")
 
-    def _add_collection_to_stats(collection_value: str) -> None:
-        coll = _clean_name(collection_value)
+        header = ["MindboxID"]
+        if include_discount_card:
+            header.append("ДисконтнаяКарта")
+        if include_email:
+            header.append("Почта")
+        if include_phone:
+            header.append("Телефон")
 
-        if not coll:
-            coll = "Без коллекции"
+        for r in range(1, k + 1):
+            header.append(f"КодНоменклатуры_{r}")
+            if include_item_names:
+                header.append(f"НазваниеНоменклатуры_{r}")
+            header.append(f"Коллекция_{r}")
+            if include_scores:
+                header.append(f"Коэффициент_{r}")
+            header.append(f"Конверсия_{r}")
+            header.append(f"Остаток_{r}")
 
-        collection_counts[coll] = collection_counts.get(coll, 0) + 1
+        ws.append(header)
 
-    # --- CSV outputs (additional to Excel) ---
-    csv1_f = csvml_f = None
-    csv1_w = csvml_w = None
+        # --- Статистика по коллекциям в итоговом Excel-файле ---
+        collection_counts: Dict[str, int] = {}
 
-    if out_csv_format1:
-        os.makedirs(os.path.dirname(out_csv_format1) or ".", exist_ok=True)
-        csv1_f = open(out_csv_format1, "w", newline="", encoding="utf-8-sig")
-        csv1_w = csv.writer(csv1_f, delimiter=";")
-        csv1_w.writerow(["CustomerID", "ProductID"])
+        def _add_collection_to_stats(collection_value: str) -> None:
+            coll = _clean_name(collection_value)
 
-    if out_csv_kanzler_ml:
-        os.makedirs(os.path.dirname(out_csv_kanzler_ml) or ".", exist_ok=True)
-        csvml_f = open(out_csv_kanzler_ml, "w", newline="", encoding="utf-8-sig")
-        csvml_w = csv.writer(csvml_f, delimiter=";")
-        csvml_w.writerow(["CustomerMindboxId", "Quantity", "ProductGroupOffline1C", "CustomFieldKoefficient"])
+            if not coll:
+                coll = "Без коллекции"
 
-    exported_users = 0
-    stop_export = False
+            collection_counts[coll] = collection_counts.get(coll, 0) + 1
 
-    for batch_start in range(
-            0,
-            len(ranked_user_indices),
-            batch_users,
-    ):
-        if stop_export:
-            break
+        # --- CSV outputs (additional to Excel) ---
+        csv1_w = csvml_w = None
 
-        batch_user_indices = ranked_user_indices[
-                             batch_start:batch_start + batch_users
-                             ]
+        if csv1_temp_path is not None:
+            csv1_f = open(
+                csv1_temp_path,
+                "w",
+                newline="",
+                encoding="utf-8-sig",
+            )
+            csv_resources.append((csv1_temp_path, csv1_f))
+            csv1_w = csv.writer(csv1_f, delimiter=";")
+            csv1_w.writerow(["CustomerID", "ProductID"])
 
-        if not batch_user_indices:
-            continue
+        if csvml_temp_path is not None:
+            csvml_f = open(
+                csvml_temp_path,
+                "w",
+                newline="",
+                encoding="utf-8-sig",
+            )
+            csv_resources.append((csvml_temp_path, csvml_f))
+            csvml_w = csv.writer(csvml_f, delimiter=";")
+            csvml_w.writerow(
+                [
+                    "CustomerMindboxId",
+                    "Quantity",
+                    "ProductGroupOffline1C",
+                    "CustomFieldKoefficient",
+                ]
+            )
 
-        u_idx = torch.tensor(
-            batch_user_indices,
-            device=device,
-            dtype=torch.long,
-        )
+        exported_users = 0
+        stop_export = False
 
-        u_emb = model.user_emb(u_idx)  # [B, d]
-        scores = u_emb @ item_vec.t()  # [B, I]
-
-        if filter_seen and user_seen is not None:
-            for bi, uu in enumerate(batch_user_indices):
-                seen_items = user_seen[uu]
-
-                if seen_items:
-                    scores[
-                        bi,
-                        torch.tensor(
-                            list(seen_items),
-                            device=device,
-                            dtype=torch.long,
-                        )
-                    ] = -1e9
-
-        # Убираем из ранжирования все виды номенклатуры,
-        # которые пользователь не выбрал для выгрузки.
-        if export_kind_mask is not None:
-            scores[:, ~export_kind_mask] = -1e9
-
-        # Берём больше кандидатов, потому что часть товаров будет отсеяна по остатку < 100
-        cand_k = min(scores.shape[1], max(k * 100, 1000, k))
-        top = torch.topk(scores, k=cand_k, dim=1)
-        top_idx = top.indices.detach().cpu().numpy()
-        top_val = top.values.detach().cpu().numpy()
-
-        for bi, uu in enumerate(batch_user_indices):
-            if (
-                    export_user_limit is not None
-                    and exported_users >= export_user_limit
-            ):
-                stop_export = True
+        for batch_start in range(
+                0,
+                len(ranked_user_indices),
+                batch_users,
+        ):
+            if stop_export:
                 break
 
-            mindbox_id = str(idx2user[uu])
+            batch_user_indices = ranked_user_indices[
+                                 batch_start:batch_start + batch_users
+                                 ]
 
-            row: List[object] = [mindbox_id]
-
-            if include_discount_card:
-                row.append(str(discount_cards.get(mindbox_id, "")))
-            if include_email:
-                row.append(str(emails.get(mindbox_id, "")))
-            if include_phone:
-                row.append(str(phones.get(mindbox_id, "")))
-
-            rec_items = top_idx[bi].tolist()
-            rec_scores = [float(x) for x in top_val[bi].tolist()]
-
-            used = set()
-            out_codes: List[str] = []
-            out_names: List[str] = []
-            out_collections: List[str] = []
-            out_scores: List[float] = []
-            out_conversions: List[float] = []
-            out_stocks: List[str] = []
-
-            def _stock_for_code(code: str) -> str:
-                code = str(code or "").strip()
-                if not code:
-                    return ""
-
-                # основной источник — текущая Номенклатура.csv
-                val = item_stocks.get(code)
-                if val is not None:
-                    return _format_stock_value(val)
-
-                # fallback — метаданные текущего каталога
-                meta = new_meta_by_code.get(code, {}) or {}
-                return _format_stock_value(meta.get("Остаток", 0))
-
-            def _stock_to_int(stock_value) -> int:
-                """
-                Преобразует остаток к int для фильтрации:
-                  "150" -> 150
-                  "150.0" -> 150
-                  "150,0" -> 150
-                  пусто/NaN -> 0
-                """
-                try:
-                    return int(_format_stock_value(stock_value))
-                except Exception:
-                    return 0
-
-            def _collection_for_code(code_out: str, code_old: str = "") -> str:
-                """
-                Возвращает коллекцию итогового товара после сезонного сопоставления.
-                Сначала ищем по итоговому коду в текущей Номенклатура.csv,
-                затем в метаданных обучения.
-                """
-                code_out = str(code_out or "").strip()
-                code_old = str(code_old or "").strip()
-
-                if code_out:
-                    meta = new_meta_by_code.get(code_out, {}) or {}
-                    coll = _clean_name(meta.get("Коллекция"))
-                    if coll:
-                        return coll
-
-                    meta = train_item_meta.get(code_out, {}) or {}
-                    coll = _clean_name(meta.get("Коллекция"))
-                    if coll:
-                        return coll
-
-                if code_old:
-                    meta = train_item_meta.get(code_old, {}) or {}
-                    coll = _clean_name(meta.get("Коллекция"))
-                    if coll:
-                        return coll
-
-                return ""
-
-            def _kind_for_code(
-                code_out: str,
-                code_old: str = "",
-            ) -> str:
-                return _kind_for_export(
-                    code_out,
-                    code_old
-                )
-
-            def _is_autumn_winter_collection(collection_value: str) -> bool:
-                """
-                True для любых коллекций Осень-Зима любого года:
-                  Осень-Зима 2024
-                  Осень-Зима 2025
-                  Осень-Зима 2025 переходящий остаток
-                  Осень-Зима 2026
-                """
-                coll = _norm_text(collection_value).upper()
-                return "ОСЕНЬ" in coll and "ЗИМА" in coll
-
-            def _is_gift_card_kind(kind_value: str) -> bool:
-                """
-                True для вида номенклатуры Подарочные карты.
-                """
-                kind = _norm_text(kind_value).upper()
-                return kind == "ПОДАРОЧНЫЕ КАРТЫ" or ("ПОДАРОЧН" in kind and "КАРТ" in kind)
-
-
-            ptr = 0
-
-            while len(out_codes) < k and ptr < len(rec_items):
-                code_old = str(idx2item[int(rec_items[ptr])])
-                score_old = float(rec_scores[ptr])
-
-                # Значение -1e9 используется для исключённых,
-                # уже просмотренных или запрещённых товаров.
-                if score_old <= -1e8:
-                    ptr += 1
-                    continue
-
-                code_out = _map_old_code_to_active(code_old)
-
-                if code_out in used:
-                    ptr += 1
-                    continue
-
-                collection_out = _collection_for_code(code_out, code_old)
-                kind_out = _kind_for_code(code_out, code_old)
-
-                # Отбор по видам номенклатуры, выбранным пользователем.
-                # Пустой список означает отсутствие ограничения.
-                if (
-                        export_kind_keys
-                        and _norm_text(kind_out).upper()
-                        not in export_kind_keys
-                ):
-                    ptr += 1
-                    continue
-
-                # Фильтр по коллекции: убираем всю Осень-Зиму любого года
-                if _is_autumn_winter_collection(collection_out):
-                    ptr += 1
-                    continue
-
-                # Фильтр по виду номенклатуры: убираем подарочные карты
-                if _is_gift_card_kind(kind_out):
-                    ptr += 1
-                    continue
-
-                stock_out = _stock_for_code(code_out)
-
-                # Фильтр по остатку: в выгрузку попадают только товары с остатком >= 100
-                if _stock_to_int(stock_out) < 100:
-                    ptr += 1
-                    continue
-
-                used.add(code_out)
-                out_codes.append(code_out)
-                out_scores.append(score_old)
-                out_collections.append(collection_out)
-                out_conversions.append(
-                    float(historical_conversion_by_code.get(code_out, historical_conversion_global))
-                )
-                out_stocks.append(stock_out)
-
-                if include_item_names:
-                    nm = _clean_name(item_names.get(code_out, ""))
-
-                    if not nm:
-                        if code_out == code_old:
-                            om = train_item_meta.get(code_old, {}) or {}
-                            nm = _clean_name(om.get("НазваниеНаСайте")) or _clean_name(om.get("Номенклатура"))
-                        else:
-                            nm = _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("НазваниеНаСайте")) \
-                                 or _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("Номенклатура"))
-
-                    out_names.append(nm)
-
-                ptr += 1
-
-            if not out_codes:
+            if not batch_user_indices:
                 continue
 
-            # добиваем до k, чтобы структура Excel не ломалась
-            while len(out_codes) < k:
-                out_codes.append("")
-                out_scores.append(0.0)
-                out_collections.append("")
-                out_conversions.append(0.0)
-                out_stocks.append("")
-                if include_item_names:
-                    out_names.append("")
-            # --- CSV format #1: CustomerID=discount card, ProductID=comma-separated codes ---
-            # --- CSV InternetMagazin:
-            # CustomerID = номер телефона,
-            # ProductID = коды рекомендаций через запятую.
-            if csv1_w is not None:
-                customer_id = _normalize_phone(
-                    phones.get(mindbox_id, "")
-                )
+            u_idx = torch.tensor(
+                batch_user_indices,
+                device=device,
+                dtype=torch.long,
+            )
 
-                product_codes_csv = [
-                    str(code).strip()
-                    for code in out_codes[:k]
-                    if str(code or "").strip()
-                ]
+            u_emb = model.user_emb(u_idx)  # [B, d]
+            scores = u_emb @ item_vec.t()  # [B, I]
 
-                product_id = ",".join(product_codes_csv)
+            if filter_seen and user_seen is not None:
+                for bi, uu in enumerate(batch_user_indices):
+                    seen_items = user_seen[uu]
 
-                # Пустые идентификаторы и пустые рекомендации не записываем.
-                if customer_id and product_id:
-                    csv1_w.writerow([
-                        customer_id,
-                        product_id,
-                    ])
+                    if seen_items:
+                        scores[
+                            bi,
+                            torch.tensor(
+                                list(seen_items),
+                                device=device,
+                                dtype=torch.long,
+                            )
+                        ] = -1e9
 
-            # --- CSV Kanzler ML: one row per recommended item ---
-            if csvml_w is not None:
-                def _fmt_coef_ru(val: float) -> str:
-                    try:
-                        return f"{float(val):.2f}".replace(".", ",")
-                    except Exception:
+            # Убираем из ранжирования все виды номенклатуры,
+            # которые пользователь не выбрал для выгрузки.
+            if export_kind_mask is not None:
+                scores[:, ~export_kind_mask] = -1e9
+
+            # Берём больше кандидатов, потому что часть товаров будет отсеяна по остатку < 100
+            cand_k = min(scores.shape[1], max(k * 100, 1000, k))
+            top = torch.topk(scores, k=cand_k, dim=1)
+            top_idx = top.indices.detach().cpu().numpy()
+            top_val = top.values.detach().cpu().numpy()
+
+            for bi, uu in enumerate(batch_user_indices):
+                if (
+                        export_user_limit is not None
+                        and exported_users >= export_user_limit
+                ):
+                    stop_export = True
+                    break
+
+                mindbox_id = str(idx2user[uu])
+
+                row: List[object] = [mindbox_id]
+
+                if include_discount_card:
+                    row.append(str(discount_cards.get(mindbox_id, "")))
+                if include_email:
+                    row.append(str(emails.get(mindbox_id, "")))
+                if include_phone:
+                    row.append(str(phones.get(mindbox_id, "")))
+
+                rec_items = top_idx[bi].tolist()
+                rec_scores = [float(x) for x in top_val[bi].tolist()]
+
+                used = set()
+                out_codes: List[str] = []
+                out_names: List[str] = []
+                out_collections: List[str] = []
+                out_scores: List[float] = []
+                out_conversions: List[float] = []
+                out_stocks: List[str] = []
+
+                def _stock_for_code(code: str) -> str:
+                    code = str(code or "").strip()
+                    if not code:
                         return ""
-                for code_val, sc_val in zip(out_codes[:k], out_scores[:k]):
-                    code_val = str(code_val or "")
-                    if not code_val:
+
+                    # основной источник — текущая Номенклатура.csv
+                    val = item_stocks.get(code)
+                    if val is not None:
+                        return _format_stock_value(val)
+
+                    # fallback — метаданные текущего каталога
+                    meta = new_meta_by_code.get(code, {}) or {}
+                    return _format_stock_value(meta.get("Остаток", 0))
+
+                def _stock_to_int(stock_value) -> int:
+                    """
+                    Преобразует остаток к int для фильтрации:
+                      "150" -> 150
+                      "150.0" -> 150
+                      "150,0" -> 150
+                      пусто/NaN -> 0
+                    """
+                    try:
+                        return int(_format_stock_value(stock_value))
+                    except Exception:
+                        return 0
+
+                def _collection_for_code(code_out: str, code_old: str = "") -> str:
+                    """
+                    Возвращает коллекцию итогового товара после сезонного сопоставления.
+                    Сначала ищем по итоговому коду в текущей Номенклатура.csv,
+                    затем в метаданных обучения.
+                    """
+                    code_out = str(code_out or "").strip()
+                    code_old = str(code_old or "").strip()
+
+                    if code_out:
+                        meta = new_meta_by_code.get(code_out, {}) or {}
+                        coll = _clean_name(meta.get("Коллекция"))
+                        if coll:
+                            return coll
+
+                        meta = train_item_meta.get(code_out, {}) or {}
+                        coll = _clean_name(meta.get("Коллекция"))
+                        if coll:
+                            return coll
+
+                    if code_old:
+                        meta = train_item_meta.get(code_old, {}) or {}
+                        coll = _clean_name(meta.get("Коллекция"))
+                        if coll:
+                            return coll
+
+                    return ""
+
+                def _kind_for_code(
+                    code_out: str,
+                    code_old: str = "",
+                ) -> str:
+                    return _kind_for_export(
+                        code_out,
+                        code_old
+                    )
+
+                def _is_autumn_winter_collection(collection_value: str) -> bool:
+                    """
+                    True для любых коллекций Осень-Зима любого года:
+                      Осень-Зима 2024
+                      Осень-Зима 2025
+                      Осень-Зима 2025 переходящий остаток
+                      Осень-Зима 2026
+                    """
+                    coll = _norm_text(collection_value).upper()
+                    return "ОСЕНЬ" in coll and "ЗИМА" in coll
+
+                def _is_gift_card_kind(kind_value: str) -> bool:
+                    """
+                    True для вида номенклатуры Подарочные карты.
+                    """
+                    kind = _norm_text(kind_value).upper()
+                    return kind == "ПОДАРОЧНЫЕ КАРТЫ" or ("ПОДАРОЧН" in kind and "КАРТ" in kind)
+
+
+                ptr = 0
+
+                while len(out_codes) < k and ptr < len(rec_items):
+                    code_old = str(idx2item[int(rec_items[ptr])])
+                    score_old = float(rec_scores[ptr])
+
+                    # Значение -1e9 используется для исключённых,
+                    # уже просмотренных или запрещённых товаров.
+                    if score_old <= -1e8:
+                        ptr += 1
                         continue
-                    csvml_w.writerow([mindbox_id, 1, code_val, _fmt_coef_ru(sc_val)])
 
-            for j in range(k):
-                row.append(out_codes[j])
-                if include_item_names:
-                    row.append(out_names[j])
-                row.append(out_collections[j])
-                if include_scores:
-                    row.append(round(out_scores[j], 2))
-                # Историческая конверсия хранится только в Excel, в процентах.
-                row.append(round(out_conversions[j], 2) if out_codes[j] else "")
-                row.append(out_stocks[j])
+                    code_out = _map_old_code_to_active(code_old)
 
-                # Считаем коллекции только по реально выгружаемым рекомендациям
-            for code_val, coll_val in zip(out_codes[:k], out_collections[:k]):
-                code_val = str(code_val or "").strip()
+                    if code_out in used:
+                        ptr += 1
+                        continue
 
-                if not code_val:
+                    collection_out = _collection_for_code(code_out, code_old)
+                    kind_out = _kind_for_code(code_out, code_old)
+
+                    # Отбор по видам номенклатуры, выбранным пользователем.
+                    # Пустой список означает отсутствие ограничения.
+                    if (
+                            export_kind_keys
+                            and _norm_text(kind_out).upper()
+                            not in export_kind_keys
+                    ):
+                        ptr += 1
+                        continue
+
+                    # Фильтр по коллекции: убираем всю Осень-Зиму любого года
+                    if _is_autumn_winter_collection(collection_out):
+                        ptr += 1
+                        continue
+
+                    # Фильтр по виду номенклатуры: убираем подарочные карты
+                    if _is_gift_card_kind(kind_out):
+                        ptr += 1
+                        continue
+
+                    stock_out = _stock_for_code(code_out)
+
+                    # Фильтр по остатку: в выгрузку попадают только товары с остатком >= 100
+                    if _stock_to_int(stock_out) < 100:
+                        ptr += 1
+                        continue
+
+                    used.add(code_out)
+                    out_codes.append(code_out)
+                    out_scores.append(score_old)
+                    out_collections.append(collection_out)
+                    out_conversions.append(
+                        float(historical_conversion_by_code.get(code_out, historical_conversion_global))
+                    )
+                    out_stocks.append(stock_out)
+
+                    if include_item_names:
+                        nm = _clean_name(item_names.get(code_out, ""))
+
+                        if not nm:
+                            if code_out == code_old:
+                                om = train_item_meta.get(code_old, {}) or {}
+                                nm = _clean_name(om.get("НазваниеНаСайте")) or _clean_name(om.get("Номенклатура"))
+                            else:
+                                nm = _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("НазваниеНаСайте")) \
+                                     or _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("Номенклатура"))
+
+                        out_names.append(nm)
+
+                    ptr += 1
+
+                if not out_codes:
                     continue
 
-                _add_collection_to_stats(coll_val)
+                # добиваем до k, чтобы структура Excel не ломалась
+                while len(out_codes) < k:
+                    out_codes.append("")
+                    out_scores.append(0.0)
+                    out_collections.append("")
+                    out_conversions.append(0.0)
+                    out_stocks.append("")
+                    if include_item_names:
+                        out_names.append("")
+                # --- CSV format #1: CustomerID=discount card, ProductID=comma-separated codes ---
+                # --- CSV InternetMagazin:
+                # CustomerID = номер телефона,
+                # ProductID = коды рекомендаций через запятую.
+                if csv1_w is not None:
+                    customer_id = _normalize_phone(
+                        phones.get(mindbox_id, "")
+                    )
 
-            ws.append(row)
-            exported_users += 1
+                    product_codes_csv = [
+                        str(code).strip()
+                        for code in out_codes[:k]
+                        if str(code or "").strip()
+                    ]
 
-    print(
-        f"[{_now()}] В итоговые файлы выгружено клиентов: "
-        f"{exported_users:,}".replace(",", " ")
-    )
+                    product_id = ",".join(product_codes_csv)
 
-    if (
-            export_user_limit is not None
-            and exported_users < export_user_limit
-    ):
+                    # Пустые идентификаторы и пустые рекомендации не записываем.
+                    if customer_id and product_id:
+                        csv1_w.writerow([
+                            customer_id,
+                            product_id,
+                        ])
+
+                # --- CSV Kanzler ML: one row per recommended item ---
+                if csvml_w is not None:
+                    def _fmt_coef_ru(val: float) -> str:
+                        try:
+                            return f"{float(val):.2f}".replace(".", ",")
+                        except Exception:
+                            return ""
+                    for code_val, sc_val in zip(out_codes[:k], out_scores[:k]):
+                        code_val = str(code_val or "")
+                        if not code_val:
+                            continue
+                        csvml_w.writerow([mindbox_id, 1, code_val, _fmt_coef_ru(sc_val)])
+
+                for j in range(k):
+                    row.append(out_codes[j])
+                    if include_item_names:
+                        row.append(out_names[j])
+                    row.append(out_collections[j])
+                    if include_scores:
+                        row.append(round(out_scores[j], 2))
+                    # Историческая конверсия хранится только в Excel, в процентах.
+                    row.append(round(out_conversions[j], 2) if out_codes[j] else "")
+                    row.append(out_stocks[j])
+
+                    # Считаем коллекции только по реально выгружаемым рекомендациям
+                for code_val, coll_val in zip(out_codes[:k], out_collections[:k]):
+                    code_val = str(code_val or "").strip()
+
+                    if not code_val:
+                        continue
+
+                    _add_collection_to_stats(coll_val)
+
+                ws.append(row)
+                exported_users += 1
+
         print(
-            f"[{_now()}] Предупреждение: требовалось "
-            f"{export_user_limit:,}, но удалось сформировать рекомендации "
-            f"только для {exported_users:,} клиентов."
-            .replace(",", " ")
+            f"[{_now()}] В итоговые файлы выгружено клиентов: "
+            f"{exported_users:,}".replace(",", " ")
         )
-    wb.save(out_xlsx)
 
-    print("\n[RECS COLLECTIONS] Количество рекомендаций по коллекциям в Excel:")
+        if (
+                export_user_limit is not None
+                and exported_users < export_user_limit
+        ):
+            print(
+                f"[{_now()}] Предупреждение: требовалось "
+                f"{export_user_limit:,}, но удалось сформировать рекомендации "
+                f"только для {exported_users:,} клиентов."
+                .replace(",", " ")
+            )
+        wb.save(xlsx_temp_path)
+        workbook_to_close = wb
+        wb = None
+        workbook_to_close.close()
 
-    if collection_counts:
-        total_recs = sum(collection_counts.values())
+        print("\n[RECS COLLECTIONS] Количество рекомендаций по коллекциям в Excel:")
 
-        for coll, cnt in sorted(collection_counts.items(), key=lambda x: (-x[1], x[0])):
-            print(f"  {coll}: {cnt}")
+        if collection_counts:
+            total_recs = sum(collection_counts.values())
 
-        print(f"  Итого рекомендаций: {total_recs}")
-    else:
-        print("  Нет рекомендаций для подсчёта.")
+            for coll, cnt in sorted(collection_counts.items(), key=lambda x: (-x[1], x[0])):
+                print(f"  {coll}: {cnt}")
 
-    print()
+            print(f"  Итого рекомендаций: {total_recs}")
+        else:
+            print("  Нет рекомендаций для подсчёта.")
 
-    # close CSV files
-    if csv1_f is not None:
-        csv1_f.close()
-    if csvml_f is not None:
-        csvml_f.close()
+        print()
 
-    return out_xlsx
+        resources_to_close = csv_resources
+        csv_resources = []
+        _close_export_csv_files(resources_to_close, primary_error=None)
+
+        if csv1_temp_path is not None:
+            _validate_export_csv(
+                csv1_temp_path,
+                ["CustomerID", "ProductID"],
+            )
+        if csvml_temp_path is not None:
+            _validate_export_csv(
+                csvml_temp_path,
+                [
+                    "CustomerMindboxId",
+                    "Quantity",
+                    "ProductGroupOffline1C",
+                    "CustomFieldKoefficient",
+                ],
+            )
+        _validate_export_xlsx(xlsx_temp_path)
+
+        publication_paths = []
+        if csv1_temp_path is not None:
+            publication_paths.append((csv1_temp_path, out_csv_format1))
+        if csvml_temp_path is not None:
+            publication_paths.append((csvml_temp_path, out_csv_kanzler_ml))
+        publication_paths.append((xlsx_temp_path, out_xlsx))
+
+        for temp_path, final_path in publication_paths:
+            os.replace(temp_path, os.fspath(final_path))
+
+        return out_xlsx
+
+    except BaseException as primary_error:
+        resources_to_close = csv_resources
+        csv_resources = []
+        _close_export_csv_files(
+            resources_to_close,
+            primary_error=primary_error,
+        )
+
+        if wb is not None:
+            workbook_to_close = wb
+            wb = None
+            try:
+                workbook_to_close.save(xlsx_temp_path)
+            except BaseException as finalize_error:
+                _diagnose_export_cleanup_error(
+                    "finalize",
+                    xlsx_temp_path,
+                    finalize_error,
+                )
+            try:
+                workbook_to_close.close()
+            except BaseException as close_error:
+                _diagnose_export_cleanup_error(
+                    "close",
+                    os.fspath(out_xlsx),
+                    close_error,
+                )
+        raise
+    finally:
+        for temp_path in temp_paths:
+            _cleanup_export_temp(temp_path)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
