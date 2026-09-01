@@ -635,12 +635,15 @@ def load_order_filter_settings(aboba):
 
 
 # -------------------------------------------КНОПКА "ПРИМЕНИТЬ НАСТРОЙКИ"-----------------------------------------------
-def apply_filters_all_stats(aboba):
+def apply_filters_all_stats(aboba) -> bool:
 
     # пересчитываем все страницы статистики по текущим фильтрам
-    analyze_orders_full_dataset(aboba)
-    analyze_views_full_dataset(aboba)
-    analyze_favorites_full_dataset(aboba)
+    results = (
+        analyze_orders_full_dataset(aboba),
+        analyze_views_full_dataset(aboba),
+        analyze_favorites_full_dataset(aboba),
+    )
+    return all(results)
 
 
 def save_and_apply_filters(aboba):
@@ -655,7 +658,13 @@ def save_and_apply_filters(aboba):
     set_status_processing(aboba, "Применение фильтров...")
     QApplication.processEvents()
 
-    apply_filters_all_stats(aboba)
+    stats_ok = apply_filters_all_stats(aboba)
+
+    if not stats_ok:
+        set_status_error(aboba, "Не удалось применить фильтры")
+        QApplication.processEvents()
+        schedule_status_reset(aboba, 5)
+        return
 
     set_status_ok(aboba, "Фильтры применены")
     QApplication.processEvents()
@@ -1075,7 +1084,7 @@ def set_order_filters_enabled(aboba, enabled: bool):
 
 # ///////////////////////////////////////////АНАЛИЗ ФАЙЛОВ//////////////////////////////////////////////////////////
 # -------------------------------------------АНАЛИЗ ЗАКЗАОВ---------------------------------------------------------
-def analyze_orders_full_dataset(aboba):
+def analyze_orders_full_dataset(aboba) -> bool:
     try:
         file_path = "ВходныеДанные/Заказы.csv"
 
@@ -1123,7 +1132,7 @@ def analyze_orders_full_dataset(aboba):
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
-            return
+            return True
 
         # Загружаем CSV
         df = pd.read_csv(file_path, sep="|", dtype=str)
@@ -1169,7 +1178,7 @@ def analyze_orders_full_dataset(aboba):
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
-            return
+            return True
 
         # Фильтр по периоду
         if (date_from is not None or date_to is not None):
@@ -1180,7 +1189,7 @@ def analyze_orders_full_dataset(aboba):
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
-                return
+                return True
             if date_from is not None:
                 df = df[df["Дата"] >= date_from]
             if date_to is not None:
@@ -1200,7 +1209,7 @@ def analyze_orders_full_dataset(aboba):
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.store_mode.currentText() if hasattr(aboba, "store_mode") else "В группе"
 
@@ -1223,7 +1232,7 @@ def analyze_orders_full_dataset(aboba):
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.kind_mode.currentText() if hasattr(aboba, "kind_mode") else "В группе"
 
@@ -1240,7 +1249,7 @@ def analyze_orders_full_dataset(aboba):
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
-            return
+            return True
 
         # Числовые поля
         df["Количество"] = pd.to_numeric(df["Количество"], errors="coerce").fillna(0).astype(int)
@@ -1402,6 +1411,7 @@ def analyze_orders_full_dataset(aboba):
         aboba.order_full_stats_label.setStyleSheet("""QLabel {font-size: 16px;}""")
 
         update_filter_summary(aboba)
+        return True
 
     except Exception as e:
         set_order_filters_enabled(aboba, False)
@@ -1410,10 +1420,11 @@ def analyze_orders_full_dataset(aboba):
             icon="Картинки/Неудача.png",
             main_layout=aboba.order_full_output_layout,
             stats_label=aboba.order_full_stats_label)
+        return False
 
 
 # -------------------------------------------АНАЛИЗ ПРОСМОТРОВ------------------------------------------------------
-def analyze_views_full_dataset(aboba):
+def analyze_views_full_dataset(aboba) -> bool:
     try:
         file_path = "ВходныеДанные/Просмотры.csv"
 
@@ -1436,7 +1447,7 @@ def analyze_views_full_dataset(aboba):
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
-            return
+            return True
 
         # Загружаем CSV
         df = pd.read_csv(file_path, sep="|", dtype=str)
@@ -1474,7 +1485,7 @@ def analyze_views_full_dataset(aboba):
                     main_layout=aboba.views_full_output_layout,
                     stats_label=aboba.views_full_stats_label
                 )
-                return
+                return True
 
             df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce", format="%Y-%m-%d")
 
@@ -1500,7 +1511,7 @@ def analyze_views_full_dataset(aboba):
                     main_layout=aboba.views_full_output_layout,
                     stats_label=aboba.views_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.kind_mode.currentText() if hasattr(aboba, "kind_mode") else "В группе"
             if mode == "Не в группе":
@@ -1516,7 +1527,7 @@ def analyze_views_full_dataset(aboba):
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
-            return
+            return True
 
         # Если данных нет
         if df.empty:
@@ -1526,7 +1537,7 @@ def analyze_views_full_dataset(aboba):
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
-            return
+            return True
 
         # Количество просмотров
         total_views = len(df)
@@ -1670,6 +1681,7 @@ def analyze_views_full_dataset(aboba):
 
         aboba.views_full_stats_label.setText(result)
         aboba.views_full_stats_label.setStyleSheet("""QLabel {font-size: 16px;}""")
+        return True
 
     except Exception as e:
         vyvod_zaglyschek(
@@ -1678,10 +1690,11 @@ def analyze_views_full_dataset(aboba):
             main_layout=aboba.views_full_output_layout,
             stats_label=aboba.views_full_stats_label
         )
+        return False
 
 
 # -------------------------------------------АНАЛИЗ ИЗБРАННОГО------------------------------------------------------
-def analyze_favorites_full_dataset(aboba):
+def analyze_favorites_full_dataset(aboba) -> bool:
     try:
         file_path = "ВходныеДанные/Избранное.csv"
 
@@ -1703,7 +1716,7 @@ def analyze_favorites_full_dataset(aboba):
                 main_layout=aboba.favorites_full_output_layout,
                 stats_label=aboba.favorites_full_stats_label
             )
-            return
+            return True
 
         df = pd.read_csv(file_path, sep="|", dtype=str)
 
@@ -1738,7 +1751,7 @@ def analyze_favorites_full_dataset(aboba):
                     main_layout=aboba.favorites_full_output_layout,
                     stats_label=aboba.favorites_full_stats_label
                 )
-                return
+                return True
 
             df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce", format="%Y-%m-%d")
 
@@ -1764,7 +1777,7 @@ def analyze_favorites_full_dataset(aboba):
                     main_layout=aboba.favorites_full_output_layout,
                     stats_label=aboba.favorites_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.kind_mode.currentText() if hasattr(aboba, "kind_mode") else "В группе"
             if mode == "Не в группе":
@@ -1780,7 +1793,7 @@ def analyze_favorites_full_dataset(aboba):
                 main_layout=aboba.favorites_full_output_layout,
                 stats_label=aboba.favorites_full_stats_label
             )
-            return
+            return True
 
         # Количество добавлений
         total_fav = len(df)
@@ -1872,11 +1885,13 @@ def analyze_favorites_full_dataset(aboba):
 
         aboba.favorites_full_stats_label.setText(result)
         aboba.favorites_full_stats_label.setStyleSheet("""QLabel {font-size: 16px;}""")
+        return True
 
     except Exception as e:
         vyvod_zaglyschek(text=f"Ошибка при анализе файла: {e}", icon="Картинки/Неудача.png",
                          main_layout=aboba.favorites_full_output_layout,
                          stats_label=aboba.favorites_full_stats_label)
+        return False
 
 
 # ///////////////////////////////////////////ЗАГРУЗКА ФАЙЛОВ////////////////////////////////////////////////////////////
