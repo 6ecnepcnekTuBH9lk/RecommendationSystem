@@ -152,6 +152,172 @@ def test_inference_error_keeps_existing_outputs_byte_for_byte(
     _assert_no_export_temps(tmp_path)
 
 
+def test_current_stock_read_error_does_not_fallback_or_publish(
+    tmp_path, monkeypatch
+):
+    real_stock_loader = BPRMF._load_item_stocks
+    real_read_csv_pipe = BPRMF._read_csv_pipe
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+
+    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir.mkdir()
+    current_path = current_data_dir / "Номенклатура.csv"
+    historical_path = tmp_path / "synthetic-data" / "Номенклатура.csv"
+    pd.DataFrame(
+        [{"КодНоменклатуры": "item-1", "Остаток": "200"}]
+    ).to_csv(
+        current_path,
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(
+        [{"КодНоменклатуры": "item-1", "Остаток": "150"}]
+    ).to_csv(
+        historical_path,
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    current_reads = 0
+    stock_load_paths = []
+
+    def fail_second_current_read(path):
+        nonlocal current_reads
+        if Path(path).resolve() == current_path.resolve():
+            current_reads += 1
+            if current_reads == 2:
+                raise PermissionError("synthetic current stock read failure")
+        return real_read_csv_pipe(path)
+
+    def recording_stock_loader(data_dir):
+        stock_load_paths.append(Path(data_dir).resolve())
+        return real_stock_loader(data_dir)
+
+    monkeypatch.setattr(BPRMF, "_read_csv_pipe", fail_second_current_read)
+    monkeypatch.setattr(BPRMF, "_load_item_stocks", recording_stock_loader)
+
+    with pytest.raises(
+        PermissionError,
+        match="synthetic current stock read failure",
+    ):
+        _run_export(paths)
+
+    assert current_reads == 2
+    assert stock_load_paths == [current_data_dir.resolve()]
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
+def test_valid_empty_current_stocks_do_not_use_historical_fallback(
+    tmp_path, monkeypatch
+):
+    real_stock_loader = BPRMF._load_item_stocks
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+
+    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir.mkdir()
+    pd.DataFrame(columns=["КодНоменклатуры", "Остаток"]).to_csv(
+        current_data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(
+        [{"КодНоменклатуры": "item-1", "Остаток": "150"}]
+    ).to_csv(
+        tmp_path / "synthetic-data" / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    stock_load_dirs = []
+
+    def recording_stock_loader(data_dir):
+        stock_load_dirs.append(Path(data_dir).resolve())
+        return real_stock_loader(data_dir)
+
+    monkeypatch.setattr(BPRMF, "_load_item_stocks", recording_stock_loader)
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    assert stock_load_dirs == [current_data_dir.resolve()]
+    assert _read_csv_rows(paths["csv1"]) == [["CustomerID", "ProductID"]]
+    assert _read_csv_rows(paths["csv2"]) == [[
+        "CustomerMindboxId",
+        "Quantity",
+        "ProductGroupOffline1C",
+        "CustomFieldKoefficient",
+    ]]
+
+
+def test_missing_current_stocks_use_historical_fallback(tmp_path, monkeypatch):
+    real_stock_loader = BPRMF._load_item_stocks
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    historical_data_dir = tmp_path / "synthetic-data"
+    pd.DataFrame(
+        [{"КодНоменклатуры": "item-1", "Остаток": "150"}]
+    ).to_csv(
+        historical_data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    stock_load_dirs = []
+
+    def recording_stock_loader(data_dir):
+        stock_load_dirs.append(Path(data_dir).resolve())
+        return real_stock_loader(data_dir)
+
+    monkeypatch.setattr(BPRMF, "_load_item_stocks", recording_stock_loader)
+
+    assert _run_export(paths) == str(paths["xlsx"])
+
+    assert stock_load_dirs == [historical_data_dir.resolve()]
+    assert _read_csv_rows(paths["csv1"])[1] == ["79001234567", "item-1"]
+
+
+def test_broken_historical_stock_fallback_propagates_and_preserves_outputs(
+    tmp_path, monkeypatch
+):
+    real_stock_loader = BPRMF._load_item_stocks
+    real_read_csv_pipe = BPRMF._read_csv_pipe
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+    historical_path = tmp_path / "synthetic-data" / "Номенклатура.csv"
+    historical_path.write_text(
+        "КодНоменклатуры|Остаток\nitem-1|150\n",
+        encoding="utf-8-sig",
+    )
+    stock_load_dirs = []
+
+    def fail_historical_stock_read(path):
+        if Path(path).resolve() == historical_path.resolve():
+            raise PermissionError("synthetic historical stock read failure")
+        return real_read_csv_pipe(path)
+
+    def recording_stock_loader(data_dir):
+        stock_load_dirs.append(Path(data_dir).resolve())
+        return real_stock_loader(data_dir)
+
+    monkeypatch.setattr(BPRMF, "_read_csv_pipe", fail_historical_stock_read)
+    monkeypatch.setattr(BPRMF, "_load_item_stocks", recording_stock_loader)
+
+    with pytest.raises(
+        PermissionError,
+        match="synthetic historical stock read failure",
+    ):
+        _run_export(paths)
+
+    assert stock_load_dirs == [(tmp_path / "synthetic-data").resolve()]
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
 def test_success_preserves_xlsx_and_csv_formats(tmp_path, monkeypatch):
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
 

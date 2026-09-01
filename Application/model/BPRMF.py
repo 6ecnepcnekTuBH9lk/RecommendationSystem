@@ -1099,15 +1099,17 @@ def _load_item_stocks(data_dir: str) -> Dict[str, str]:
     if not os.path.isfile(nom_path):
         return {}
 
-    try:
-        nom = _read_csv_pipe(nom_path)
-    except Exception:
-        return {}
+    nom = _read_csv_pipe(nom_path)
 
     nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
 
-    if "КодНоменклатуры" not in nom.columns or "Остаток" not in nom.columns:
-        return {}
+    required_columns = {"КодНоменклатуры", "Остаток"}
+    missing_columns = required_columns.difference(nom.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(
+            f"Номенклатура.csv не содержит обязательные колонки остатков: {missing}"
+        )
 
     sub = nom[["КодНоменклатуры", "Остаток"]].copy()
 
@@ -2381,10 +2383,14 @@ def export_recommendations_excel(
     # Остатки берём из текущей номенклатуры, потому что после сезонного сопоставления
     # код товара может быть заменён на товар из актуальной коллекции.
     current_data_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-    item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)
-
-    # fallback на cfg.data_dir
-    if not item_stocks:
+    current_nomenclature_path = os.path.join(
+        current_data_dir,
+        "Номенклатура.csv",
+    )
+    if os.path.isfile(current_nomenclature_path):
+        item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)
+    else:
+        # Historical fallback сохраняется только при отсутствии current source.
         item_stocks = _load_item_stocks(data_dir)
 
     # Вид номенклатуры нужен для сглаживания конверсии и fallback новых товаров.
