@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
                              QAbstractItemView, QTableWidget, QHeaderView,
                              QTableWidgetItem)
 
-from Application.photo.photo_processing import (_ensure_photo_map, _set_photo_cell)
+from Application.photo.photo_processing import (_ensure_photo_map, _photo_url_for_code, _set_photo_cell)
 
 from Application.settings.settings_and_filter import (
     get_selected_list_values
@@ -273,6 +273,133 @@ def create_result_widgets_tab(aboba):
 
 # //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 # -------------------------------------------ОСНОВНАЯ ФУНКЦИЯ ПОЛУЧЕНИЯ ДАННЫХ------------------------------------------
+def _prepare_purchase_table_rows(
+        aboba, df: pd.DataFrame
+) -> list[tuple[str, str, str, str, str, str]]:
+    rows = []
+
+    for row in df.itertuples(index=False):
+        code = str(row.КодНоменклатуры)
+        name = str(row.НазваниеНоменклатуры)
+        collection = str(getattr(row, "Коллекция", "") or "").strip()
+        interaction = str(row.Взаимодействие)
+        dt_text = str(row.ДатаВзаимодействия)
+        photo_url = _photo_url_for_code(aboba, code)
+
+        if collection.lower() == "nan":
+            collection = ""
+
+        rows.append((code, name, collection, interaction, dt_text, photo_url))
+
+    return rows
+
+
+def _prepare_recommendation_table_rows(
+        aboba, recs_df: pd.DataFrame
+) -> list[tuple[str, str, str, str, str, str, str]]:
+    rows = []
+
+    for row in recs_df.itertuples(index=False):
+        code = str(row.КодНоменклатуры)
+        name = str(row.НазваниеНоменклатуры)
+        collection = str(getattr(row, "Коллекция", "") or "").strip()
+        coef = str(getattr(row, "Коэффициент", "") or "").strip()
+        conversion = str(getattr(row, "Конверсия", "") or "").strip()
+        stock = str(getattr(row, "Остаток", "") or "").strip()
+        photo_url = _photo_url_for_code(aboba, code)
+
+        if collection.lower() == "nan":
+            collection = ""
+
+        if coef.lower() == "nan":
+            coef = ""
+
+        if conversion.lower() == "nan":
+            conversion = ""
+
+        if stock.lower() == "nan":
+            stock = ""
+
+        rows.append((code, name, collection, coef, conversion, stock, photo_url))
+
+    return rows
+
+
+def _apply_client_search_result(aboba, info: dict, purchase_rows: list, recommendation_rows: list) -> None:
+    # Новое поколение изображений начинается только после полной подготовки данных.
+    aboba._img_gen += 1
+    gen = aboba._img_gen
+
+    aboba._img_queue.clear()
+    aboba._img_targets.clear()
+    aboba._img_inflight.clear()
+
+    if hasattr(aboba, "_img_retry_count"):
+        aboba._img_retry_count.clear()
+
+    _fill_client_info_panel(aboba, info)
+
+    aboba.purchases_table.setRowCount(0)
+    if purchase_rows:
+        aboba.purchases_table.clearContents()
+        aboba.purchases_table.setRowCount(len(purchase_rows))
+
+        for r, (code, name, collection, interaction, dt_text, photo_url) in enumerate(purchase_rows):
+            it = QTableWidgetItem(code)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.purchases_table.setItem(r, 1, it)
+
+            it = QTableWidgetItem(name)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.purchases_table.setItem(r, 2, it)
+
+            it = QTableWidgetItem(collection)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.purchases_table.setItem(r, 3, it)
+
+            it = QTableWidgetItem(interaction)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.purchases_table.setItem(r, 4, it)
+
+            it = QTableWidgetItem(dt_text)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.purchases_table.setItem(r, 5, it)
+
+            _set_photo_cell(aboba, aboba.purchases_table, r, code, gen, photo_url=photo_url)
+
+    aboba.recs_table.setRowCount(0)
+    if recommendation_rows:
+        aboba.recs_table.clearContents()
+        aboba.recs_table.setRowCount(len(recommendation_rows))
+
+        for r, (code, name, collection, coef, conversion, stock, photo_url) in enumerate(recommendation_rows):
+            it = QTableWidgetItem(code)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.recs_table.setItem(r, 1, it)
+
+            it = QTableWidgetItem(name)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.recs_table.setItem(r, 2, it)
+
+            it = QTableWidgetItem(collection)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.recs_table.setItem(r, 3, it)
+
+            it = QTableWidgetItem(coef)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.recs_table.setItem(r, 4, it)
+
+            it = QTableWidgetItem(conversion)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.recs_table.setItem(r, 5, it)
+
+            it = QTableWidgetItem(stock)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            aboba.recs_table.setItem(r, 6, it)
+
+            _set_photo_cell(aboba, aboba.recs_table, r, code, gen, photo_url=photo_url)
+
+
 def show_purchase_history_clicked(aboba):
     field_ui = aboba.client_filter_field.currentText().strip()
     value = aboba.mb_input.text().strip()
@@ -316,123 +443,25 @@ def show_purchase_history_clicked(aboba):
 
         mindbox_id = mindbox_ids[0]
 
-        # заполняем правую панель данными клиента
+        # Сначала полностью подготавливаем данные, не меняя result widgets.
         info = _load_client_info(mindbox_id)
-        _fill_client_info_panel(aboba, info)
 
         # фото-мапа (код -> ссылка/путь)
         _ensure_photo_map(aboba)
 
-        # --- новый цикл заполнения таблиц: новое "поколение" картинок ---
-        aboba._img_gen += 1
-        gen = aboba._img_gen
-
-        aboba._img_queue.clear()
-        aboba._img_targets.clear()
-        aboba._img_inflight.clear()
-
-        if hasattr(aboba, "_img_retry_count"):
-            aboba._img_retry_count.clear()
-
         # ===================== ИСТОРИЯ ВЗАИМОДЕЙСТВИЙ =====================
         df = _load_client_interactions(aboba, mindbox_id)
-        if df.empty:
-            aboba.purchases_table.setRowCount(0)
-        else:
-            aboba.purchases_table.setRowCount(0)
-            aboba.purchases_table.clearContents()
-            aboba.purchases_table.setRowCount(len(df))
-
-            for r, row in enumerate(df.itertuples(index=False)):
-                code = str(row.КодНоменклатуры)
-                name = str(row.НазваниеНоменклатуры)
-                collection = str(getattr(row, "Коллекция", "") or "").strip()
-                interaction = str(row.Взаимодействие)
-                dt_text = str(row.ДатаВзаимодействия)
-
-                if collection.lower() == "nan":
-                    collection = ""
-
-                it = QTableWidgetItem(code)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.purchases_table.setItem(r, 1, it)
-
-                it = QTableWidgetItem(name)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.purchases_table.setItem(r, 2, it)
-
-                it = QTableWidgetItem(collection)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.purchases_table.setItem(r, 3, it)
-
-                it = QTableWidgetItem(interaction)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.purchases_table.setItem(r, 4, it)
-
-                it = QTableWidgetItem(dt_text)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.purchases_table.setItem(r, 5, it)
-
-                _set_photo_cell(aboba, aboba.purchases_table, r, code, gen)
 
         # ===================== РЕКОМЕНДАЦИИ ИЗ EXCEL =====================
         topk = int(aboba.recs_topk.currentText().replace("Топ-", "").strip())
 
         recs_df = _load_recommendations_from_excel(aboba, mindbox_id, topk)
-        if recs_df.empty:
-            aboba.recs_table.setRowCount(0)
-        else:
-            aboba.recs_table.setRowCount(0)
-            aboba.recs_table.clearContents()
-            aboba.recs_table.setRowCount(len(recs_df))
+        purchase_rows = _prepare_purchase_table_rows(aboba, df)
+        recommendation_rows = _prepare_recommendation_table_rows(aboba, recs_df)
 
-            for r, row in enumerate(recs_df.itertuples(index=False)):
-                code = str(row.КодНоменклатуры)
-                name = str(row.НазваниеНоменклатуры)
-                collection = str(getattr(row, "Коллекция", "") or "").strip()
-                coef = str(getattr(row, "Коэффициент", "") or "").strip()
-                conversion = str(getattr(row, "Конверсия", "") or "").strip()
-                stock = str(getattr(row, "Остаток", "") or "").strip()
+        # Commit-stage: к этому моменту все реалистичные I/O/data операции завершены.
+        _apply_client_search_result(aboba, info, purchase_rows, recommendation_rows)
 
-                if collection.lower() == "nan":
-                    collection = ""
-
-                if coef.lower() == "nan":
-                    coef = ""
-
-                if conversion.lower() == "nan":
-                    conversion = ""
-
-                if stock.lower() == "nan":
-                    stock = ""
-
-                it = QTableWidgetItem(code)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.recs_table.setItem(r, 1, it)
-
-                it = QTableWidgetItem(name)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.recs_table.setItem(r, 2, it)
-
-                it = QTableWidgetItem(collection)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.recs_table.setItem(r, 3, it)
-
-                it = QTableWidgetItem(coef)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.recs_table.setItem(r, 4, it)
-
-                it = QTableWidgetItem(conversion)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.recs_table.setItem(r, 5, it)
-
-                it = QTableWidgetItem(stock)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                aboba.recs_table.setItem(r, 6, it)
-
-                _set_photo_cell(aboba, aboba.recs_table, r, code, gen)
-
-        # сообщение про пустую историю — оставим как раньше (если хочешь)
         if df.empty:
             set_status_error(aboba, "У выбранного клиента взаимодействий не найдено")
             aboba.status_label.repaint()
@@ -442,6 +471,7 @@ def show_purchase_history_clicked(aboba):
 
             show_custom_message(aboba, "Ошибка", "У выбранного клиента взаимодействий не найдено",
                                 "Картинки/Неудача.png")
+            return
 
         set_status_ok(aboba, "Данные успешно получены")
         schedule_status_reset(aboba, 5)
