@@ -592,51 +592,75 @@ def load_order_filter_settings(aboba):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if hasattr(aboba, "filter_date_from"):
-            aboba.filter_date_from.setText(str(data.get("date_from", "")))
-        if hasattr(aboba, "filter_date_to"):
-            aboba.filter_date_to.setText(str(data.get("date_to", "")))
+        # PREPARE: сначала преобразуем все значения, не изменяя UI/state.
+        date_from = (
+            str(data.get("date_from", ""))
+            if hasattr(aboba, "filter_date_from")
+            else None
+        )
+        date_to = (
+            str(data.get("date_to", ""))
+            if hasattr(aboba, "filter_date_to")
+            else None
+        )
 
-        # Восстанавливаем количество клиентов в выгрузке
+        max_export_users = None
         if hasattr(aboba, "max_export_users_input"):
             try:
                 max_export_users = int(data.get("max_export_users", 1000))
             except (TypeError, ValueError):
                 max_export_users = 1000
 
-            aboba.max_export_users_input.setValue(max_export_users)
-
+        store_mode_index = None
         if hasattr(aboba, "store_mode"):
-            txt = str(data.get("store_mode", "В группе"))
-            idx = aboba.store_mode.findText(txt)
-            if idx >= 0:
-                aboba.store_mode.setCurrentIndex(idx)
+            store_mode_text = str(data.get("store_mode", "В группе"))
+            index = aboba.store_mode.findText(store_mode_text)
+            if index >= 0:
+                store_mode_index = index
 
+        kind_mode_index = None
         if hasattr(aboba, "kind_mode"):
-            txt = str(data.get("kind_mode", "В группе"))
-            idx = aboba.kind_mode.findText(txt)
-            if idx >= 0:
-                aboba.kind_mode.setCurrentIndex(idx)
+            kind_mode_text = str(data.get("kind_mode", "В группе"))
+            index = aboba.kind_mode.findText(kind_mode_text)
+            if index >= 0:
+                kind_mode_index = index
 
-        aboba._pending_store_selection = list(
-            data.get("stores_selected", [])
-        )
-
-        aboba._pending_kind_selection = list(
-            data.get("kinds_selected", [])
-        )
-
-        aboba._pending_season_selection = list(
-            data.get("seasons_selected", [])
-        )
-
-        # Отдельный отбор видов номенклатуры для итоговой выгрузки
-        aboba._pending_export_kind_selection = list(
+        pending_store_selection = list(data.get("stores_selected", []))
+        pending_kind_selection = list(data.get("kinds_selected", []))
+        pending_season_selection = list(data.get("seasons_selected", []))
+        pending_export_kind_selection = list(
             data.get("export_kinds_selected", [])
         )
+        pending_store_city_map = dict(data.get("store_city_map", {}) or {})
+        store_city_map = dict(pending_store_city_map)
 
-        aboba._pending_store_city_map = dict(data.get("store_city_map", {}) or {})
-        aboba._store_city_map = dict(aboba._pending_store_city_map)
+        # COMMIT: все settings уже успешно прочитаны и преобразованы.
+        if hasattr(aboba, "filter_date_from"):
+            aboba.filter_date_from.setText(date_from)
+        if hasattr(aboba, "filter_date_to"):
+            aboba.filter_date_to.setText(date_to)
+
+        # Восстанавливаем количество клиентов в выгрузке
+        if hasattr(aboba, "max_export_users_input"):
+            aboba.max_export_users_input.setValue(max_export_users)
+
+        if store_mode_index is not None:
+            aboba.store_mode.setCurrentIndex(store_mode_index)
+
+        if kind_mode_index is not None:
+            aboba.kind_mode.setCurrentIndex(kind_mode_index)
+
+        aboba._pending_store_selection = pending_store_selection
+
+        aboba._pending_kind_selection = pending_kind_selection
+
+        aboba._pending_season_selection = pending_season_selection
+
+        # Отдельный отбор видов номенклатуры для итоговой выгрузки
+        aboba._pending_export_kind_selection = pending_export_kind_selection
+
+        aboba._pending_store_city_map = pending_store_city_map
+        aboba._store_city_map = store_city_map
 
         if hasattr(aboba, "store_city_table"):
             load_cities_from_coordinates_file(aboba)
