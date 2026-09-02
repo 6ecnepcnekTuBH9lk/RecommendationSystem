@@ -2031,6 +2031,9 @@ def load_csv_file(aboba):
 
         def _process_pair(reader_sep: str, processor_fn, filename: str) -> tuple[pd.DataFrame | None, str]:
             df_src = read_csv_auto_encoding(aboba, file_path=file_path, sep=reader_sep)
+            if df_src is None:
+                return None, ""
+
             df = processor_fn(aboba, df_src)
             if df is None:
                 return None, ""
@@ -2077,22 +2080,28 @@ def load_csv_file(aboba):
                 processor_fn=process_orders_file,
                 filename="Заказы.csv",
             )
-            if df_final is not None:
-                _save_store_list(df_final, input_dir)
+            if df_final is None:
+                return
+
+            _save_store_list(df_final, input_dir)
 
         elif selected_type == "Просмотры товаров и категорий из Mindbox":
-            _process_pair(
+            df_final, _ = _process_pair(
                 reader_sep=";",
                 processor_fn=process_views_file,
                 filename="Просмотры.csv",
             )
+            if df_final is None:
+                return
 
         elif selected_type == "Добавление товаров в избранное из Mindbox":
-            _process_pair(
+            df_final, _ = _process_pair(
                 reader_sep=";",
                 processor_fn=process_favorites_file,
                 filename="Избранное.csv",
             )
+            if df_final is None:
+                return
 
         elif selected_type == "Номенклатура из 1С":
             ok = _process_single(
