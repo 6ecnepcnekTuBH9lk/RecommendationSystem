@@ -813,13 +813,14 @@ def _ensure_item_name_map(aboba):
     if aboba._name_by_code is not None:
         return
 
-    aboba._name_by_code = {}
     nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
     if not os.path.isfile(nom_path):
+        aboba._name_by_code = {}
         return
 
     df = pd.read_csv(nom_path, sep="|", encoding="utf-8-sig", dtype=str)
     if "КодНоменклатуры" not in df.columns:
+        aboba._name_by_code = {}
         return
 
     primary_col = "НазваниеНаСайте"
@@ -827,6 +828,7 @@ def _ensure_item_name_map(aboba):
 
     # если нет ни одной колонки с названием — выходим
     if primary_col not in df.columns and fallback_col not in df.columns:
+        aboba._name_by_code = {}
         return
 
     df["КодНоменклатуры"] = (
@@ -851,12 +853,13 @@ def _ensure_item_name_map(aboba):
     df["_name_final"] = df[primary_col]
     df.loc[df["_name_final"].eq(""), "_name_final"] = df.loc[df["_name_final"].eq(""), fallback_col]
 
-    aboba._name_by_code = (
+    prepared_map = (
         df.dropna(subset=["КодНоменклатуры"])
         .drop_duplicates(subset=["КодНоменклатуры"], keep="first")
         .set_index("КодНоменклатуры")["_name_final"]
         .to_dict()
     )
+    aboba._name_by_code = prepared_map
 
 
 def _format_stock_value_ui(v) -> str:
@@ -1172,8 +1175,11 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
     out["Остаток"] = out["Остаток"].map(_format_stock_value_ui)
 
     # подтягиваем названия
-    _ensure_item_name_map(aboba)
-    name_map = aboba._name_by_code or {}
+    try:
+        _ensure_item_name_map(aboba)
+        name_map = aboba._name_by_code or {}
+    except Exception:
+        name_map = {}
     out["НазваниеНоменклатуры"] = out["КодНоменклатуры"].map(name_map).fillna("")
 
     # fallback по коллекциям из Номенклатура.csv, если в Excel коллекция пустая
