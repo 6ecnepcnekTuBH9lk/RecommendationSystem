@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from Application.files import files_processing
+from Application.tabs import create_results_tab
 from Application.tabs import data_processing_tab
 
 
@@ -77,6 +79,153 @@ def _configure_loader(monkeypatch, tmp_path, mode, new_frame):
     )
 
     return window
+
+
+def _nomenclature_frame(code, name, collection, stock):
+    return pd.DataFrame(
+        [
+            {
+                "КодНоменклатуры": code,
+                "Номенклатура": name,
+                "НазваниеНаСайте": name,
+                "ВидНоменклатуры": "Synthetic kind",
+                "ВидАссортимента": "Synthetic assortment",
+                "Марка": "Synthetic brand",
+                "Коллекция": collection,
+                "СезонНоски": "Synthetic season",
+                "ПолНоменклатуры": "Synthetic gender",
+                "ГруппаСоставов": "Synthetic composition",
+                "КатегорияНаСайте": "Synthetic category",
+                "СтилеваяГруппа": "Synthetic style",
+                "ТитульнаяФотография": "https://example.com/synthetic.jpg",
+                "Остаток": stock,
+            }
+        ]
+    )
+
+
+def _configure_nomenclature_loader(monkeypatch, tmp_path, new_frame):
+    window = _configure_loader(
+        monkeypatch,
+        tmp_path,
+        "Добавить новый / Обновить существующий",
+        new_frame,
+    )
+    window.combo_box_types = _Choice("Номенклатура из 1С")
+    window._name_by_code = {"old-code": "OLD name"}
+    window._collection_by_code = {"old-code": "OLD collection"}
+    window._stock_by_code = {"old-code": "1"}
+
+    monkeypatch.setattr(
+        files_processing,
+        "set_status_ok",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        files_processing,
+        "schedule_status_reset",
+        lambda *args, **kwargs: None,
+    )
+
+    return window
+
+
+def test_successful_nomenclature_replacement_invalidates_metadata_caches_and_reloads_new_source(
+    tmp_path, monkeypatch
+):
+    target_dir = tmp_path / "ВходныеДанные"
+    target_dir.mkdir()
+    target = target_dir / "Номенклатура.csv"
+    _nomenclature_frame("old-code", "OLD name", "OLD collection", "1").to_csv(
+        target, sep="|", index=False, encoding="utf-8-sig"
+    )
+    new_frame = _nomenclature_frame(
+        "new-code", "NEW name", "NEW collection", "42"
+    )
+    window = _configure_nomenclature_loader(monkeypatch, tmp_path, new_frame)
+
+    data_processing_tab.load_csv_file(window)
+
+    result = pd.read_csv(target, sep="|", encoding="utf-8-sig", dtype=str)
+    assert result[
+        ["КодНоменклатуры", "НазваниеНаСайте", "Коллекция", "Остаток"]
+    ].to_dict(orient="records") == [
+        {
+            "КодНоменклатуры": "new-code",
+            "НазваниеНаСайте": "NEW name",
+            "Коллекция": "NEW collection",
+            "Остаток": "42",
+        }
+    ]
+    assert window._name_by_code is None
+    assert window._collection_by_code is None
+    assert window._stock_by_code is None
+
+    create_results_tab._ensure_item_name_map(window)
+    create_results_tab._ensure_item_collection_map(window)
+    create_results_tab._ensure_item_stock_map(window)
+
+    assert window._name_by_code == {"new-code": "NEW name"}
+    assert window._collection_by_code == {"new-code": "NEW collection"}
+    assert window._stock_by_code == {"new-code": "42"}
+
+
+def test_failed_nomenclature_processing_preserves_metadata_caches(
+    tmp_path, monkeypatch
+):
+    target_dir = tmp_path / "ВходныеДанные"
+    target_dir.mkdir()
+    target = target_dir / "Номенклатура.csv"
+    _nomenclature_frame("old-code", "OLD name", "OLD collection", "1").to_csv(
+        target, sep="|", index=False, encoding="utf-8-sig"
+    )
+    original_bytes = target.read_bytes()
+    window = _configure_nomenclature_loader(
+        monkeypatch,
+        tmp_path,
+        _nomenclature_frame("new-code", "NEW name", "NEW collection", "42"),
+    )
+    monkeypatch.setattr(
+        data_processing_tab,
+        "process_nomenclature_file",
+        lambda *args, **kwargs: None,
+    )
+
+    data_processing_tab.load_csv_file(window)
+
+    assert target.read_bytes() == original_bytes
+    assert window._name_by_code == {"old-code": "OLD name"}
+    assert window._collection_by_code == {"old-code": "OLD collection"}
+    assert window._stock_by_code == {"old-code": "1"}
+
+
+def test_failed_nomenclature_publication_preserves_metadata_caches(
+    tmp_path, monkeypatch
+):
+    target_dir = tmp_path / "ВходныеДанные"
+    target_dir.mkdir()
+    target = target_dir / "Номенклатура.csv"
+    _nomenclature_frame("old-code", "OLD name", "OLD collection", "1").to_csv(
+        target, sep="|", index=False, encoding="utf-8-sig"
+    )
+    original_bytes = target.read_bytes()
+    window = _configure_nomenclature_loader(
+        monkeypatch,
+        tmp_path,
+        _nomenclature_frame("new-code", "NEW name", "NEW collection", "42"),
+    )
+
+    def fail_replace(source, destination):
+        raise PermissionError("synthetic nomenclature replace error")
+
+    monkeypatch.setattr(data_processing_tab.os, "replace", fail_replace)
+
+    data_processing_tab.load_csv_file(window)
+
+    assert target.read_bytes() == original_bytes
+    assert window._name_by_code == {"old-code": "OLD name"}
+    assert window._collection_by_code == {"old-code": "OLD collection"}
+    assert window._stock_by_code == {"old-code": "1"}
 
 
 def test_load_csv_overwrite_replaces_existing_orders(tmp_path, monkeypatch):

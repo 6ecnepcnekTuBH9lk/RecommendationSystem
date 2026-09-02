@@ -2113,6 +2113,10 @@ def load_csv_file(aboba):
             if not ok:
                 return
 
+            aboba._name_by_code = None
+            aboba._collection_by_code = None
+            aboba._stock_by_code = None
+
         elif selected_type == "Категории сайта из 1С":
             ok = _process_single(
                 reader_sep="|",
