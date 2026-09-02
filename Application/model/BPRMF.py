@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -1608,6 +1609,21 @@ def _build_user_seen_sets(
     return seen
 
 
+def _item_kind_mapping_fingerprint(
+    item_kind_by_code: Dict[str, str],
+) -> str:
+    normalized_pairs = sorted(
+        (str(code), _norm_text(kind))
+        for code, kind in item_kind_by_code.items()
+    )
+    payload = json.dumps(
+        normalized_pairs,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _load_historical_item_conversion(
     data_dir: str,
     item_kind_by_code: Dict[str, str],
@@ -1648,6 +1664,7 @@ def _load_historical_item_conversion(
         os.path.abspath(views_path), _mtime(views_path),
         os.path.abspath(orders_path), _mtime(orders_path),
         os.path.abspath(nom_path), _mtime(nom_path),
+        _item_kind_mapping_fingerprint(item_kind_by_code),
         int(window_days), float(prior_strength),
     )
 

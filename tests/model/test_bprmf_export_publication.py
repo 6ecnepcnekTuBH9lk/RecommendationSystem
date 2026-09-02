@@ -23,6 +23,123 @@ _INVALID_INTERACTION_SCHEMA_CASES = [
 ]
 
 
+@pytest.fixture
+def isolated_historical_conversion_cache():
+    loader = BPRMF._load_historical_item_conversion
+    sentinel = object()
+    previous_cache = getattr(loader, "_cache", sentinel)
+    if previous_cache is not sentinel:
+        del loader._cache
+
+    try:
+        yield
+    finally:
+        if hasattr(loader, "_cache"):
+            del loader._cache
+        if previous_cache is not sentinel:
+            loader._cache = previous_cache
+
+
+def _write_historical_conversion_sources(data_dir):
+    data_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "MindboxID": "user-1",
+                "КодНоменклатуры": "A",
+                "Дата": "01.01.2026",
+                "ТипТовара": "Номенклатура",
+            },
+            {
+                "MindboxID": "user-2",
+                "КодНоменклатуры": "B",
+                "Дата": "01.01.2026",
+                "ТипТовара": "Номенклатура",
+            },
+        ]
+    ).to_csv(
+        data_dir / "Просмотры.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(
+        [
+            {
+                "MindboxID": "user-1",
+                "КодНоменклатуры": "A",
+                "Дата": "02.01.2026",
+            }
+        ]
+    ).to_csv(
+        data_dir / "Заказы.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(columns=["КодНоменклатуры", "ВидНоменклатуры"]).to_csv(
+        data_dir / "Номенклатура.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+
+def test_historical_conversion_cache_invalidates_when_item_kind_mapping_changes(
+    tmp_path,
+    isolated_historical_conversion_cache,
+):
+    data_dir = tmp_path / "historical-data"
+    _write_historical_conversion_sources(data_dir)
+
+    first_values, first_global = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Общий", "B": "Общий", "C": "Общий"},
+    )
+    second_values, second_global = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Высокий", "B": "Низкий", "C": "Низкий"},
+    )
+
+    assert first_values == pytest.approx(
+        {"A": 52.381, "B": 47.619, "C": 50.0}
+    )
+    assert second_values == pytest.approx(
+        {"A": 100.0, "B": 0.0, "C": 0.0}
+    )
+    assert first_global == pytest.approx(50.0)
+    assert second_global == pytest.approx(50.0)
+
+
+def test_historical_conversion_cache_reuses_same_semantic_inputs(
+    tmp_path,
+    monkeypatch,
+    isolated_historical_conversion_cache,
+):
+    data_dir = tmp_path / "historical-data"
+    _write_historical_conversion_sources(data_dir)
+    real_read_csv = BPRMF.pd.read_csv
+    read_paths = []
+
+    def record_read(path, *args, **kwargs):
+        read_paths.append(Path(path).name)
+        return real_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(BPRMF.pd, "read_csv", record_read)
+
+    first_result = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Высокий", "B": "Низкий", "C": "Низкий"},
+    )
+    second_result = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"C": " Низкий ", "B": "Низкий\u00a0", "A": "  Высокий"},
+    )
+
+    assert second_result == first_result
+    assert read_paths == ["Просмотры.csv", "Заказы.csv"]
+
+
 class _SyntheticExportModel:
     def __init__(self, inference_error=None):
         self.inference_error = inference_error
