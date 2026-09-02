@@ -140,6 +140,128 @@ def test_historical_conversion_cache_reuses_same_semantic_inputs(
     assert read_paths == ["Просмотры.csv", "Заказы.csv"]
 
 
+@pytest.mark.parametrize(
+    "stat_error",
+    [
+        PermissionError("synthetic historical stat permission error"),
+        OSError("synthetic historical generic stat error"),
+    ],
+    ids=["permission", "generic-os-error"],
+)
+def test_historical_conversion_stat_error_is_not_treated_as_cache_version(
+    tmp_path,
+    monkeypatch,
+    isolated_historical_conversion_cache,
+    stat_error,
+):
+    data_dir = tmp_path / "historical-data"
+    _write_historical_conversion_sources(data_dir)
+    real_getmtime = BPRMF.os.path.getmtime
+
+    def fail_getmtime(path):
+        raise stat_error
+
+    monkeypatch.setattr(BPRMF.os.path, "getmtime", fail_getmtime)
+
+    try:
+        first_values, _ = BPRMF._load_historical_item_conversion(
+            str(data_dir),
+            {"A": "Вид"},
+        )
+    except type(stat_error):
+        return
+
+    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры", "Дата"]).to_csv(
+        data_dir / "Заказы.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    cached_values, _ = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Вид"},
+    )
+
+    monkeypatch.setattr(BPRMF.os.path, "getmtime", real_getmtime)
+    del BPRMF._load_historical_item_conversion._cache
+    fresh_values, _ = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Вид"},
+    )
+
+    assert first_values["A"] == pytest.approx(100.0)
+    assert cached_values == fresh_values, (
+        f"stat error was hidden: cached={cached_values}, fresh={fresh_values}"
+    )
+
+
+def test_historical_conversion_stat_failure_preserves_previous_cache_without_using_it(
+    tmp_path,
+    monkeypatch,
+    isolated_historical_conversion_cache,
+):
+    data_dir = tmp_path / "historical-data"
+    _write_historical_conversion_sources(data_dir)
+    BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Вид"},
+    )
+    previous_cache = BPRMF._load_historical_item_conversion._cache
+
+    def fail_getmtime(path):
+        raise PermissionError("synthetic historical stat permission error")
+
+    monkeypatch.setattr(BPRMF.os.path, "getmtime", fail_getmtime)
+
+    with pytest.raises(
+        PermissionError,
+        match="synthetic historical stat permission error",
+    ):
+        BPRMF._load_historical_item_conversion(
+            str(data_dir),
+            {"A": "Вид"},
+        )
+
+    assert BPRMF._load_historical_item_conversion._cache is previous_cache
+
+
+@pytest.mark.parametrize("missing_filename", ["Просмотры.csv", "Заказы.csv"])
+def test_historical_conversion_missing_source_keeps_existing_fallback(
+    tmp_path,
+    isolated_historical_conversion_cache,
+    capsys,
+    missing_filename,
+):
+    data_dir = tmp_path / "historical-data"
+    _write_historical_conversion_sources(data_dir)
+    (data_dir / missing_filename).unlink()
+
+    result = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Вид"},
+    )
+
+    assert result == ({}, 0.0)
+    assert "отсутствуют Просмотры.csv или Заказы.csv" in capsys.readouterr().out
+
+
+def test_historical_conversion_missing_nomenclature_keeps_calculation_available(
+    tmp_path,
+    isolated_historical_conversion_cache,
+):
+    data_dir = tmp_path / "historical-data"
+    _write_historical_conversion_sources(data_dir)
+    (data_dir / "Номенклатура.csv").unlink()
+
+    values, global_value = BPRMF._load_historical_item_conversion(
+        str(data_dir),
+        {"A": "Высокий", "B": "Низкий", "C": "Низкий"},
+    )
+
+    assert values == pytest.approx({"A": 100.0, "B": 0.0, "C": 0.0})
+    assert global_value == pytest.approx(50.0)
+
+
 class _SyntheticExportModel:
     def __init__(self, inference_error=None):
         self.inference_error = inference_error
@@ -349,6 +471,109 @@ def _sequential_name_loader(results):
         return result
 
     return load, calls
+
+
+@pytest.mark.parametrize(
+    "stat_error",
+    [
+        PermissionError("synthetic current conversion stat permission error"),
+        OSError("synthetic current conversion generic stat error"),
+    ],
+    ids=["permission-error", "generic-os-error"],
+)
+def test_export_current_conversion_stat_error_does_not_use_historical_fallback(
+    tmp_path,
+    monkeypatch,
+    stat_error,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+    current_data_dir = tmp_path / "ВходныеДанные"
+    _write_historical_conversion_sources(current_data_dir)
+
+    def fail_if_historical_loader_is_reached(**kwargs):
+        pytest.fail(
+            "historical fallback loader reached after current stat error: "
+            f"{kwargs['data_dir']}"
+        )
+
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_historical_item_conversion",
+        fail_if_historical_loader_is_reached,
+    )
+    real_stat = BPRMF.os.stat
+    failing_path = current_data_dir / "Просмотры.csv"
+
+    def fail_current_conversion_stat(path, *args, **kwargs):
+        if Path(path) == failing_path:
+            raise stat_error
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(BPRMF.os, "stat", fail_current_conversion_stat)
+
+    with pytest.raises(type(stat_error), match=str(stat_error)):
+        _run_export(paths)
+
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
+def test_export_current_conversion_directory_is_technical_error(
+    tmp_path,
+    monkeypatch,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir.mkdir()
+    (current_data_dir / "Просмотры.csv").mkdir()
+    (current_data_dir / "Заказы.csv").write_bytes(
+        (tmp_path / "synthetic-data" / "Заказы.csv").read_bytes()
+    )
+
+    def fail_if_historical_loader_is_reached(**kwargs):
+        pytest.fail(
+            "historical fallback loader reached for a current source directory: "
+            f"{kwargs['data_dir']}"
+        )
+
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_historical_item_conversion",
+        fail_if_historical_loader_is_reached,
+    )
+
+    with pytest.raises(OSError, match="not a regular file"):
+        _run_export(paths)
+
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
+def test_export_missing_current_conversion_source_keeps_historical_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    historical_data_dir = tmp_path / "synthetic-data"
+    load_dirs = []
+
+    def record_historical_loader(**kwargs):
+        load_dirs.append(Path(kwargs["data_dir"]).resolve())
+        return {"item-1": 12.34}, 12.34
+
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_historical_item_conversion",
+        record_historical_loader,
+    )
+
+    _run_export(paths)
+
+    assert load_dirs == [historical_data_dir.resolve()]
+    assert all(Path(path).is_file() for path in paths.values())
+    _assert_no_export_temps(tmp_path)
 
 
 @pytest.mark.parametrize(

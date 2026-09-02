@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1650,20 +1651,35 @@ def _load_historical_item_conversion(
     orders_path = _path_csv(data_dir, "Заказы")
     nom_path = _path_csv(data_dir, "Номенклатура")
 
-    if not os.path.isfile(views_path) or not os.path.isfile(orders_path):
+    def _regular_file_mtime(path: str) -> Optional[float]:
+        try:
+            mtime = os.path.getmtime(path)
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            return None
+
+        if not stat.S_ISREG(mode):
+            raise OSError(
+                f"Historical conversion source is not a regular file: {path}"
+            )
+        return mtime
+
+    views_mtime = _regular_file_mtime(views_path)
+    if views_mtime is None:
         print(f"[{_now()}] Историческая конверсия не рассчитана: отсутствуют Просмотры.csv или Заказы.csv.")
         return {}, 0.0
 
-    def _mtime(path: str) -> float:
-        try:
-            return os.path.getmtime(path)
-        except OSError:
-            return 0.0
+    orders_mtime = _regular_file_mtime(orders_path)
+    if orders_mtime is None:
+        print(f"[{_now()}] Историческая конверсия не рассчитана: отсутствуют Просмотры.csv или Заказы.csv.")
+        return {}, 0.0
+
+    nom_mtime = _regular_file_mtime(nom_path)
 
     cache_key = (
-        os.path.abspath(views_path), _mtime(views_path),
-        os.path.abspath(orders_path), _mtime(orders_path),
-        os.path.abspath(nom_path), _mtime(nom_path),
+        os.path.abspath(views_path), views_mtime,
+        os.path.abspath(orders_path), orders_mtime,
+        os.path.abspath(nom_path), nom_mtime,
         _item_kind_mapping_fingerprint(item_kind_by_code),
         int(window_days), float(prior_strength),
     )
@@ -2529,10 +2545,24 @@ def export_recommendations_excel(
         item_kind_by_code[str(code)] = _norm_text((meta or {}).get("ВидНоменклатуры", ""))
 
     # Для расчёта используем только текущие обработанные файлы.
+    def _current_conversion_source_exists(path: str) -> bool:
+        try:
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            return False
+
+        if not stat.S_ISREG(mode):
+            raise OSError(
+                f"Current conversion source is not a regular file: {path}"
+            )
+        return True
+
     conversion_data_dir = current_data_dir
+    current_views_path = _path_csv(conversion_data_dir, "Просмотры")
+    current_orders_path = _path_csv(conversion_data_dir, "Заказы")
     if not (
-        os.path.isfile(_path_csv(conversion_data_dir, "Просмотры"))
-        and os.path.isfile(_path_csv(conversion_data_dir, "Заказы"))
+        _current_conversion_source_exists(current_views_path)
+        and _current_conversion_source_exists(current_orders_path)
     ):
         conversion_data_dir = data_dir
 
