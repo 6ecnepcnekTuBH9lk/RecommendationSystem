@@ -110,6 +110,10 @@ class _MissingInteractionSourcesError(FileNotFoundError):
     pass
 
 
+class _InvalidInteractionSchemaError(ValueError):
+    pass
+
+
 def _require_interaction_sources(data_dir: str) -> None:
     required_names = ("Заказы", "Просмотры", "Избранное")
     missing_files = [
@@ -121,6 +125,47 @@ def _require_interaction_sources(data_dir: str) -> None:
         raise _MissingInteractionSourcesError(
             "Отсутствуют обязательные файлы взаимодействий: "
             + ", ".join(missing_files)
+        )
+
+
+def _validate_interaction_source_schemas(data_dir: str) -> None:
+    required_schemas = (
+        ("Заказы", ("MindboxID", "КодНоменклатуры")),
+        (
+            "Просмотры",
+            ("MindboxID", "КодНоменклатуры", "ТипТовара"),
+        ),
+        ("Избранное", ("MindboxID", "КодНоменклатуры")),
+    )
+    invalid_sources = []
+
+    for source_name, required_columns in required_schemas:
+        path = _path_csv(data_dir, source_name)
+        try:
+            actual_columns = pd.read_csv(
+                path,
+                sep="|",
+                dtype=str,
+                encoding="utf-8-sig",
+                nrows=0,
+            ).columns
+        except pd.errors.EmptyDataError:
+            actual_columns = ()
+
+        missing_columns = [
+            column
+            for column in required_columns
+            if column not in actual_columns
+        ]
+        if missing_columns:
+            invalid_sources.append(
+                f"{os.path.basename(path)}: " + ", ".join(missing_columns)
+            )
+
+    if invalid_sources:
+        raise _InvalidInteractionSchemaError(
+            "Файлы взаимодействий не содержат обязательные колонки: "
+            + "; ".join(invalid_sources)
         )
 
 
@@ -1192,6 +1237,7 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
     """
     cfg = TrainConfig()
     _require_interaction_sources(cfg.data_dir)
+    _validate_interaction_source_schemas(cfg.data_dir)
     maps_json, ckpt = _load_artifacts()
 
     idx2user = maps_json["idx2user"]
@@ -2202,6 +2248,9 @@ def export_recommendations_excel(
 
     device = torch.device(device_str if (device_str == "cpu" or torch.cuda.is_available()) else "cpu")
     model, cfg, num_users, num_items = _build_model_from_ckpt(ckpt, device)
+    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
+    _require_interaction_sources(data_dir)
+    _validate_interaction_source_schemas(data_dir)
 
     # --------- подготовка данных для сезонного маппинга ---------
     train_item_meta: Dict[str, Dict[str, str]] = ckpt.get("train_item_meta", {}) or {}
@@ -2365,11 +2414,6 @@ def export_recommendations_excel(
     csv_min_k = 10 if (out_csv_format1 or out_csv_kanzler_ml) else 1
     k = max(int(csv_min_k), int(k))
     k = max(1, min(int(k), num_items))
-
-    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
-
-    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
-    _require_interaction_sources(data_dir)
 
     # Нормализуем выбранные пользователем виды номенклатуры.
     # Пустое множество означает, что ограничение не применяется.
@@ -3074,7 +3118,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if mindbox is not None:
         try:
             print_recommendations(mindbox, k=k)
-        except _MissingInteractionSourcesError as exc:
+        except (
+            _MissingInteractionSourcesError,
+            _InvalidInteractionSchemaError,
+        ) as exc:
             print(f"[{_now()}] {exc}", file=sys.stderr)
             return TRAIN_EXIT_NO_DATA
 

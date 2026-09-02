@@ -8,6 +8,17 @@ import torch
 from Application.model import BPRMF
 
 
+_INVALID_INTERACTION_SCHEMA_CASES = [
+    ("Заказы.csv", "MindboxID"),
+    ("Заказы.csv", "КодНоменклатуры"),
+    ("Просмотры.csv", "MindboxID"),
+    ("Просмотры.csv", "КодНоменклатуры"),
+    ("Просмотры.csv", "ТипТовара"),
+    ("Избранное.csv", "MindboxID"),
+    ("Избранное.csv", "КодНоменклатуры"),
+]
+
+
 def _write_nomenclature(data_dir: Path, rows, *, columns=None) -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "Номенклатура.csv"
@@ -296,4 +307,63 @@ def test_cli_recommendations_fail_when_required_interaction_source_is_missing(
 
     assert exit_code == BPRMF.TRAIN_EXIT_NO_DATA
     assert missing_filename in captured.err
+    assert "Recommendations (BPR-MF)" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("filename", "missing_column"),
+    _INVALID_INTERACTION_SCHEMA_CASES,
+)
+def test_cli_recommendations_fail_when_interaction_schema_is_invalid(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    filename,
+    missing_column,
+):
+    _prepare_cli_recommendations(tmp_path, monkeypatch)
+    source_path = tmp_path / "ВходныеДанные" / filename
+    columns = list(pd.read_csv(source_path, sep="|", dtype=str).columns)
+    columns.remove(missing_column)
+    pd.DataFrame(columns=columns).to_csv(
+        source_path,
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    exit_code = BPRMF.main(["--recommend", "user-1", "--k", "2"])
+    captured = capsys.readouterr()
+
+    assert exit_code == BPRMF.TRAIN_EXIT_NO_DATA
+    assert filename in captured.err
+    assert missing_column in captured.err
+    assert "Recommendations (BPR-MF)" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        PermissionError("synthetic interaction permission error"),
+        pd.errors.ParserError("synthetic interaction parser error"),
+    ],
+    ids=["permission", "parser"],
+)
+def test_cli_interaction_schema_read_error_remains_technical(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    read_error,
+):
+    _prepare_cli_recommendations(tmp_path, monkeypatch)
+
+    def fail_read(*args, **kwargs):
+        raise read_error
+
+    monkeypatch.setattr(BPRMF.pd, "read_csv", fail_read)
+
+    with pytest.raises(type(read_error), match=str(read_error)):
+        BPRMF.main(["--recommend", "user-1", "--k", "2"])
+
+    captured = capsys.readouterr()
     assert "Recommendations (BPR-MF)" not in captured.out

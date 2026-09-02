@@ -12,6 +12,17 @@ from openpyxl import load_workbook
 from Application.model import BPRMF
 
 
+_INVALID_INTERACTION_SCHEMA_CASES = [
+    ("Заказы.csv", "MindboxID"),
+    ("Заказы.csv", "КодНоменклатуры"),
+    ("Просмотры.csv", "MindboxID"),
+    ("Просмотры.csv", "КодНоменклатуры"),
+    ("Просмотры.csv", "ТипТовара"),
+    ("Избранное.csv", "MindboxID"),
+    ("Избранное.csv", "КодНоменклатуры"),
+]
+
+
 class _SyntheticExportModel:
     def __init__(self, inference_error=None):
         self.inference_error = inference_error
@@ -159,6 +170,40 @@ def _assert_no_export_temps(root):
     assert list(Path(root).rglob("*.tmp")) == []
 
 
+def _write_interaction_source_without_column(
+    data_dir,
+    filename,
+    missing_column,
+):
+    rows = {
+        "Заказы.csv": {
+            "MindboxID": "user-1",
+            "КодНоменклатуры": "item-1",
+            "Количество": "1",
+            "Телефон": "+7 (900) 123-45-67",
+            "ДисконтнаяКарта": "card-1",
+            "Почта": "user-1@example.test",
+        },
+        "Просмотры.csv": {
+            "MindboxID": "user-1",
+            "КодНоменклатуры": "item-1",
+            "ТипТовара": "Номенклатура",
+        },
+        "Избранное.csv": {
+            "MindboxID": "user-1",
+            "КодНоменклатуры": "item-1",
+        },
+    }
+    row = rows[filename].copy()
+    row.pop(missing_column)
+    pd.DataFrame([row]).to_csv(
+        Path(data_dir) / filename,
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+
 def _read_csv_rows(path):
     raw = Path(path).read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf")
@@ -274,6 +319,121 @@ def test_missing_views_does_not_publish_incomplete_seen_recommendation(
     assert "Просмотры.csv" in str(exc_info.value)
     _assert_old_outputs(paths, published_bytes)
     assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
+    _assert_no_export_temps(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("filename", "missing_column"),
+    _INVALID_INTERACTION_SCHEMA_CASES,
+)
+def test_export_invalid_interaction_schema_aborts_and_preserves_outputs(
+    tmp_path,
+    monkeypatch,
+    filename,
+    missing_column,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+    _write_interaction_source_without_column(
+        tmp_path / "synthetic-data",
+        filename,
+        missing_column,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _run_export(paths)
+
+    diagnostic = str(exc_info.value)
+    assert filename in diagnostic
+    assert missing_column in diagnostic
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
+def test_invalid_views_schema_does_not_publish_incomplete_seen_recommendation(
+    tmp_path,
+    monkeypatch,
+):
+    paths = _prepare_synthetic_export(
+        tmp_path,
+        monkeypatch,
+        model=_SyntheticRecommendationImpactModel(),
+        idx2item=["item-a", "item-b"],
+    )
+    data_dir = tmp_path / "synthetic-data"
+    pd.DataFrame(
+        [
+            {
+                "MindboxID": "user-1",
+                "КодНоменклатуры": "item-a",
+                "ТипТовара": "Номенклатура",
+            }
+        ]
+    ).to_csv(
+        data_dir / "Просмотры.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_item_names",
+        lambda source_dir: {"item-a": "Item A", "item-b": "Item B"},
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_item_stocks",
+        lambda source_dir: {"item-a": "150", "item-b": "150"},
+    )
+
+    assert _run_export(paths, filter_seen=True) == str(paths["xlsx"])
+    assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
+    published_bytes = {
+        name: Path(path).read_bytes()
+        for name, path in paths.items()
+    }
+
+    _write_interaction_source_without_column(
+        data_dir,
+        "Просмотры.csv",
+        "КодНоменклатуры",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        _run_export(paths, filter_seen=True)
+
+    diagnostic = str(exc_info.value)
+    assert "Просмотры.csv" in diagnostic
+    assert "КодНоменклатуры" in diagnostic
+    _assert_old_outputs(paths, published_bytes)
+    assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
+    _assert_no_export_temps(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        PermissionError("synthetic interaction permission error"),
+        pd.errors.ParserError("synthetic interaction parser error"),
+    ],
+    ids=["permission", "parser"],
+)
+def test_export_interaction_schema_read_error_remains_technical(
+    tmp_path,
+    monkeypatch,
+    read_error,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+
+    def fail_read(*args, **kwargs):
+        raise read_error
+
+    monkeypatch.setattr(BPRMF.pd, "read_csv", fail_read)
+
+    with pytest.raises(type(read_error), match=str(read_error)):
+        _run_export(paths)
+
+    _assert_old_outputs(paths, old_bytes)
     _assert_no_export_temps(tmp_path)
 
 
