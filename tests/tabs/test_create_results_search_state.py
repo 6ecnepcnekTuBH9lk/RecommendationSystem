@@ -67,6 +67,98 @@ def test_item_name_map_failed_read_does_not_publish_and_second_call_retries(
     assert tab._name_by_code == {"item-1": "Synthetic item"}
 
 
+def test_item_collection_map_failed_read_does_not_publish_and_second_call_retries(
+    tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "ВходныеДанные"
+    data_dir.mkdir()
+    (data_dir / "Номенклатура.csv").write_text(
+        "synthetic source",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    read_results = iter([
+        PermissionError("synthetic item collection read failure"),
+        pd.DataFrame([
+            {
+                "КодНоменклатуры": "item-1",
+                "Коллекция": "Synthetic collection",
+            }
+        ]),
+    ])
+    read_calls = []
+
+    def read_csv(path, **kwargs):
+        read_calls.append((path, kwargs))
+        result = next(read_results)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(create_results_tab.pd, "read_csv", read_csv)
+    tab = SimpleNamespace(_collection_by_code=None)
+
+    with pytest.raises(
+        PermissionError,
+        match="synthetic item collection read failure",
+    ):
+        create_results_tab._ensure_item_collection_map(tab)
+
+    assert tab._collection_by_code is None
+
+    create_results_tab._ensure_item_collection_map(tab)
+
+    assert len(read_calls) == 2
+    assert tab._collection_by_code == {"item-1": "Synthetic collection"}
+
+
+def test_item_stock_map_failed_read_does_not_publish_and_second_call_retries(
+    tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "ВходныеДанные"
+    data_dir.mkdir()
+    (data_dir / "Номенклатура.csv").write_text(
+        "synthetic source",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    read_results = iter([
+        PermissionError("synthetic item stock read failure"),
+        pd.DataFrame([
+            {
+                "КодНоменклатуры": "item-1",
+                "Остаток": "42",
+            }
+        ]),
+    ])
+    read_calls = []
+
+    def read_csv(path, **kwargs):
+        read_calls.append((path, kwargs))
+        result = next(read_results)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(create_results_tab.pd, "read_csv", read_csv)
+    tab = SimpleNamespace(_stock_by_code=None)
+
+    with pytest.raises(
+        PermissionError,
+        match="synthetic item stock read failure",
+    ):
+        create_results_tab._ensure_item_stock_map(tab)
+
+    assert tab._stock_by_code is None
+
+    create_results_tab._ensure_item_stock_map(tab)
+
+    assert len(read_calls) == 2
+    assert tab._stock_by_code == {"item-1": "42"}
+
+
 def test_persistent_item_name_read_error_keeps_client_search_in_degraded_mode(
     tmp_path, monkeypatch
 ):
@@ -199,6 +291,132 @@ def test_persistent_item_name_read_error_keeps_client_search_in_degraded_mode(
     _, purchase_rows, recommendation_rows = applied_results[0]
     assert purchase_rows[0][0:2] == ("history-item", "")
     assert recommendation_rows[0][0:2] == ("recommendation-item", "")
+    assert status_events == ["processing", "success"]
+    assert messages == []
+
+
+def test_persistent_item_collection_read_error_keeps_client_search_in_degraded_mode(
+    tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "ВходныеДанные"
+    data_dir.mkdir()
+    pd.DataFrame([
+        {
+            "MindboxID": "client-1",
+            "КодНоменклатуры": "history-item",
+            "Дата": "01.01.2026",
+        }
+    ]).to_csv(
+        data_dir / "Заказы.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    nomenclature_path = data_dir / "Номенклатура.csv"
+    nomenclature_path.write_text("synthetic source", encoding="utf-8")
+
+    model_dir = tmp_path / "Модель"
+    model_dir.mkdir()
+    (model_dir / "Рекомендации.xlsx").write_bytes(b"synthetic workbook")
+    monkeypatch.chdir(tmp_path)
+
+    recommendations = pd.DataFrame([
+        {
+            "MindboxID": "client-1",
+            "КодНоменклатуры": "recommendation-item",
+            "Коллекция": "",
+            "Коэффициент": "1.0",
+            "Конверсия": "12.5",
+            "Остаток": "150",
+        }
+    ])
+    real_read_csv = create_results_tab.pd.read_csv
+    item_collection_reads = []
+
+    def read_csv(path, *args, **kwargs):
+        if Path(path).resolve() == nomenclature_path.resolve():
+            item_collection_reads.append(Path(path))
+            raise PermissionError("synthetic persistent item collection read failure")
+        return real_read_csv(path, *args, **kwargs)
+
+    tab = SimpleNamespace(
+        client_filter_field=_Choice("MindboxID"),
+        mb_input=_TextField("client-1"),
+        recs_topk=_Choice("Топ-1"),
+        status_label=_TextField(),
+        status_icon=_TextField(),
+        _name_by_code={},
+        _collection_by_code=None,
+        _stock_by_code={},
+    )
+    applied_results = []
+    status_events = []
+    messages = []
+
+    monkeypatch.setattr(create_results_tab, "QApplication", _Application)
+    monkeypatch.setattr(
+        create_results_tab,
+        "_resolve_mindbox_ids",
+        lambda field, value: [value],
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "_load_client_info",
+        lambda mindbox_id: {"MindboxID": mindbox_id},
+    )
+    monkeypatch.setattr(create_results_tab, "_ensure_photo_map", lambda aboba: None)
+    monkeypatch.setattr(
+        create_results_tab,
+        "_photo_url_for_code",
+        lambda aboba, code: "",
+    )
+    monkeypatch.setattr(create_results_tab.pd, "read_csv", read_csv)
+    monkeypatch.setattr(
+        create_results_tab.pd,
+        "read_excel",
+        lambda path, dtype: recommendations.copy(),
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "_apply_client_search_result",
+        lambda aboba, info, purchase_rows, recommendation_rows: applied_results.append(
+            (info, purchase_rows, recommendation_rows)
+        ),
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "set_status_processing",
+        lambda aboba, text: status_events.append("processing"),
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "set_status_ok",
+        lambda aboba, text: status_events.append("success"),
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "set_status_error",
+        lambda aboba, text: status_events.append("error"),
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "schedule_status_reset",
+        lambda aboba, seconds: None,
+    )
+    monkeypatch.setattr(
+        create_results_tab,
+        "show_custom_message",
+        lambda *args, **kwargs: messages.append((args, kwargs)),
+    )
+
+    create_results_tab.show_purchase_history_clicked(tab)
+
+    assert len(item_collection_reads) == 2
+    assert tab._collection_by_code is None
+    assert len(applied_results) == 1
+    _, purchase_rows, recommendation_rows = applied_results[0]
+    assert purchase_rows[0][0:3] == ("history-item", "", "")
+    assert recommendation_rows[0][0:3] == ("recommendation-item", "", "")
     assert status_events == ["processing", "success"]
     assert messages == []
 

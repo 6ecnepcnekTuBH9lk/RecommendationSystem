@@ -885,16 +885,16 @@ def _ensure_item_stock_map(aboba):
     if getattr(aboba, "_stock_by_code", None) is not None:
         return
 
-    aboba._stock_by_code = {}
-
     nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
     if not os.path.isfile(nom_path):
+        aboba._stock_by_code = {}
         return
 
     df = pd.read_csv(nom_path, sep="|", encoding="utf-8-sig", dtype=str)
     df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
 
     if "КодНоменклатуры" not in df.columns or "Остаток" not in df.columns:
+        aboba._stock_by_code = {}
         return
 
     df["КодНоменклатуры"] = (
@@ -910,23 +910,24 @@ def _ensure_item_stock_map(aboba):
     df = df[df["КодНоменклатуры"] != ""]
     df = df.drop_duplicates("КодНоменклатуры", keep="last")
 
-    aboba._stock_by_code = df.set_index("КодНоменклатуры")["Остаток"].to_dict()
+    prepared_map = df.set_index("КодНоменклатуры")["Остаток"].to_dict()
+    aboba._stock_by_code = prepared_map
 
 
 def _ensure_item_collection_map(aboba):
     if getattr(aboba, "_collection_by_code", None) is not None:
         return
 
-    aboba._collection_by_code = {}
-
     nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
     if not os.path.isfile(nom_path):
+        aboba._collection_by_code = {}
         return
 
     df = pd.read_csv(nom_path, sep="|", encoding="utf-8-sig", dtype=str)
     df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
 
     if "КодНоменклатуры" not in df.columns or "Коллекция" not in df.columns:
+        aboba._collection_by_code = {}
         return
 
     df["КодНоменклатуры"] = (
@@ -947,7 +948,8 @@ def _ensure_item_collection_map(aboba):
     df = df[df["КодНоменклатуры"] != ""]
     df = df.drop_duplicates("КодНоменклатуры", keep="last")
 
-    aboba._collection_by_code = df.set_index("КодНоменклатуры")["Коллекция"].to_dict()
+    prepared_map = df.set_index("КодНоменклатуры")["Коллекция"].to_dict()
+    aboba._collection_by_code = prepared_map
 
 
 def _format_conversion_value_ui(v) -> str:
@@ -1183,8 +1185,11 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
     out["НазваниеНоменклатуры"] = out["КодНоменклатуры"].map(name_map).fillna("")
 
     # fallback по коллекциям из Номенклатура.csv, если в Excel коллекция пустая
-    _ensure_item_collection_map(aboba)
-    collection_map = getattr(aboba, "_collection_by_code", {}) or {}
+    try:
+        _ensure_item_collection_map(aboba)
+        collection_map = getattr(aboba, "_collection_by_code", {}) or {}
+    except Exception:
+        collection_map = {}
 
     mask_empty_collection = out["Коллекция"].astype(str).str.strip().isin(["", "nan", "None", "<NA>"])
     out.loc[mask_empty_collection, "Коллекция"] = (
