@@ -4,6 +4,17 @@ import pytest
 from Application.model import BPRMF
 
 
+_INVALID_INTERACTION_SCHEMA_CASES = [
+    ("Заказы.csv", "MindboxID"),
+    ("Заказы.csv", "КодНоменклатуры"),
+    ("Просмотры.csv", "MindboxID"),
+    ("Просмотры.csv", "КодНоменклатуры"),
+    ("Просмотры.csv", "ТипТовара"),
+    ("Избранное.csv", "MindboxID"),
+    ("Избранное.csv", "КодНоменклатуры"),
+]
+
+
 def _write_training_csvs(data_dir, *, with_interaction):
     data_dir.mkdir()
 
@@ -32,11 +43,205 @@ def _write_training_csvs(data_dir, *, with_interaction):
     )
 
 
+def _training_frames():
+    return {
+        "Заказы.csv": pd.DataFrame(
+            [
+                {
+                    "MindboxID": "synthetic-user",
+                    "КодНоменклатуры": "order-item",
+                    "Количество": "1",
+                }
+            ]
+        ),
+        "Просмотры.csv": pd.DataFrame(
+            [
+                {
+                    "MindboxID": "synthetic-user",
+                    "КодНоменклатуры": "view-item",
+                    "ТипТовара": "Номенклатура",
+                }
+            ]
+        ),
+        "Избранное.csv": pd.DataFrame(
+            [
+                {
+                    "MindboxID": "synthetic-user",
+                    "КодНоменклатуры": "favorite-item",
+                }
+            ]
+        ),
+    }
+
+
+def _write_training_frames(data_dir, frames):
+    data_dir.mkdir()
+    for filename, frame in frames.items():
+        frame.to_csv(
+            data_dir / filename,
+            sep="|",
+            index=False,
+            encoding="utf-8-sig",
+        )
+
+
 def _fail_if_called(name):
     def fail(*args, **kwargs):
         pytest.fail(f"{name} must not be called")
 
     return fail
+
+
+@pytest.mark.parametrize(
+    ("filename", "missing_column"),
+    _INVALID_INTERACTION_SCHEMA_CASES,
+)
+def test_training_rejects_invalid_interaction_schema(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    filename,
+    missing_column,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
+
+    frames = _training_frames()
+    frames[filename] = frames[filename].drop(columns=[missing_column])
+    data_dir = tmp_path / "training_data"
+    _write_training_frames(data_dir, frames)
+
+    result = BPRMF._train_in_this_process(
+        BPRMF.TrainConfig(data_dir=str(data_dir))
+    )
+    diagnostic = capsys.readouterr().out
+
+    assert result is False
+    assert filename in diagnostic
+    assert missing_column in diagnostic
+    assert not (tmp_path / "Модель").exists()
+
+
+@pytest.mark.parametrize(
+    "empty_filename",
+    ["Заказы.csv", "Просмотры.csv", "Избранное.csv"],
+)
+def test_training_accepts_schema_valid_empty_individual_source(
+    tmp_path,
+    monkeypatch,
+    empty_filename,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(BPRMF.torch.cuda, "is_available", lambda: False)
+
+    frames = _training_frames()
+    frames[empty_filename] = frames[empty_filename].iloc[0:0]
+    data_dir = tmp_path / "training_data"
+    _write_training_frames(data_dir, frames)
+    calls = []
+
+    def train(maps, events, cfg, device):
+        calls.append(("train", len(events)))
+        return object(), object()
+
+    monkeypatch.setattr(BPRMF, "train_bprmf", train)
+    monkeypatch.setattr(
+        BPRMF,
+        "_save_artifacts",
+        lambda cfg, maps, model: calls.append(("save", len(maps.idx2item))),
+    )
+
+    result = BPRMF._train_in_this_process(
+        BPRMF.TrainConfig(data_dir=str(data_dir))
+    )
+
+    assert result is True
+    assert calls[0][0] == "train"
+    assert calls[0][1] > 0
+    assert calls[1][0] == "save"
+
+
+def test_training_orders_without_quantity_use_one(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(BPRMF.torch.cuda, "is_available", lambda: False)
+
+    frames = _training_frames()
+    frames["Заказы.csv"] = frames["Заказы.csv"].drop(columns=["Количество"])
+    frames["Просмотры.csv"] = frames["Просмотры.csv"].iloc[0:0]
+    frames["Избранное.csv"] = frames["Избранное.csv"].iloc[0:0]
+    data_dir = tmp_path / "training_data"
+    _write_training_frames(data_dir, frames)
+    captured_events = []
+    cfg = BPRMF.TrainConfig(data_dir=str(data_dir), w_purchase=7.5)
+
+    def train(maps, events, train_cfg, device):
+        captured_events.append(events.copy())
+        return object(), object()
+
+    monkeypatch.setattr(BPRMF, "train_bprmf", train)
+    monkeypatch.setattr(BPRMF, "_save_artifacts", lambda *args: None)
+
+    assert BPRMF._train_in_this_process(cfg) is True
+    assert len(captured_events) == 1
+    assert captured_events[0]["w"].tolist() == [pytest.approx(cfg.w_purchase)]
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        PermissionError("synthetic interaction permission error"),
+        pd.errors.ParserError("synthetic interaction parser error"),
+    ],
+    ids=["permission", "parser"],
+)
+def test_training_interaction_schema_read_error_remains_technical(
+    tmp_path,
+    monkeypatch,
+    read_error,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
+
+    data_dir = tmp_path / "training_data"
+    _write_training_frames(data_dir, _training_frames())
+
+    def fail_read(*args, **kwargs):
+        raise read_error
+
+    monkeypatch.setattr(BPRMF.pd, "read_csv", fail_read)
+
+    with pytest.raises(type(read_error), match=str(read_error)):
+        BPRMF._train_in_this_process(BPRMF.TrainConfig(data_dir=str(data_dir)))
+
+
+def test_training_rejects_zero_byte_interaction_source(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
+
+    data_dir = tmp_path / "training_data"
+    _write_training_frames(data_dir, _training_frames())
+    (data_dir / "Просмотры.csv").write_bytes(b"")
+
+    result = BPRMF._train_in_this_process(
+        BPRMF.TrainConfig(data_dir=str(data_dir))
+    )
+    diagnostic = capsys.readouterr().out
+
+    assert result is False
+    assert "Просмотры.csv" in diagnostic
+    assert "MindboxID" in diagnostic
 
 
 def test_training_reports_controlled_failure_when_required_csv_is_missing(

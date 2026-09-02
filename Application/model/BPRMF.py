@@ -243,7 +243,16 @@ def _collect_user_item_events(
     if len(orders) and {"MindboxID", "КодНоменклатуры"}.issubset(orders.columns):
         o = orders[["MindboxID", "КодНоменклатуры"]].copy()
         o["ts"] = _parse_date_col(orders, "Дата")
-        qty = pd.to_numeric(orders.get("Количество", 1), errors="coerce").fillna(1).astype(float).clip(1, 10)
+        quantity_values = orders.get(
+            "Количество",
+            pd.Series(1, index=orders.index, dtype=np.float64),
+        )
+        qty = (
+            pd.to_numeric(quantity_values, errors="coerce")
+            .fillna(1)
+            .astype(float)
+            .clip(1, 10)
+        )
         o["w"] = cfg.w_purchase * qty
         o = o.dropna(subset=["MindboxID", "КодНоменклатуры"])
         o["u_idx"] = o["MindboxID"].astype(str).map(maps.user2idx)
@@ -1322,6 +1331,12 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
         for p in missing:
             print(f"  - {p}")
         print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
+        return False
+
+    try:
+        _validate_interaction_source_schemas(data_dir)
+    except _InvalidInteractionSchemaError as exc:
+        print(f"[{_now()}] {exc}")
         return False
 
     orders = _read_csv_pipe(orders_path)
