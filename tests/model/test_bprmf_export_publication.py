@@ -25,12 +25,21 @@ class _SyntheticExportModel:
         return torch.ones((len(user_indices), 1), dtype=torch.float32)
 
 
+class _SyntheticRecommendationImpactModel:
+    def item_vec_all(self):
+        return torch.tensor([[2.0], [1.0]], dtype=torch.float32)
+
+    def user_emb(self, user_indices):
+        return torch.ones((len(user_indices), 1), dtype=torch.float32)
+
+
 def _prepare_synthetic_export(
     tmp_path,
     monkeypatch,
     *,
     model=None,
     train_item_meta=None,
+    idx2item=None,
 ):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "synthetic-data"
@@ -52,11 +61,25 @@ def _prepare_synthetic_export(
         index=False,
         encoding="utf-8-sig",
     )
+    pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
+    ).to_csv(
+        data_dir / "Просмотры.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
+        data_dir / "Избранное.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
 
     cfg = BPRMF.TrainConfig(data_dir=str(data_dir), topk=1)
     mappings = {
         "idx2user": ["user-1"],
-        "idx2item": ["item-1"],
+        "idx2item": idx2item or ["item-1"],
     }
     checkpoint = {"train_item_meta": train_item_meta or {}}
     export_model = model or _SyntheticExportModel()
@@ -69,7 +92,12 @@ def _prepare_synthetic_export(
     monkeypatch.setattr(
         BPRMF,
         "_build_model_from_ckpt",
-        lambda loaded_checkpoint, device: (export_model, cfg, 1, 1),
+        lambda loaded_checkpoint, device: (
+            export_model,
+            cfg,
+            1,
+            len(mappings["idx2item"]),
+        ),
     )
     monkeypatch.setattr(
         BPRMF,
@@ -159,6 +187,94 @@ def _sequential_name_loader(results):
         return result
 
     return load, calls
+
+
+@pytest.mark.parametrize(
+    "missing_filename",
+    ["Заказы.csv", "Просмотры.csv", "Избранное.csv"],
+)
+def test_export_missing_required_interaction_source_aborts_and_preserves_outputs(
+    tmp_path,
+    monkeypatch,
+    missing_filename,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    old_bytes = _write_old_outputs(paths)
+    (tmp_path / "synthetic-data" / missing_filename).unlink()
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        _run_export(paths)
+
+    assert missing_filename in str(exc_info.value)
+    _assert_old_outputs(paths, old_bytes)
+    _assert_no_export_temps(tmp_path)
+
+
+@pytest.mark.parametrize("empty_filename", ["Просмотры.csv", "Избранное.csv"])
+def test_export_accepts_schema_valid_empty_required_interaction_source(
+    tmp_path,
+    monkeypatch,
+    empty_filename,
+):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    source_path = tmp_path / "synthetic-data" / empty_filename
+
+    assert source_path.is_file()
+    assert pd.read_csv(source_path, sep="|", dtype=str).empty
+    assert _run_export(paths) == str(paths["xlsx"])
+
+
+def test_missing_views_does_not_publish_incomplete_seen_recommendation(
+    tmp_path,
+    monkeypatch,
+):
+    paths = _prepare_synthetic_export(
+        tmp_path,
+        monkeypatch,
+        model=_SyntheticRecommendationImpactModel(),
+        idx2item=["item-a", "item-b"],
+    )
+    data_dir = tmp_path / "synthetic-data"
+    pd.DataFrame(
+        [
+            {
+                "MindboxID": "user-1",
+                "КодНоменклатуры": "item-a",
+                "ТипТовара": "Номенклатура",
+            }
+        ]
+    ).to_csv(
+        data_dir / "Просмотры.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_item_names",
+        lambda source_dir: {"item-a": "Item A", "item-b": "Item B"},
+    )
+    monkeypatch.setattr(
+        BPRMF,
+        "_load_item_stocks",
+        lambda source_dir: {"item-a": "150", "item-b": "150"},
+    )
+
+    assert _run_export(paths, filter_seen=True) == str(paths["xlsx"])
+    assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
+    published_bytes = {
+        name: Path(path).read_bytes()
+        for name, path in paths.items()
+    }
+
+    (data_dir / "Просмотры.csv").unlink()
+    with pytest.raises(FileNotFoundError) as exc_info:
+        _run_export(paths, filter_seen=True)
+
+    assert "Просмотры.csv" in str(exc_info.value)
+    _assert_old_outputs(paths, published_bytes)
+    assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
+    _assert_no_export_temps(tmp_path)
 
 
 def test_inference_error_keeps_existing_outputs_byte_for_byte(

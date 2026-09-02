@@ -180,7 +180,40 @@ class _SyntheticCliModel:
         return torch.tensor([[2.0], [1.0]], dtype=torch.float32)
 
 
-def _prepare_cli_recommendations(monkeypatch):
+def _prepare_cli_recommendations(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "ВходныеДанные"
+    data_dir.mkdir()
+    pd.DataFrame(
+        columns=[
+            "MindboxID",
+            "КодНоменклатуры",
+            "Количество",
+            "Телефон",
+            "ДисконтнаяКарта",
+            "Почта",
+        ]
+    ).to_csv(
+        data_dir / "Заказы.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
+    ).to_csv(
+        data_dir / "Просмотры.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
+        data_dir / "Избранное.csv",
+        sep="|",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
     mappings = {
         "idx2user": ["user-1"],
         "idx2item": ["item-a", "item-b"],
@@ -207,9 +240,9 @@ def _prepare_cli_recommendations(monkeypatch):
 
 
 def test_cli_name_failure_preserves_codes_scores_order_and_success(
-    monkeypatch, capsys
+    tmp_path, monkeypatch, capsys
 ):
-    _prepare_cli_recommendations(monkeypatch)
+    _prepare_cli_recommendations(tmp_path, monkeypatch)
     monkeypatch.setattr(
         BPRMF,
         "_load_item_names",
@@ -243,3 +276,24 @@ def test_cli_name_failure_preserves_codes_scores_order_and_success(
     ]
     assert degraded.err.count("Не удалось загрузить названия товаров") == 1
     assert "synthetic CLI item names failure" in degraded.err
+
+
+@pytest.mark.parametrize(
+    "missing_filename",
+    ["Заказы.csv", "Просмотры.csv", "Избранное.csv"],
+)
+def test_cli_recommendations_fail_when_required_interaction_source_is_missing(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    missing_filename,
+):
+    _prepare_cli_recommendations(tmp_path, monkeypatch)
+    (tmp_path / "ВходныеДанные" / missing_filename).unlink()
+
+    exit_code = BPRMF.main(["--recommend", "user-1", "--k", "2"])
+    captured = capsys.readouterr()
+
+    assert exit_code == BPRMF.TRAIN_EXIT_NO_DATA
+    assert missing_filename in captured.err
+    assert "Recommendations (BPR-MF)" not in captured.out

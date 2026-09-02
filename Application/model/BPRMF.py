@@ -106,6 +106,24 @@ def _path_csv(data_dir: str, name: str) -> str:
     return os.path.join(data_dir, f"{name}.csv")
 
 
+class _MissingInteractionSourcesError(FileNotFoundError):
+    pass
+
+
+def _require_interaction_sources(data_dir: str) -> None:
+    required_names = ("Заказы", "Просмотры", "Избранное")
+    missing_files = [
+        os.path.basename(_path_csv(data_dir, name))
+        for name in required_names
+        if not os.path.isfile(_path_csv(data_dir, name))
+    ]
+    if missing_files:
+        raise _MissingInteractionSourcesError(
+            "Отсутствуют обязательные файлы взаимодействий: "
+            + ", ".join(missing_files)
+        )
+
+
 def _read_csv_pipe(path: str) -> pd.DataFrame:
     # your processed files are pipe-separated with utf-8-sig (BOM-safe)
     return pd.read_csv(path, sep="|", dtype=str, encoding="utf-8-sig")
@@ -1173,6 +1191,7 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
     Prints top-K recommendations to console using saved artifacts (BPR-MF only).
     """
     cfg = TrainConfig()
+    _require_interaction_sources(cfg.data_dir)
     maps_json, ckpt = _load_artifacts()
 
     idx2user = maps_json["idx2user"]
@@ -2350,6 +2369,7 @@ def export_recommendations_excel(
     data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
 
     data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
+    _require_interaction_sources(data_dir)
 
     # Нормализуем выбранные пользователем виды номенклатуры.
     # Пустое множество означает, что ограничение не применяется.
@@ -3052,7 +3072,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return TRAIN_EXIT_SUCCESS if trained else TRAIN_EXIT_NO_DATA
 
     if mindbox is not None:
-        print_recommendations(mindbox, k=k)
+        try:
+            print_recommendations(mindbox, k=k)
+        except _MissingInteractionSourcesError as exc:
+            print(f"[{_now()}] {exc}", file=sys.stderr)
+            return TRAIN_EXIT_NO_DATA
 
     return TRAIN_EXIT_SUCCESS
 
