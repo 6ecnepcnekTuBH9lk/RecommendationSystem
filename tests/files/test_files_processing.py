@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
+import pytest
 
+from Application.files import files_processing
 from Application.files.files_processing import (
     process_categories_file,
     process_coordinates_file,
@@ -75,6 +77,126 @@ def _raw_customer_fields(prefix):
         f"{prefix}CustomerCustomFieldsMostViewedRootCategory": "20,0",
         f"{prefix}CustomerCustomFieldsMostViewedSubsidiaryCategory": np.nan,
     }
+
+
+def _raw_interaction_rows(source_name, dates):
+    if source_name == "orders":
+        base = {
+            "OrderIdsMindboxId": "5001.0",
+            "OrderLineStatusIdsExternalId": "CP",
+            "OrderFirstActionChannelName": "kanzler-style.ru",
+            "OrderLineProductIdsOffline1C": "123456.0",
+            "OrderLineProductIdsKanzlerKz": np.nan,
+            "OrderLineQuantity": "2",
+            "OrderLineBasePricePerItem": "100",
+            "OrderLinePriceOfLine": "150",
+            **_raw_customer_fields("Order"),
+        }
+        date_column = "OrderFirstActionDateTimeUtc"
+        mindbox_column = "OrderCustomerIdsMindboxId"
+    else:
+        base = {
+            "CustomerActionProductsIdsOffline1C": "123456.0",
+            "CustomerActionProductsIdsKanzlerKz": np.nan,
+            **_raw_customer_fields("CustomerAction"),
+        }
+        if source_name == "views":
+            base["CustomerActionProductCategoriesIdsOffline1C"] = np.nan
+        else:
+            base["CustomerActionActionTemplateIdsSystemName"] = "AddToWishlist"
+        date_column = "CustomerActionDateTimeUtc"
+        mindbox_column = "CustomerActionCustomerIdsMindboxId"
+
+    rows = []
+    for index, date_value in enumerate(dates, start=1):
+        row = dict(base)
+        row[date_column] = date_value
+        row[mindbox_column] = f"900{index}.0"
+        if source_name == "orders":
+            row["OrderIdsMindboxId"] = f"500{index}.0"
+        rows.append(row)
+    return rows
+
+
+@pytest.mark.parametrize("source_name", ["orders", "views", "favorites"])
+def test_interaction_processor_reports_malformed_date_without_dropping_rows(
+    tmp_path,
+    monkeypatch,
+    source_name,
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reference_files(tmp_path)
+    statuses = []
+    monkeypatch.setattr(
+        files_processing,
+        "set_status_ok",
+        lambda aboba, text: statuses.append(text),
+    )
+    monkeypatch.setattr(
+        files_processing,
+        "schedule_status_reset",
+        lambda *args: None,
+    )
+    processor = {
+        "orders": files_processing.process_orders_file,
+        "views": files_processing.process_views_file,
+        "favorites": files_processing.process_favorites_file,
+    }[source_name]
+    source = pd.DataFrame(
+        _raw_interaction_rows(
+            source_name,
+            ["2024-06-15 10:00:00", "not-a-date", ""],
+        )
+    )
+
+    result = processor(object(), source)
+
+    assert len(result) == 3
+    assert set(result["MindboxID"]) == {"9001", "9002", "9003"}
+    assert set(result["КодНоменклатуры"]) == {"123456"}
+    assert result.loc[result["MindboxID"] == "9001", "Дата"].notna().all()
+    assert result.loc[result["MindboxID"].isin(["9002", "9003"]), "Дата"].isna().all()
+    assert statuses == [
+        "Обработка завершена. Обнаружено некорректных значений даты: 1"
+    ]
+
+
+@pytest.mark.parametrize("source_name", ["orders", "views", "favorites"])
+def test_interaction_processor_does_not_warn_for_valid_or_empty_dates(
+    tmp_path,
+    monkeypatch,
+    source_name,
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reference_files(tmp_path)
+    statuses = []
+    monkeypatch.setattr(
+        files_processing,
+        "set_status_ok",
+        lambda aboba, text: statuses.append(text),
+    )
+    monkeypatch.setattr(
+        files_processing,
+        "schedule_status_reset",
+        lambda *args: None,
+    )
+    processor = {
+        "orders": files_processing.process_orders_file,
+        "views": files_processing.process_views_file,
+        "favorites": files_processing.process_favorites_file,
+    }[source_name]
+    source = pd.DataFrame(
+        _raw_interaction_rows(
+            source_name,
+            ["2024-06-15 10:00:00", "", "   ", np.nan, None],
+        )
+    )
+
+    result = processor(object(), source)
+
+    assert len(result) == 5
+    assert result["Дата"].notna().sum() == 1
+    assert statuses == ["Обработка завершена"]
 
 
 def test_process_orders_normalizes_filters_and_enriches_catalog(tmp_path, monkeypatch):

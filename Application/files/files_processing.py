@@ -61,6 +61,25 @@ def _get_json_with_retry(
     return None
 
 
+def _parse_interaction_date(values: pd.Series) -> tuple[pd.Series, int]:
+    raw_text = values.astype("string")
+    raw_nonempty = raw_text.notna() & raw_text.str.strip().ne("")
+    parsed = pd.to_datetime(values, errors="coerce").dt.normalize()
+    malformed_count = int((raw_nonempty & parsed.isna()).sum())
+    return parsed, malformed_count
+
+
+def _set_processing_complete_status(aboba, malformed_date_count: int) -> None:
+    message = "Обработка завершена"
+    if malformed_date_count:
+        message += (
+            ". Обнаружено некорректных значений даты: "
+            f"{malformed_date_count}"
+        )
+    set_status_ok(aboba, message)
+    schedule_status_reset(aboba, 5)
+
+
 # -------------------------------------------ОБРАБОТКА ЗАКАЗОВ------------------------------------------------------
 def process_orders_file(aboba, df):
     # Список нужных колонок и новые имена
@@ -151,7 +170,7 @@ def process_orders_file(aboba, df):
     df = df.drop(columns=["КодНоменклатурыРФ", "КодНоменклатурыКЗ"])
 
     # В колонке Дата оставляем только дату (убираем время)
-    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    df["Дата"], malformed_date_count = _parse_interaction_date(df["Дата"])
 
     df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors='coerce')
 
@@ -252,8 +271,7 @@ def process_orders_file(aboba, df):
 
     df = df.sort_values(by="Дата", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    _set_processing_complete_status(aboba, malformed_date_count)
 
     # возвращаем обработанный DataFrame
     return df
@@ -317,7 +335,7 @@ def process_views_file(aboba, df):
     df = df.drop(columns=["ТелефонОсновной", "ЗапаснойТелефон"])
 
     # В колонке Дата оставляем только дату (убираем время)
-    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    df["Дата"], malformed_date_count = _parse_interaction_date(df["Дата"])
 
     df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors='coerce')
 
@@ -461,8 +479,7 @@ def process_views_file(aboba, df):
 
     df = df.sort_values(by="Дата", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    _set_processing_complete_status(aboba, malformed_date_count)
 
     # возвращаем обработанный DataFrame
     return df
@@ -529,7 +546,7 @@ def process_favorites_file(aboba, df):
     df = df.drop(columns=["ТелефонОсновной", "ЗапаснойТелефон"])
 
     # В колонке Дата оставляем только дату (убираем время)
-    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    df["Дата"], malformed_date_count = _parse_interaction_date(df["Дата"])
 
     df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors='coerce')
 
@@ -625,8 +642,7 @@ def process_favorites_file(aboba, df):
 
     df = df.sort_values(by="Дата", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    _set_processing_complete_status(aboba, malformed_date_count)
 
     # возвращаем обработанный DataFrame
     return df
