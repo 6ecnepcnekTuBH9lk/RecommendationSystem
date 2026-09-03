@@ -6,6 +6,9 @@ import pytest
 from Application.tabs import data_processing_tab, train_model_tab
 
 
+_MISSING_DATE = object()
+
+
 class _TextField:
     def __init__(self, text):
         self._text = text
@@ -61,7 +64,34 @@ def _filter_window(date_from="01.01.2024", date_to="31.01.2024"):
         kind_mode=_Choice("В группе"),
         store_mode=_Choice("В группе"),
         order_full_output_layout=_Layout(),
+        favorites_full_output_layout=_Layout(),
     )
+
+
+def _favorites_row(client, item, date_marker=_MISSING_DATE):
+    row = {
+        "MindboxID": client,
+        "КодНоменклатуры": item,
+        "ПолКлиента": "Мужской",
+        "Возраст": "30",
+        "ВозрастнаяГруппа": "26-35",
+        "НазваниеНаСайте": f"Товар {item}",
+    }
+    if date_marker is not _MISSING_DATE:
+        row["Дата"] = date_marker
+    return row
+
+
+def _patch_favorites_statistics_ui(monkeypatch):
+    page_messages = []
+    monkeypatch.setattr(data_processing_tab, "QLabel", _Label)
+    monkeypatch.setattr(data_processing_tab, "clear_layout", lambda *args: None)
+    monkeypatch.setattr(
+        data_processing_tab,
+        "vyvod_zaglyschek",
+        lambda **kwargs: page_messages.append(kwargs["text"]),
+    )
+    return page_messages
 
 
 def test_order_statistics_currently_excludes_rows_with_invalid_dates(
@@ -111,6 +141,95 @@ def test_order_statistics_currently_excludes_rows_with_invalid_dates(
     data_processing_tab.analyze_orders_full_dataset(window)
 
     assert "Количество продаж: 1" in window.order_full_stats_label.text().splitlines()
+
+
+def test_favorites_statistics_handles_missing_date_column(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    pd.DataFrame(
+        [
+            _favorites_row("client-1", "item-1"),
+            _favorites_row("client-2", "item-2"),
+        ]
+    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    page_messages = _patch_favorites_statistics_ui(monkeypatch)
+
+    window = _filter_window(date_from="", date_to="")
+    result = data_processing_tab.analyze_favorites_full_dataset(window)
+
+    assert result is True, page_messages
+    assert page_messages == []
+    output_lines = window.favorites_full_stats_label.text().splitlines()
+    assert "Количество добавлений: 2" in output_lines
+    assert "Период: Не определён (нет корректных дат)" in output_lines
+    assert "Месяц с наибольшим количеством добавлений: Не определён" in output_lines
+
+
+def test_favorites_statistics_handles_all_invalid_dates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    pd.DataFrame(
+        [
+            _favorites_row("client-1", "item-1", ""),
+            _favorites_row("client-2", "item-2", "   "),
+            _favorites_row("client-3", "item-3", "not-a-date"),
+            _favorites_row("client-4", "item-4", pd.NA),
+        ]
+    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    page_messages = _patch_favorites_statistics_ui(monkeypatch)
+
+    window = _filter_window(date_from="", date_to="")
+    result = data_processing_tab.analyze_favorites_full_dataset(window)
+
+    assert result is True, page_messages
+    assert page_messages == []
+    output_lines = window.favorites_full_stats_label.text().splitlines()
+    assert "Количество добавлений: 4" in output_lines
+    assert "Период: Не определён (нет корректных дат)" in output_lines
+    assert "Месяц с наибольшим количеством добавлений: Не определён" in output_lines
+
+
+def test_favorites_statistics_uses_only_valid_dates_for_period(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    pd.DataFrame(
+        [
+            _favorites_row("client-1", "item-1", "2024-01-05"),
+            _favorites_row("client-2", "item-2", "not-a-date"),
+            _favorites_row("client-3", "item-3", "2024-02-15"),
+        ]
+    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    page_messages = _patch_favorites_statistics_ui(monkeypatch)
+
+    window = _filter_window(date_from="", date_to="")
+    result = data_processing_tab.analyze_favorites_full_dataset(window)
+
+    assert result is True
+    assert page_messages == []
+    output_lines = window.favorites_full_stats_label.text().splitlines()
+    assert "Количество добавлений: 3" in output_lines
+    assert "Период: 05.01.2024 — 15.02.2024" in output_lines
+
+
+def test_favorites_period_filter_excludes_all_invalid_dates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    pd.DataFrame(
+        [
+            _favorites_row("client-1", "item-1", ""),
+            _favorites_row("client-2", "item-2", "not-a-date"),
+        ]
+    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    page_messages = _patch_favorites_statistics_ui(monkeypatch)
+
+    result = data_processing_tab.analyze_favorites_full_dataset(_filter_window())
+
+    assert result is True
+    assert page_messages == ["Нет данных по выбранным фильтрам"]
 
 
 def test_training_date_filter_excludes_rows_with_invalid_dates(tmp_path, monkeypatch):

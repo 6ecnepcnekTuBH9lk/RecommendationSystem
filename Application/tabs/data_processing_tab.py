@@ -1748,7 +1748,8 @@ def analyze_favorites_full_dataset(aboba) -> bool:
         df["Возраст"] = pd.to_numeric(df["Возраст"], errors="coerce").fillna(0).astype(int)
 
         # Дата
-        df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce")
+        if "Дата" in df.columns:
+            df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce")
 
         # -------- Период: отбор --------
         def _masked_date_is_empty(qle) -> bool:
@@ -1853,13 +1854,12 @@ def analyze_favorites_full_dataset(aboba) -> bool:
         )
 
         # Период
-        period_start = df["Дата"].min().date()
-        period_end = df["Дата"].max().date()
-
-        period_start_str = period_start.strftime("%d.%m.%Y")
-        period_end_str = period_end.strftime("%d.%m.%Y")
-
-        period_str = f"{period_start_str} — {period_end_str}"
+        if "Дата" in df.columns and df["Дата"].notna().any():
+            period_start = df["Дата"].min().date()
+            period_end = df["Дата"].max().date()
+            period_str = f"{period_start:%d.%m.%Y} — {period_end:%d.%m.%Y}"
+        else:
+            period_str = "Не определён (нет корректных дат)"
 
         # Месяц с наибольшим количеством добавлений
         months_ru = {
@@ -1868,17 +1868,16 @@ def analyze_favorites_full_dataset(aboba) -> bool:
             9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
         }
 
-        df["Месяц"] = df["Дата"].dt.month.astype("Int64")
-        df["Год"] = df["Дата"].dt.year.astype("Int64")
+        if "Дата" in df.columns and df["Дата"].notna().any():
+            df["Месяц"] = df["Дата"].dt.month.astype("Int64")
+            df["Год"] = df["Дата"].dt.year.astype("Int64")
 
-        # Суммируем добавления по месяцу и году
-        month_sales = df.groupby(["Год", "Месяц"]).size()
-
-        # Находим месяц с максимальными добавлениями
-        top_month_index = month_sales.idxmax()
-        top_year, top_month_num = top_month_index
-
-        top_month_str = f"{months_ru[top_month_num]} {int(top_year)}"
+            # Суммируем добавления по месяцу и году
+            month_sales = df.groupby(["Год", "Месяц"]).size()
+            top_year, top_month_num = month_sales.idxmax()
+            top_month_str = f"{months_ru[top_month_num]} {int(top_year)}"
+        else:
+            top_month_str = "Не определён"
 
         # Притягиваем номенклатуру
         top_fav = (
