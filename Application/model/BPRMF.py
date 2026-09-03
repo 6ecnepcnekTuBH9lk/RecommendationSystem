@@ -290,7 +290,6 @@ def _collect_user_item_events(
     ev = pd.concat(frames, axis=0, ignore_index=True)
     ev["u_idx"] = ev["u_idx"].astype(int)
     ev["i_idx"] = ev["i_idx"].astype(int)
-    ev["ts"] = ev["ts"].fillna(pd.Timestamp("1970-01-01"))
     ev["w"] = pd.to_numeric(ev["w"], errors="coerce").fillna(1.0).astype(float)
     return ev
 
@@ -305,7 +304,8 @@ def _train_test_split_last_per_user(events: pd.DataFrame, cfg: TrainConfig, num_
     counts = events_sorted.groupby("u_idx").size()
     eligible_users = counts[counts >= cfg.min_user_interactions_for_eval].index.values
 
-    last = events_sorted.groupby("u_idx").tail(1)
+    dated_events = events_sorted[events_sorted["ts"].notna()]
+    last = dated_events.groupby("u_idx").tail(1)
     last = last[last["u_idx"].isin(eligible_users)]
 
     eval_users = last["u_idx"].astype(int).to_numpy()

@@ -632,6 +632,8 @@ def _prepare_training_data_dir(aboba) -> str:
 
     def _apply_date(df: pd.DataFrame, tag: str = "") -> pd.DataFrame:
         if "Дата" not in df.columns:
+            if d_from is not None or d_to is not None:
+                return df.iloc[0:0].copy()
             return df
 
         df = df.copy()
@@ -658,15 +660,13 @@ def _prepare_training_data_dir(aboba) -> str:
 
         # применяем фильтр периода
         if d_from is not None or d_to is not None:
-            ok = pd.Series(True, index=df.index)
+            ok = dt.notna()
 
             if d_from is not None:
                 ok &= (dt >= d_from)
             if d_to is not None:
                 ok &= (dt <= d_to)
 
-            # если хочешь НЕ терять строки с битой датой — оставляем NaT
-            ok |= dt.isna()
             df = df[ok]
 
         # дату оставляем как в исходнике (чтобы не портить формат в ФильтрованныеДанные)

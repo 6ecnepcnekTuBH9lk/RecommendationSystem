@@ -93,6 +93,146 @@ def _fail_if_called(name):
 
 
 @pytest.mark.parametrize(
+    ("source_name", "expected_weight"),
+    [
+        ("orders", 30.0),
+        ("views", 0.1),
+        ("favorites", 2.0),
+    ],
+)
+@pytest.mark.parametrize(
+    ("date_case", "date_value"),
+    [
+        ("malformed", "not-a-date"),
+        ("empty", ""),
+        ("whitespace", "   "),
+        ("nan", pd.NA),
+        ("missing_column", None),
+    ],
+)
+def test_training_keeps_interaction_without_valid_optional_date(
+    source_name,
+    expected_weight,
+    date_case,
+    date_value,
+):
+    orders = pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "Количество", "Дата"]
+    )
+    views = pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "ТипТовара", "Дата"]
+    )
+    favorites = pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "Дата"]
+    )
+    source_rows = {
+        "orders": {
+            "MindboxID": "user",
+            "КодНоменклатуры": "item",
+            "Количество": "3",
+        },
+        "views": {
+            "MindboxID": "user",
+            "КодНоменклатуры": "item",
+            "ТипТовара": "Номенклатура",
+        },
+        "favorites": {
+            "MindboxID": "user",
+            "КодНоменклатуры": "item",
+        },
+    }
+    if date_case != "missing_column":
+        source_rows[source_name]["Дата"] = date_value
+
+    source_frame = pd.DataFrame([source_rows[source_name]])
+    if source_name == "orders":
+        orders = source_frame
+    elif source_name == "views":
+        views = source_frame
+    else:
+        favorites = source_frame
+
+    mappings = BPRMF._build_mappings(orders, views, favorites)
+    events = BPRMF._collect_user_item_events(
+        orders,
+        views,
+        favorites,
+        mappings,
+        BPRMF.TrainConfig(),
+    )
+
+    assert len(events) == 1
+    assert events.iloc[0]["u_idx"] == mappings.user2idx["user"]
+    assert events.iloc[0]["i_idx"] == mappings.item2idx["item"]
+    assert events.iloc[0]["w"] == pytest.approx(expected_weight)
+    assert pd.isna(events.iloc[0]["ts"])
+
+
+def test_mixed_dated_and_undated_events_use_latest_dated_event_for_evaluation():
+    events = pd.DataFrame(
+        {
+            "u_idx": [0, 0, 0],
+            "i_idx": [0, 1, 2],
+            "ts": [
+                pd.Timestamp("2026-01-01"),
+                pd.NaT,
+                pd.Timestamp("2026-02-01"),
+            ],
+            "w": [1.0, 1.0, 1.0],
+        }
+    )
+    cfg = BPRMF.TrainConfig(min_user_interactions_for_eval=3)
+
+    splits = BPRMF._train_test_split_last_per_user(events, cfg, num_users=1)
+
+    assert splits.eval_users.tolist() == [0]
+    assert splits.eval_items.tolist() == [2]
+    assert set(map(tuple, splits.train_pairs.tolist())) == {(0, 0), (0, 1)}
+
+
+def test_all_undated_user_events_are_not_used_for_last_event_evaluation():
+    events = pd.DataFrame(
+        {
+            "u_idx": [0] * 10,
+            "i_idx": list(range(10)),
+            "ts": [pd.NaT] * 10,
+            "w": [1.0] * 10,
+        }
+    )
+    cfg = BPRMF.TrainConfig(min_user_interactions_for_eval=10)
+
+    splits = BPRMF._train_test_split_last_per_user(events, cfg, num_users=1)
+
+    assert splits.eval_users.size == 0
+    assert splits.eval_items.size == 0
+    assert set(map(tuple, splits.train_pairs.tolist())) == {
+        (0, item_index) for item_index in range(10)
+    }
+
+
+def test_all_valid_event_split_keeps_existing_latest_event_behavior():
+    events = pd.DataFrame(
+        {
+            "u_idx": [0, 0, 0],
+            "i_idx": [0, 1, 2],
+            "ts": [
+                pd.Timestamp("2026-01-01"),
+                pd.Timestamp("2026-02-01"),
+                pd.Timestamp("2026-02-01"),
+            ],
+            "w": [1.0, 1.0, 1.0],
+        }
+    )
+    cfg = BPRMF.TrainConfig(min_user_interactions_for_eval=3)
+
+    splits = BPRMF._train_test_split_last_per_user(events, cfg, num_users=1)
+
+    assert splits.eval_users.tolist() == [0]
+    assert splits.eval_items.tolist() == [2]
+    assert set(map(tuple, splits.train_pairs.tolist())) == {(0, 0), (0, 1)}
+
+
+@pytest.mark.parametrize(
     ("filename", "missing_column"),
     _INVALID_INTERACTION_SCHEMA_CASES,
 )
