@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pandas as pd
 import pytest
 
 from Application.tabs import train_model_tab
@@ -372,3 +373,114 @@ def test_successful_config_preparation_always_starts_with_config(tmp_path, monke
     with open(config_path, "r", encoding="utf-8") as config_file:
         config = json.load(config_file)
     assert config["data_dir"] == "synthetic-data"
+
+
+def test_degraded_weather_preparation_still_starts_qprocess(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "MindboxID": "client-1",
+                "КодНоменклатуры": "item-1",
+                "Магазин": "STORE-1",
+                "Дата": "2025-01-15",
+            }
+        ]
+    ).to_csv(input_dir / "Заказы.csv", sep="|", index=False)
+    pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
+    ).to_csv(input_dir / "Просмотры.csv", sep="|", index=False)
+    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
+        input_dir / "Избранное.csv", sep="|", index=False
+    )
+    pd.DataFrame(
+        [{"Дата": "2025-01-15", "ПогодныеУсловия": "Ясно"}]
+    ).to_csv(input_dir / "Погода.csv", sep="|", index=False)
+
+    window = _window_with_training_values()
+    window._store_city_map = {"STORE-1": "Москва"}
+    errors = _patch_training_ui(monkeypatch)
+    monkeypatch.setattr(
+        train_model_tab,
+        "_any_order_filters_set",
+        lambda current_window: True,
+    )
+    monkeypatch.setattr(
+        train_model_tab,
+        "_get_current_order_filters",
+        lambda current_window: {
+            "date_from": "",
+            "date_to": "",
+            "kinds": [],
+            "stores": [],
+            "kind_mode": "В группе",
+            "store_mode": "В группе",
+        },
+    )
+
+    train_model_tab.start_training_process(window)
+
+    process = _FakeProcess.instances[0]
+    assert errors == []
+    assert process.started is True
+    assert any("погод" in message.lower() for message in window.train_log.messages)
+
+
+def test_duplicate_normalized_weather_headers_still_start_qprocess(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "ВходныеДанные"
+    input_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "MindboxID": "client-1",
+                "КодНоменклатуры": "item-1",
+                "Магазин": "STORE-1",
+                "Дата": "2025-01-15",
+            }
+        ]
+    ).to_csv(input_dir / "Заказы.csv", sep="|", index=False)
+    pd.DataFrame(
+        columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
+    ).to_csv(input_dir / "Просмотры.csv", sep="|", index=False)
+    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
+        input_dir / "Избранное.csv", sep="|", index=False
+    )
+    (input_dir / "Погода.csv").write_text(
+        "Дата| Дата |Город|ПогодныеУсловия|СредняяТемпература|КоличествоОсадков\n"
+        "2025-01-15|2025-01-15|Москва|Ясно|1.5|0\n",
+        encoding="utf-8",
+    )
+
+    window = _window_with_training_values()
+    window._store_city_map = {"STORE-1": "Москва"}
+    errors = _patch_training_ui(monkeypatch)
+    monkeypatch.setattr(
+        train_model_tab,
+        "_any_order_filters_set",
+        lambda current_window: True,
+    )
+    monkeypatch.setattr(
+        train_model_tab,
+        "_get_current_order_filters",
+        lambda current_window: {
+            "date_from": "",
+            "date_to": "",
+            "kinds": [],
+            "stores": [],
+            "kind_mode": "В группе",
+            "store_mode": "В группе",
+        },
+    )
+
+    train_model_tab.start_training_process(window)
+
+    process = _FakeProcess.instances[0]
+    assert errors == []
+    assert process.started is True
+    assert any("повтор" in message.lower() for message in window.train_log.messages)

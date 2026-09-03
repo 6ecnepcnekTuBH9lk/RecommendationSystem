@@ -745,8 +745,30 @@ def _maybe_update_weather(aboba):
     end_date = d_to.strftime("%Y-%m-%d")
 
     try:
-        generate_weather_for_saved_coordinates(aboba, start_date=start_date, end_date=end_date)
-        set_status_ok(aboba, "Погода успешно загружена")
+        weather_df = generate_weather_for_saved_coordinates(
+            aboba,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        total = weather_df.attrs.get("weather_total_cities")
+        successful = weather_df.attrs.get("weather_successful_cities")
+        failed = weather_df.attrs.get("weather_failed_cities", 0)
+        empty = weather_df.attrs.get("weather_empty_cities", 0)
+
+        if total is None or successful is None:
+            set_status_ok(aboba, "Погода успешно загружена")
+        elif total > 0 and successful == total and not failed and not empty:
+            set_status_ok(aboba, "Погода успешно загружена")
+        elif successful:
+            set_status_error(
+                aboba,
+                f"Погода загружена частично: {successful}/{total} городов",
+            )
+        else:
+            set_status_error(
+                aboba,
+                f"Погодные данные не получены: 0/{total} городов",
+            )
         QApplication.processEvents()
 
     except Exception as e:

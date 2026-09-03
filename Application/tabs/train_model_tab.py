@@ -546,8 +546,20 @@ def _get_store_city_map(aboba) -> dict:
     return {}
 
 
-def _enrich_orders_with_city_and_weather(aboba, orders_df: pd.DataFrame, weather_path: str) -> pd.DataFrame:
+def _enrich_orders_with_city_and_weather(
+        aboba,
+        orders_df: pd.DataFrame,
+        weather_path: str,
+        diagnostics: list[str] | None = None,
+) -> pd.DataFrame:
     df = orders_df.copy()
+
+    def _warn(reason: str) -> None:
+        if diagnostics is not None:
+            diagnostics.append(
+                f"Погода недоступна: {reason}. "
+                "Обучение продолжено без погодных данных."
+            )
 
     # --- Магазин -> Город ---
     store_city = _get_store_city_map(aboba)
@@ -563,28 +575,124 @@ def _enrich_orders_with_city_and_weather(aboba, orders_df: pd.DataFrame, weather
             df[c] = pd.NA
 
     if not os.path.isfile(weather_path):
+        _warn("файл Погода.csv отсутствует")
         return df
 
-    w = pd.read_csv(weather_path, sep="|", encoding="utf-8-sig", dtype=str)
+    try:
+        w = pd.read_csv(weather_path, sep="|", encoding="utf-8-sig", dtype=str)
+    except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as error:
+        _warn(f"не удалось прочитать файл Погода.csv ({error})")
+        return df
+
     w.columns = [str(c).replace("\ufeff", "").strip() for c in w.columns]
 
-    if "Дата" in df.columns:
-        df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
-    if "Дата" in w.columns:
-        w["Дата"] = pd.to_datetime(w["Дата"], errors="coerce").dt.normalize()
-
-    if not {"Дата", "Город"}.issubset(df.columns) or not {"Дата", "Город"}.issubset(w.columns):
+    duplicate_columns = sorted(set(w.columns[w.columns.duplicated()].tolist()))
+    if duplicate_columns:
+        _warn(
+            "после нормализации обнаружены повторяющиеся колонки: "
+            + ", ".join(duplicate_columns)
+        )
         return df
 
-    # оставляем только нужное из погоды
-    keep = [c for c in ["Дата", "Город", "ПогодныеУсловия", "СредняяТемпература", "КоличествоОсадков"] if c in w.columns]
-    w = w[keep].copy()
-    w["Город"] = w["Город"].astype(str).str.strip()
+    required_weather_columns = {
+        "Дата",
+        "Город",
+        "ПогодныеУсловия",
+        "СредняяТемпература",
+        "КоличествоОсадков",
+    }
+    missing_weather_columns = sorted(required_weather_columns.difference(w.columns))
+    if missing_weather_columns:
+        _warn(
+            "в файле Погода.csv отсутствуют колонки: "
+            + ", ".join(missing_weather_columns)
+        )
+        return df
 
+    if w.empty:
+        _warn("файл Погода.csv пуст")
+        return df
+
+    if "Дата" not in df.columns:
+        if len(df):
+            diagnostics_message = (
+                f"Погодные данные: 0/{len(df)} заказов; "
+                f"{len(df)} без совпадения. Обучение продолжено без погодных данных."
+            )
+            if diagnostics is not None:
+                diagnostics.append(diagnostics_message)
+        return df
+
+    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    w = w[list(required_weather_columns)].copy()
+    w["Дата"] = pd.to_datetime(w["Дата"], errors="coerce").dt.normalize()
+    w["Город"] = w["Город"].astype("string").str.strip()
+    w = w[
+        w["Дата"].notna()
+        & w["Город"].notna()
+        & w["Город"].ne("")
+    ].copy()
+
+    if w.empty:
+        _warn("файл Погода.csv не содержит корректных ключей Дата/Город")
+        return df
+
+    weather_columns = (
+        "ПогодныеУсловия",
+        "СредняяТемпература",
+        "КоличествоОсадков",
+    )
+    has_weather_value = pd.Series(False, index=w.index)
+    for column in weather_columns:
+        values = w[column].astype("string").str.strip()
+        has_weather_value |= values.notna() & values.ne("")
+    if not has_weather_value.any():
+        _warn("файл Погода.csv не содержит погодных значений")
+        return df
+
+    if w.duplicated(subset=["Дата", "Город"], keep=False).any():
+        _warn("в файле Погода.csv обнаружены дубли ключа Дата/Город")
+        return df
+
+    rename_columns = {
+        column: f"__weather_{column}"
+        for column in weather_columns
+    }
+    w = w.rename(columns=rename_columns)
+    w["__weather_match"] = True
     df["Город"] = df["Город"].astype("string").str.strip()
-    df = df.merge(w, on=["Дата", "Город"], how="left", suffixes=("", "_wx"))
 
-    return df
+    original = df
+    try:
+        enriched = df.merge(
+            w,
+            on=["Дата", "Город"],
+            how="left",
+            sort=False,
+            validate="many_to_one",
+        )
+    except pd.errors.MergeError as error:
+        _warn(f"небезопасное объединение по ключу Дата/Город ({error})")
+        return original
+
+    if len(enriched) != len(original):
+        _warn("объединение изменило количество заказов")
+        return original
+
+    matched = int(enriched.pop("__weather_match").eq(True).sum())
+    for column in weather_columns:
+        incoming = enriched.pop(rename_columns[column])
+        enriched[column] = incoming.combine_first(enriched[column])
+
+    unavailable = len(enriched) - matched
+    if unavailable and diagnostics is not None:
+        diagnostics.append(
+            f"Погодные данные: {matched}/{len(enriched)} заказов; "
+            f"{unavailable} без совпадения. "
+            "Обучение продолжено без погодных данных для этих заказов."
+        )
+
+    return enriched
 
 
 # -------------------------------------------ФОРМИРУЕМ ИТОГОВЫЙ ДАТАСЕТ ДЛЯ ОБУЧЕНИЯ------------------------------------
@@ -716,7 +824,16 @@ def _prepare_training_data_dir(aboba) -> str:
 
         weather_path = os.path.join(base_dir, "Погода.csv")
         before_enrich = len(df)
-        df = _enrich_orders_with_city_and_weather(aboba, df, weather_path)
+        weather_diagnostics = []
+        df = _enrich_orders_with_city_and_weather(
+            aboba,
+            df,
+            weather_path,
+            diagnostics=weather_diagnostics,
+        )
+        if hasattr(aboba, "train_log"):
+            for message in weather_diagnostics:
+                aboba.train_log.append(message + "\n")
         _dbg("orders after _enrich_orders_with_city_and_weather", df, extra=f"delta={_n(len(df) - before_enrich)}")
 
         df.to_csv(os.path.join(out_dir, "Заказы.csv"), sep="|", index=False)
