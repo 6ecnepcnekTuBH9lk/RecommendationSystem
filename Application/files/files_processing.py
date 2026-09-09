@@ -61,6 +61,25 @@ def _get_json_with_retry(
     return None
 
 
+def _parse_interaction_date(values: pd.Series) -> tuple[pd.Series, int]:
+    raw_text = values.astype("string")
+    raw_nonempty = raw_text.notna() & raw_text.str.strip().ne("")
+    parsed = pd.to_datetime(values, errors="coerce").dt.normalize()
+    malformed_count = int((raw_nonempty & parsed.isna()).sum())
+    return parsed, malformed_count
+
+
+def _set_processing_complete_status(aboba, malformed_date_count: int) -> None:
+    message = "Обработка завершена"
+    if malformed_date_count:
+        message += (
+            ". Обнаружено некорректных значений даты: "
+            f"{malformed_date_count}"
+        )
+    set_status_ok(aboba, message)
+    schedule_status_reset(aboba, 5)
+
+
 # -------------------------------------------ОБРАБОТКА ЗАКАЗОВ------------------------------------------------------
 def process_orders_file(aboba, df):
     # Список нужных колонок и новые имена
@@ -151,7 +170,7 @@ def process_orders_file(aboba, df):
     df = df.drop(columns=["КодНоменклатурыРФ", "КодНоменклатурыКЗ"])
 
     # В колонке Дата оставляем только дату (убираем время)
-    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    df["Дата"], malformed_date_count = _parse_interaction_date(df["Дата"])
 
     df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors='coerce')
 
@@ -252,8 +271,7 @@ def process_orders_file(aboba, df):
 
     df = df.sort_values(by="Дата", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    _set_processing_complete_status(aboba, malformed_date_count)
 
     # возвращаем обработанный DataFrame
     return df
@@ -317,7 +335,7 @@ def process_views_file(aboba, df):
     df = df.drop(columns=["ТелефонОсновной", "ЗапаснойТелефон"])
 
     # В колонке Дата оставляем только дату (убираем время)
-    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    df["Дата"], malformed_date_count = _parse_interaction_date(df["Дата"])
 
     df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors='coerce')
 
@@ -461,8 +479,7 @@ def process_views_file(aboba, df):
 
     df = df.sort_values(by="Дата", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    _set_processing_complete_status(aboba, malformed_date_count)
 
     # возвращаем обработанный DataFrame
     return df
@@ -529,7 +546,7 @@ def process_favorites_file(aboba, df):
     df = df.drop(columns=["ТелефонОсновной", "ЗапаснойТелефон"])
 
     # В колонке Дата оставляем только дату (убираем время)
-    df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
+    df["Дата"], malformed_date_count = _parse_interaction_date(df["Дата"])
 
     df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors='coerce')
 
@@ -625,8 +642,7 @@ def process_favorites_file(aboba, df):
 
     df = df.sort_values(by="Дата", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    _set_processing_complete_status(aboba, malformed_date_count)
 
     # возвращаем обработанный DataFrame
     return df
@@ -989,10 +1005,17 @@ def _download_daily_weather_by_coordinates(
         backoff_base=1.5,
     )
 
-    if not data:
+    if data is None:
         # вообще ничего не получили — вернём пустышку
         result["КодПогоды"] = pd.to_numeric(result["КодПогоды"], errors="coerce").astype("Int64")
         result["ПогодныеУсловия"] = result["КодПогоды"].map(_weather_code_to_text)
+        result.attrs["weather_request_status"] = "failed"
+        return result
+
+    if not data:
+        result["КодПогоды"] = pd.to_numeric(result["КодПогоды"], errors="coerce").astype("Int64")
+        result["ПогодныеУсловия"] = result["КодПогоды"].map(_weather_code_to_text)
+        result.attrs["weather_request_status"] = "empty"
         return result
 
     daily = data.get("daily") or {}
@@ -1002,6 +1025,7 @@ def _download_daily_weather_by_coordinates(
     if not api_dates:
         result["КодПогоды"] = pd.to_numeric(result["КодПогоды"], errors="coerce").astype("Int64")
         result["ПогодныеУсловия"] = result["КодПогоды"].map(_weather_code_to_text)
+        result.attrs["weather_request_status"] = "empty"
         return result
 
     # маппим значения по датам (чтобы частичный ответ не ломал)
@@ -1019,6 +1043,7 @@ def _download_daily_weather_by_coordinates(
 
     result["КодПогоды"] = pd.to_numeric(result["КодПогоды"], errors="coerce").astype("Int64")
     result["ПогодныеУсловия"] = result["КодПогоды"].map(_weather_code_to_text)
+    result.attrs["weather_request_status"] = "success"
 
     return result
 
@@ -1027,6 +1052,7 @@ def _download_daily_weather_by_coordinates(
 def _download_weather_for_coordinates_file(aboba, coords_df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
     frames = []
     total = len(coords_df)
+    outcome_counts = {"success": 0, "failed": 0, "empty": 0}
 
     # (опционально) чтобы UI “дышал” и обновлял статус
     try:
@@ -1053,6 +1079,10 @@ def _download_weather_for_coordinates_file(aboba, coords_df: pd.DataFrame, start
             end_date=end_date,
             timezone="auto",
         )
+        outcome = city_weather.attrs.get("weather_request_status", "success")
+        if outcome not in outcome_counts:
+            outcome = "failed"
+        outcome_counts[outcome] += 1
         frames.append(city_weather)
 
     if frames:
@@ -1076,6 +1106,13 @@ def _download_weather_for_coordinates_file(aboba, coords_df: pd.DataFrame, start
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     weather_df.to_csv(out_path, index=False, sep="|", encoding="utf-8-sig")
+
+    weather_df.attrs.update(
+        weather_total_cities=total,
+        weather_successful_cities=outcome_counts["success"],
+        weather_failed_cities=outcome_counts["failed"],
+        weather_empty_cities=outcome_counts["empty"],
+    )
 
     return weather_df
 

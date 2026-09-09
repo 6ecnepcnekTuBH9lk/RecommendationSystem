@@ -1,5 +1,7 @@
 import os
 import json
+import sys
+import tempfile
 import chardet
 import pandas as pd
 from PyQt6.QtCore import Qt, QSize
@@ -21,6 +23,23 @@ from Application.settings.set_status import (set_status_processing, schedule_sta
 from Application.files.files_processing import (process_orders_file, process_views_file, process_favorites_file,
                                                 process_categories_file, process_nomenclature_file,
                                                 process_coordinates_file, generate_weather_for_saved_coordinates)
+
+
+def _refresh_filter_references_on_startup(aboba):
+    refresh_functions = (
+        refresh_kind_values_from_loaded_files,
+        refresh_season_values_from_nomenclature_file,
+        refresh_export_kind_values_from_nomenclature_file,
+    )
+
+    for refresh_function in refresh_functions:
+        try:
+            refresh_function(aboba)
+        except Exception as error:
+            set_status_error(
+                aboba,
+                f"Не удалось обновить справочник фильтров: {error}",
+            )
 
 
 # -------------------------------------------ВКЛАДКА ОБРАБОТКА ДАТАСЕТА-------------------------------------------------
@@ -450,12 +469,8 @@ def create_input_data_widgets_tab(aboba):
     # Настройка доступа к полям отбора
     update_filter_controls_availability(aboba)
 
-    # Обновляем виды номенклатуры в отборе
-    refresh_kind_values_from_loaded_files(aboba)
-
-    refresh_season_values_from_nomenclature_file(aboba)
-
-    refresh_export_kind_values_from_nomenclature_file(aboba)
+    # Обновляем справочники фильтров
+    _refresh_filter_references_on_startup(aboba)
 
     # Формируем текстовую строку с настройками
     update_filter_summary(aboba)
@@ -577,51 +592,75 @@ def load_order_filter_settings(aboba):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if hasattr(aboba, "filter_date_from"):
-            aboba.filter_date_from.setText(str(data.get("date_from", "")))
-        if hasattr(aboba, "filter_date_to"):
-            aboba.filter_date_to.setText(str(data.get("date_to", "")))
+        # PREPARE: сначала преобразуем все значения, не изменяя UI/state.
+        date_from = (
+            str(data.get("date_from", ""))
+            if hasattr(aboba, "filter_date_from")
+            else None
+        )
+        date_to = (
+            str(data.get("date_to", ""))
+            if hasattr(aboba, "filter_date_to")
+            else None
+        )
 
-        # Восстанавливаем количество клиентов в выгрузке
+        max_export_users = None
         if hasattr(aboba, "max_export_users_input"):
             try:
                 max_export_users = int(data.get("max_export_users", 1000))
             except (TypeError, ValueError):
                 max_export_users = 1000
 
-            aboba.max_export_users_input.setValue(max_export_users)
-
+        store_mode_index = None
         if hasattr(aboba, "store_mode"):
-            txt = str(data.get("store_mode", "В группе"))
-            idx = aboba.store_mode.findText(txt)
-            if idx >= 0:
-                aboba.store_mode.setCurrentIndex(idx)
+            store_mode_text = str(data.get("store_mode", "В группе"))
+            index = aboba.store_mode.findText(store_mode_text)
+            if index >= 0:
+                store_mode_index = index
 
+        kind_mode_index = None
         if hasattr(aboba, "kind_mode"):
-            txt = str(data.get("kind_mode", "В группе"))
-            idx = aboba.kind_mode.findText(txt)
-            if idx >= 0:
-                aboba.kind_mode.setCurrentIndex(idx)
+            kind_mode_text = str(data.get("kind_mode", "В группе"))
+            index = aboba.kind_mode.findText(kind_mode_text)
+            if index >= 0:
+                kind_mode_index = index
 
-        aboba._pending_store_selection = list(
-            data.get("stores_selected", [])
-        )
-
-        aboba._pending_kind_selection = list(
-            data.get("kinds_selected", [])
-        )
-
-        aboba._pending_season_selection = list(
-            data.get("seasons_selected", [])
-        )
-
-        # Отдельный отбор видов номенклатуры для итоговой выгрузки
-        aboba._pending_export_kind_selection = list(
+        pending_store_selection = list(data.get("stores_selected", []))
+        pending_kind_selection = list(data.get("kinds_selected", []))
+        pending_season_selection = list(data.get("seasons_selected", []))
+        pending_export_kind_selection = list(
             data.get("export_kinds_selected", [])
         )
+        pending_store_city_map = dict(data.get("store_city_map", {}) or {})
+        store_city_map = dict(pending_store_city_map)
 
-        aboba._pending_store_city_map = dict(data.get("store_city_map", {}) or {})
-        aboba._store_city_map = dict(aboba._pending_store_city_map)
+        # COMMIT: все settings уже успешно прочитаны и преобразованы.
+        if hasattr(aboba, "filter_date_from"):
+            aboba.filter_date_from.setText(date_from)
+        if hasattr(aboba, "filter_date_to"):
+            aboba.filter_date_to.setText(date_to)
+
+        # Восстанавливаем количество клиентов в выгрузке
+        if hasattr(aboba, "max_export_users_input"):
+            aboba.max_export_users_input.setValue(max_export_users)
+
+        if store_mode_index is not None:
+            aboba.store_mode.setCurrentIndex(store_mode_index)
+
+        if kind_mode_index is not None:
+            aboba.kind_mode.setCurrentIndex(kind_mode_index)
+
+        aboba._pending_store_selection = pending_store_selection
+
+        aboba._pending_kind_selection = pending_kind_selection
+
+        aboba._pending_season_selection = pending_season_selection
+
+        # Отдельный отбор видов номенклатуры для итоговой выгрузки
+        aboba._pending_export_kind_selection = pending_export_kind_selection
+
+        aboba._pending_store_city_map = pending_store_city_map
+        aboba._store_city_map = store_city_map
 
         if hasattr(aboba, "store_city_table"):
             load_cities_from_coordinates_file(aboba)
@@ -633,12 +672,15 @@ def load_order_filter_settings(aboba):
 
 
 # -------------------------------------------КНОПКА "ПРИМЕНИТЬ НАСТРОЙКИ"-----------------------------------------------
-def apply_filters_all_stats(aboba):
+def apply_filters_all_stats(aboba) -> bool:
 
     # пересчитываем все страницы статистики по текущим фильтрам
-    analyze_orders_full_dataset(aboba)
-    analyze_views_full_dataset(aboba)
-    analyze_favorites_full_dataset(aboba)
+    results = (
+        analyze_orders_full_dataset(aboba),
+        analyze_views_full_dataset(aboba),
+        analyze_favorites_full_dataset(aboba),
+    )
+    return all(results)
 
 
 def save_and_apply_filters(aboba):
@@ -653,7 +695,13 @@ def save_and_apply_filters(aboba):
     set_status_processing(aboba, "Применение фильтров...")
     QApplication.processEvents()
 
-    apply_filters_all_stats(aboba)
+    stats_ok = apply_filters_all_stats(aboba)
+
+    if not stats_ok:
+        set_status_error(aboba, "Не удалось применить фильтры")
+        QApplication.processEvents()
+        schedule_status_reset(aboba, 5)
+        return
 
     set_status_ok(aboba, "Фильтры применены")
     QApplication.processEvents()
@@ -697,8 +745,30 @@ def _maybe_update_weather(aboba):
     end_date = d_to.strftime("%Y-%m-%d")
 
     try:
-        generate_weather_for_saved_coordinates(aboba, start_date=start_date, end_date=end_date)
-        set_status_ok(aboba, "Погода успешно загружена")
+        weather_df = generate_weather_for_saved_coordinates(
+            aboba,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        total = weather_df.attrs.get("weather_total_cities")
+        successful = weather_df.attrs.get("weather_successful_cities")
+        failed = weather_df.attrs.get("weather_failed_cities", 0)
+        empty = weather_df.attrs.get("weather_empty_cities", 0)
+
+        if total is None or successful is None:
+            set_status_ok(aboba, "Погода успешно загружена")
+        elif total > 0 and successful == total and not failed and not empty:
+            set_status_ok(aboba, "Погода успешно загружена")
+        elif successful:
+            set_status_error(
+                aboba,
+                f"Погода загружена частично: {successful}/{total} городов",
+            )
+        else:
+            set_status_error(
+                aboba,
+                f"Погодные данные не получены: 0/{total} городов",
+            )
         QApplication.processEvents()
 
     except Exception as e:
@@ -783,17 +853,14 @@ def refresh_store_city_table(aboba) -> None:
     stores_path = os.path.join(os.getcwd(), "ВходныеДанные", "СписокМагазинов.csv")
 
     stores: list[str] = []
-    if stores_path:
-        try:
-            df = pd.read_csv(stores_path, sep="|", encoding="utf-8-sig", dtype=str)
-            if not df.empty:
-                col = "Магазин" if "Магазин" in df.columns else df.columns[0]
-                s = df[col].dropna().astype(str).str.strip()
-                s = s[s != ""]
-                # Уникальные магазины
-                stores = pd.unique(s).tolist()
-        except Exception:
-            stores = []
+    if os.path.isfile(stores_path):
+        df = pd.read_csv(stores_path, sep="|", encoding="utf-8-sig", dtype=str)
+        if not df.empty:
+            col = "Магазин" if "Магазин" in df.columns else df.columns[0]
+            s = df[col].dropna().astype(str).str.strip()
+            s = s[s != ""]
+            # Уникальные магазины
+            stores = pd.unique(s).tolist()
 
     # Если файл пуст/не найден — таблицу всё равно покажем, но без строк
     aboba.store_city_table.setRowCount(len(stores))
@@ -881,15 +948,12 @@ def refresh_kind_values_from_loaded_files(aboba):
     for fp in files:
         if not os.path.isfile(fp):
             continue
-        try:
-            # читаем только колонку
-            df = pd.read_csv(fp, sep="|", dtype=str, usecols=["ВидНоменклатуры"])
-            for v in df["ВидНоменклатуры"].dropna().astype(str).tolist():
-                v = v.strip()
-                if v:
-                    kinds_set.add(v)
-        except Exception:
-            continue
+        # читаем только колонку
+        df = pd.read_csv(fp, sep="|", dtype=str, usecols=["ВидНоменклатуры"])
+        for v in df["ВидНоменклатуры"].dropna().astype(str).tolist():
+            v = v.strip()
+            if v:
+                kinds_set.add(v)
 
     kinds = sorted(kinds_set)
 
@@ -925,33 +989,29 @@ def refresh_export_kind_values_from_nomenclature_file(aboba):
 
     kinds_set = set()
 
-    try:
-        df = pd.read_csv(
-            nom_path,
-            sep="|",
-            dtype=str,
-            encoding="utf-8-sig",
-            usecols=lambda column: column == "ВидНоменклатуры",
+    df = pd.read_csv(
+        nom_path,
+        sep="|",
+        dtype=str,
+        encoding="utf-8-sig",
+        usecols=lambda column: column == "ВидНоменклатуры",
+    )
+
+    if "ВидНоменклатуры" in df.columns:
+        values = (
+            df["ВидНоменклатуры"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
         )
 
-        if "ВидНоменклатуры" in df.columns:
-            values = (
-                df["ВидНоменклатуры"]
-                .astype("string")
-                .fillna("")
-                .str.strip()
-            )
-
-            for value in values.tolist():
-                if (
-                    value
-                    and value.lower()
-                    not in ("nan", "none", "null", "<na>", "-")
-                ):
-                    kinds_set.add(value)
-
-    except Exception:
-        kinds_set = set()
+        for value in values.tolist():
+            if (
+                value
+                and value.lower()
+                not in ("nan", "none", "null", "<na>", "-")
+            ):
+                kinds_set.add(value)
 
     kinds = sorted(kinds_set)
 
@@ -988,14 +1048,11 @@ def refresh_season_values_from_nomenclature_file(aboba):
         return
 
     seasons_set = set()
-    try:
-        df = pd.read_csv(nom_path, sep="|", dtype=str, encoding="utf-8-sig", usecols=["Коллекция"])
-        for v in df["Коллекция"].dropna().astype(str).tolist():
-            v = v.strip()
-            if v and v.lower() not in ("nan", "none", "null", "-"):
-                seasons_set.add(v)
-    except Exception:
-        pass
+    df = pd.read_csv(nom_path, sep="|", dtype=str, encoding="utf-8-sig", usecols=["Коллекция"])
+    for v in df["Коллекция"].dropna().astype(str).tolist():
+        v = v.strip()
+        if v and v.lower() not in ("nan", "none", "null", "-"):
+            seasons_set.add(v)
 
     seasons = sorted(seasons_set)
 
@@ -1073,7 +1130,7 @@ def set_order_filters_enabled(aboba, enabled: bool):
 
 # ///////////////////////////////////////////АНАЛИЗ ФАЙЛОВ//////////////////////////////////////////////////////////
 # -------------------------------------------АНАЛИЗ ЗАКЗАОВ---------------------------------------------------------
-def analyze_orders_full_dataset(aboba):
+def analyze_orders_full_dataset(aboba) -> bool:
     try:
         file_path = "ВходныеДанные/Заказы.csv"
 
@@ -1121,7 +1178,7 @@ def analyze_orders_full_dataset(aboba):
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
-            return
+            return True
 
         # Загружаем CSV
         df = pd.read_csv(file_path, sep="|", dtype=str)
@@ -1167,7 +1224,7 @@ def analyze_orders_full_dataset(aboba):
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
-            return
+            return True
 
         # Фильтр по периоду
         if (date_from is not None or date_to is not None):
@@ -1178,7 +1235,7 @@ def analyze_orders_full_dataset(aboba):
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
-                return
+                return True
             if date_from is not None:
                 df = df[df["Дата"] >= date_from]
             if date_to is not None:
@@ -1198,7 +1255,7 @@ def analyze_orders_full_dataset(aboba):
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.store_mode.currentText() if hasattr(aboba, "store_mode") else "В группе"
 
@@ -1221,7 +1278,7 @@ def analyze_orders_full_dataset(aboba):
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.kind_mode.currentText() if hasattr(aboba, "kind_mode") else "В группе"
 
@@ -1238,7 +1295,7 @@ def analyze_orders_full_dataset(aboba):
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
-            return
+            return True
 
         # Числовые поля
         df["Количество"] = pd.to_numeric(df["Количество"], errors="coerce").fillna(0).astype(int)
@@ -1400,6 +1457,7 @@ def analyze_orders_full_dataset(aboba):
         aboba.order_full_stats_label.setStyleSheet("""QLabel {font-size: 16px;}""")
 
         update_filter_summary(aboba)
+        return True
 
     except Exception as e:
         set_order_filters_enabled(aboba, False)
@@ -1408,10 +1466,11 @@ def analyze_orders_full_dataset(aboba):
             icon="Картинки/Неудача.png",
             main_layout=aboba.order_full_output_layout,
             stats_label=aboba.order_full_stats_label)
+        return False
 
 
 # -------------------------------------------АНАЛИЗ ПРОСМОТРОВ------------------------------------------------------
-def analyze_views_full_dataset(aboba):
+def analyze_views_full_dataset(aboba) -> bool:
     try:
         file_path = "ВходныеДанные/Просмотры.csv"
 
@@ -1434,7 +1493,7 @@ def analyze_views_full_dataset(aboba):
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
-            return
+            return True
 
         # Загружаем CSV
         df = pd.read_csv(file_path, sep="|", dtype=str)
@@ -1472,7 +1531,7 @@ def analyze_views_full_dataset(aboba):
                     main_layout=aboba.views_full_output_layout,
                     stats_label=aboba.views_full_stats_label
                 )
-                return
+                return True
 
             df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce", format="%Y-%m-%d")
 
@@ -1498,7 +1557,7 @@ def analyze_views_full_dataset(aboba):
                     main_layout=aboba.views_full_output_layout,
                     stats_label=aboba.views_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.kind_mode.currentText() if hasattr(aboba, "kind_mode") else "В группе"
             if mode == "Не в группе":
@@ -1514,7 +1573,7 @@ def analyze_views_full_dataset(aboba):
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
-            return
+            return True
 
         # Если данных нет
         if df.empty:
@@ -1524,7 +1583,7 @@ def analyze_views_full_dataset(aboba):
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
-            return
+            return True
 
         # Количество просмотров
         total_views = len(df)
@@ -1668,6 +1727,7 @@ def analyze_views_full_dataset(aboba):
 
         aboba.views_full_stats_label.setText(result)
         aboba.views_full_stats_label.setStyleSheet("""QLabel {font-size: 16px;}""")
+        return True
 
     except Exception as e:
         vyvod_zaglyschek(
@@ -1676,10 +1736,11 @@ def analyze_views_full_dataset(aboba):
             main_layout=aboba.views_full_output_layout,
             stats_label=aboba.views_full_stats_label
         )
+        return False
 
 
 # -------------------------------------------АНАЛИЗ ИЗБРАННОГО------------------------------------------------------
-def analyze_favorites_full_dataset(aboba):
+def analyze_favorites_full_dataset(aboba) -> bool:
     try:
         file_path = "ВходныеДанные/Избранное.csv"
 
@@ -1701,7 +1762,7 @@ def analyze_favorites_full_dataset(aboba):
                 main_layout=aboba.favorites_full_output_layout,
                 stats_label=aboba.favorites_full_stats_label
             )
-            return
+            return True
 
         df = pd.read_csv(file_path, sep="|", dtype=str)
 
@@ -1709,7 +1770,8 @@ def analyze_favorites_full_dataset(aboba):
         df["Возраст"] = pd.to_numeric(df["Возраст"], errors="coerce").fillna(0).astype(int)
 
         # Дата
-        df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce")
+        if "Дата" in df.columns:
+            df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce")
 
         # -------- Период: отбор --------
         def _masked_date_is_empty(qle) -> bool:
@@ -1736,7 +1798,7 @@ def analyze_favorites_full_dataset(aboba):
                     main_layout=aboba.favorites_full_output_layout,
                     stats_label=aboba.favorites_full_stats_label
                 )
-                return
+                return True
 
             df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce", format="%Y-%m-%d")
 
@@ -1762,7 +1824,7 @@ def analyze_favorites_full_dataset(aboba):
                     main_layout=aboba.favorites_full_output_layout,
                     stats_label=aboba.favorites_full_stats_label
                 )
-                return
+                return True
 
             mode = aboba.kind_mode.currentText() if hasattr(aboba, "kind_mode") else "В группе"
             if mode == "Не в группе":
@@ -1778,7 +1840,7 @@ def analyze_favorites_full_dataset(aboba):
                 main_layout=aboba.favorites_full_output_layout,
                 stats_label=aboba.favorites_full_stats_label
             )
-            return
+            return True
 
         # Количество добавлений
         total_fav = len(df)
@@ -1814,13 +1876,12 @@ def analyze_favorites_full_dataset(aboba):
         )
 
         # Период
-        period_start = df["Дата"].min().date()
-        period_end = df["Дата"].max().date()
-
-        period_start_str = period_start.strftime("%d.%m.%Y")
-        period_end_str = period_end.strftime("%d.%m.%Y")
-
-        period_str = f"{period_start_str} — {period_end_str}"
+        if "Дата" in df.columns and df["Дата"].notna().any():
+            period_start = df["Дата"].min().date()
+            period_end = df["Дата"].max().date()
+            period_str = f"{period_start:%d.%m.%Y} — {period_end:%d.%m.%Y}"
+        else:
+            period_str = "Не определён (нет корректных дат)"
 
         # Месяц с наибольшим количеством добавлений
         months_ru = {
@@ -1829,17 +1890,16 @@ def analyze_favorites_full_dataset(aboba):
             9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
         }
 
-        df["Месяц"] = df["Дата"].dt.month.astype("Int64")
-        df["Год"] = df["Дата"].dt.year.astype("Int64")
+        if "Дата" in df.columns and df["Дата"].notna().any():
+            df["Месяц"] = df["Дата"].dt.month.astype("Int64")
+            df["Год"] = df["Дата"].dt.year.astype("Int64")
 
-        # Суммируем добавления по месяцу и году
-        month_sales = df.groupby(["Год", "Месяц"]).size()
-
-        # Находим месяц с максимальными добавлениями
-        top_month_index = month_sales.idxmax()
-        top_year, top_month_num = top_month_index
-
-        top_month_str = f"{months_ru[top_month_num]} {int(top_year)}"
+            # Суммируем добавления по месяцу и году
+            month_sales = df.groupby(["Год", "Месяц"]).size()
+            top_year, top_month_num = month_sales.idxmax()
+            top_month_str = f"{months_ru[top_month_num]} {int(top_year)}"
+        else:
+            top_month_str = "Не определён"
 
         # Притягиваем номенклатуру
         top_fav = (
@@ -1870,11 +1930,13 @@ def analyze_favorites_full_dataset(aboba):
 
         aboba.favorites_full_stats_label.setText(result)
         aboba.favorites_full_stats_label.setStyleSheet("""QLabel {font-size: 16px;}""")
+        return True
 
     except Exception as e:
         vyvod_zaglyschek(text=f"Ошибка при анализе файла: {e}", icon="Картинки/Неудача.png",
                          main_layout=aboba.favorites_full_output_layout,
                          stats_label=aboba.favorites_full_stats_label)
+        return False
 
 
 # ///////////////////////////////////////////ЗАГРУЗКА ФАЙЛОВ////////////////////////////////////////////////////////////
@@ -1923,7 +1985,55 @@ def load_csv_file(aboba):
             return df
 
         def _save(df: pd.DataFrame, save_path: str) -> None:
-            df.to_csv(save_path, index=False, sep="|", encoding="utf-8-sig")
+            save_dir = os.path.dirname(os.path.abspath(save_path))
+            temp_fd = None
+            temp_path = None
+
+            try:
+                temp_fd, temp_path = tempfile.mkstemp(
+                    dir=save_dir,
+                    prefix=f".{os.path.basename(save_path)}.",
+                    suffix=".tmp",
+                )
+                try:
+                    os.close(temp_fd)
+                finally:
+                    # Не закрываем дескриптор повторно, если os.close() вызвал исключение.
+                    temp_fd = None
+
+                df.to_csv(temp_path, index=False, sep="|", encoding="utf-8-sig")
+                os.replace(temp_path, save_path)
+                temp_path = None
+            except BaseException:
+                cleanup_errors = []
+
+                if temp_fd is not None:
+                    try:
+                        os.close(temp_fd)
+                    except OSError as cleanup_error:
+                        cleanup_errors.append(("close", cleanup_error))
+
+                if temp_path is not None:
+                    try:
+                        os.remove(temp_path)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as cleanup_error:
+                        cleanup_errors.append(("remove", cleanup_error))
+
+                for cleanup_action, cleanup_error in cleanup_errors:
+                    try:
+                        print(
+                            "Temporary CSV cleanup failed "
+                            f"({cleanup_action}, path={temp_path!a}): "
+                            f"{cleanup_error!a}",
+                            file=sys.stderr,
+                        )
+                    except Exception:
+                        # Диагностика cleanup не должна скрывать исходную ошибку.
+                        pass
+
+                raise
 
         def _append_or_overwrite(df: pd.DataFrame, save_path: str) -> pd.DataFrame:
 
@@ -1933,19 +2043,18 @@ def load_csv_file(aboba):
 
             # mode == "Добавить данные к существующему"
             if os.path.exists(save_path):
-                try:
-                    df_old = pd.read_csv(save_path, sep="|", encoding="utf-8-sig", dtype=str)
-                    df_old = _sanitize_df(df_old)
-                    df = pd.concat([df_old, df], ignore_index=True)
-                except Exception:
-                    # Если файл поврежден/кодировка/структура — просто перезапишем
-                    pass
+                df_old = pd.read_csv(save_path, sep="|", encoding="utf-8-sig", dtype=str)
+                df_old = _sanitize_df(df_old)
+                df = pd.concat([df_old, df], ignore_index=True)
 
             _save(df, save_path)
             return df
 
         def _process_pair(reader_sep: str, processor_fn, filename: str) -> tuple[pd.DataFrame | None, str]:
             df_src = read_csv_auto_encoding(aboba, file_path=file_path, sep=reader_sep)
+            if df_src is None:
+                return None, ""
+
             df = processor_fn(aboba, df_src)
             if df is None:
                 return None, ""
@@ -1992,22 +2101,28 @@ def load_csv_file(aboba):
                 processor_fn=process_orders_file,
                 filename="Заказы.csv",
             )
-            if df_final is not None:
-                _save_store_list(df_final, input_dir)
+            if df_final is None:
+                return
+
+            _save_store_list(df_final, input_dir)
 
         elif selected_type == "Просмотры товаров и категорий из Mindbox":
-            _process_pair(
+            df_final, _ = _process_pair(
                 reader_sep=";",
                 processor_fn=process_views_file,
                 filename="Просмотры.csv",
             )
+            if df_final is None:
+                return
 
         elif selected_type == "Добавление товаров в избранное из Mindbox":
-            _process_pair(
+            df_final, _ = _process_pair(
                 reader_sep=";",
                 processor_fn=process_favorites_file,
                 filename="Избранное.csv",
             )
+            if df_final is None:
+                return
 
         elif selected_type == "Номенклатура из 1С":
             ok = _process_single(
@@ -2018,6 +2133,10 @@ def load_csv_file(aboba):
 
             if not ok:
                 return
+
+            aboba._name_by_code = None
+            aboba._collection_by_code = None
+            aboba._stock_by_code = None
 
         elif selected_type == "Категории сайта из 1С":
             ok = _process_single(

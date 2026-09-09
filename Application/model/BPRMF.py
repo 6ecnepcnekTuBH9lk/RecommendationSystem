@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
+import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -102,6 +108,69 @@ def _path_csv(data_dir: str, name: str) -> str:
     return os.path.join(data_dir, f"{name}.csv")
 
 
+class _MissingInteractionSourcesError(FileNotFoundError):
+    pass
+
+
+class _InvalidInteractionSchemaError(ValueError):
+    pass
+
+
+def _require_interaction_sources(data_dir: str) -> None:
+    required_names = ("Заказы", "Просмотры", "Избранное")
+    missing_files = [
+        os.path.basename(_path_csv(data_dir, name))
+        for name in required_names
+        if not os.path.isfile(_path_csv(data_dir, name))
+    ]
+    if missing_files:
+        raise _MissingInteractionSourcesError(
+            "Отсутствуют обязательные файлы взаимодействий: "
+            + ", ".join(missing_files)
+        )
+
+
+def _validate_interaction_source_schemas(data_dir: str) -> None:
+    required_schemas = (
+        ("Заказы", ("MindboxID", "КодНоменклатуры")),
+        (
+            "Просмотры",
+            ("MindboxID", "КодНоменклатуры", "ТипТовара"),
+        ),
+        ("Избранное", ("MindboxID", "КодНоменклатуры")),
+    )
+    invalid_sources = []
+
+    for source_name, required_columns in required_schemas:
+        path = _path_csv(data_dir, source_name)
+        try:
+            actual_columns = pd.read_csv(
+                path,
+                sep="|",
+                dtype=str,
+                encoding="utf-8-sig",
+                nrows=0,
+            ).columns
+        except pd.errors.EmptyDataError:
+            actual_columns = ()
+
+        missing_columns = [
+            column
+            for column in required_columns
+            if column not in actual_columns
+        ]
+        if missing_columns:
+            invalid_sources.append(
+                f"{os.path.basename(path)}: " + ", ".join(missing_columns)
+            )
+
+    if invalid_sources:
+        raise _InvalidInteractionSchemaError(
+            "Файлы взаимодействий не содержат обязательные колонки: "
+            + "; ".join(invalid_sources)
+        )
+
+
 def _read_csv_pipe(path: str) -> pd.DataFrame:
     # your processed files are pipe-separated with utf-8-sig (BOM-safe)
     return pd.read_csv(path, sep="|", dtype=str, encoding="utf-8-sig")
@@ -176,7 +245,16 @@ def _collect_user_item_events(
     if len(orders) and {"MindboxID", "КодНоменклатуры"}.issubset(orders.columns):
         o = orders[["MindboxID", "КодНоменклатуры"]].copy()
         o["ts"] = _parse_date_col(orders, "Дата")
-        qty = pd.to_numeric(orders.get("Количество", 1), errors="coerce").fillna(1).astype(float).clip(1, 10)
+        quantity_values = orders.get(
+            "Количество",
+            pd.Series(1, index=orders.index, dtype=np.float64),
+        )
+        qty = (
+            pd.to_numeric(quantity_values, errors="coerce")
+            .fillna(1)
+            .astype(float)
+            .clip(1, 10)
+        )
         o["w"] = cfg.w_purchase * qty
         o = o.dropna(subset=["MindboxID", "КодНоменклатуры"])
         o["u_idx"] = o["MindboxID"].astype(str).map(maps.user2idx)
@@ -212,7 +290,6 @@ def _collect_user_item_events(
     ev = pd.concat(frames, axis=0, ignore_index=True)
     ev["u_idx"] = ev["u_idx"].astype(int)
     ev["i_idx"] = ev["i_idx"].astype(int)
-    ev["ts"] = ev["ts"].fillna(pd.Timestamp("1970-01-01"))
     ev["w"] = pd.to_numeric(ev["w"], errors="coerce").fillna(1.0).astype(float)
     return ev
 
@@ -227,7 +304,8 @@ def _train_test_split_last_per_user(events: pd.DataFrame, cfg: TrainConfig, num_
     counts = events_sorted.groupby("u_idx").size()
     eligible_users = counts[counts >= cfg.min_user_interactions_for_eval].index.values
 
-    last = events_sorted.groupby("u_idx").tail(1)
+    dated_events = events_sorted[events_sorted["ts"].notna()]
+    last = dated_events.groupby("u_idx").tail(1)
     last = last[last["u_idx"].isin(eligible_users)]
 
     eval_users = last["u_idx"].astype(int).to_numpy()
@@ -318,10 +396,7 @@ def _build_item_feature_matrix(
     if not os.path.isfile(nom_path):
         return {}, item_feat_mat
 
-    try:
-        nom = _read_csv_pipe(nom_path)
-    except Exception:
-        return {}, item_feat_mat
+    nom = _read_csv_pipe(nom_path)
 
     if "КодНоменклатуры" not in nom.columns:
         return {}, item_feat_mat
@@ -708,37 +783,142 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
 
 
 # ============================= Saving / Loading =============================
+_MODEL_REQUIRED_CHECKPOINT_KEYS = {
+    "model_type",
+    "config",
+    "num_users",
+    "num_items",
+    "state_dict",
+}
+
+
+def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
+    if not isinstance(mappings, dict):
+        raise ValueError("mappings.json must contain a JSON object")
+
+    idx2user = mappings.get("idx2user")
+    idx2item = mappings.get("idx2item")
+    if not isinstance(idx2user, list):
+        raise ValueError("mappings.json field 'idx2user' must be a list")
+    if not isinstance(idx2item, list):
+        raise ValueError("mappings.json field 'idx2item' must be a list")
+
+    if not isinstance(checkpoint, dict):
+        raise ValueError("bprmf.pt must contain a checkpoint dictionary")
+    missing_keys = _MODEL_REQUIRED_CHECKPOINT_KEYS.difference(checkpoint)
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(f"bprmf.pt is missing required keys: {missing}")
+
+    if len(idx2user) != checkpoint["num_users"]:
+        raise ValueError(
+            "Model artifact mismatch: len(idx2user) does not equal num_users"
+        )
+    if len(idx2item) != checkpoint["num_items"]:
+        raise ValueError(
+            "Model artifact mismatch: len(idx2item) does not equal num_items"
+        )
+
+
+def _resolve_model_artifact_paths(model_dir: str) -> Tuple[str, str]:
+    out_dir = os.path.join(os.getcwd(), model_dir)
+    current_path = os.path.join(out_dir, "current.json")
+
+    if os.path.exists(current_path):
+        with open(current_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        if not isinstance(manifest, dict):
+            raise ValueError("Model current.json must contain a JSON object")
+        generation = manifest.get("generation")
+        if not isinstance(generation, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]+", generation
+        ):
+            raise ValueError("Model current.json contains an invalid generation")
+
+        artifact_dir = os.path.join(out_dir, "runs", generation)
+    else:
+        artifact_dir = out_dir
+
+    return (
+        os.path.join(artifact_dir, "mappings.json"),
+        os.path.join(artifact_dir, "bprmf.pt"),
+    )
+
+
+def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
+    try:
+        print(
+            f"[{_now()}] Failed to clean up model staging path '{path}': {error}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
 def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
 
     out_dir = os.path.join(os.getcwd(), "Модель")
     _ensure_dir(out_dir)
+    staging_root = os.path.join(out_dir, ".staging")
+    runs_dir = os.path.join(out_dir, "runs")
+    _ensure_dir(staging_root)
+    _ensure_dir(runs_dir)
 
-    with open(os.path.join(out_dir, "mappings.json"), "w", encoding="utf-8") as f:
-        json.dump({"idx2user": maps.idx2user, "idx2item": maps.idx2item}, f, ensure_ascii=False)
+    generation = uuid.uuid4().hex
+    staging_dir = os.path.join(staging_root, generation)
+    generation_dir = os.path.join(runs_dir, generation)
+    current_path = os.path.join(out_dir, "current.json")
+    manifest_temp_path = os.path.join(
+        out_dir,
+        f".current.{generation}.tmp",
+    )
 
-    ckpt = {
-        "model_type": "bprmf",
-        "config": cfg.__dict__,
-        "num_users": len(maps.idx2user),
-        "num_items": len(maps.idx2item),
-        "state_dict": model.state_dict(),
-    }
+    staging_created = False
+    generation_finalized = False
+    manifest_temp_created = False
 
-    # save item features for consistent inference/evaluation
-    feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
-    ckpt["feat2idx"] = feat2idx
-    ckpt["item_feat_mat"] = item_feat_np
-    ckpt["item_feature_cols"] = getattr(cfg, "item_feature_cols", [])
-    ckpt["max_item_features"] = int(getattr(cfg, "max_item_features", 32))
-
-    # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
-    # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
     try:
+        os.makedirs(staging_dir)
+        staging_created = True
+        mappings_path = os.path.join(staging_dir, "mappings.json")
+        checkpoint_path = os.path.join(staging_dir, "bprmf.pt")
+
+        with open(mappings_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"idx2user": maps.idx2user, "idx2item": maps.idx2item},
+                f,
+                ensure_ascii=False,
+            )
+
+        ckpt = {
+            "model_type": "bprmf",
+            "config": cfg.__dict__,
+            "num_users": len(maps.idx2user),
+            "num_items": len(maps.idx2item),
+            "state_dict": model.state_dict(),
+        }
+
+        # save item features for consistent inference/evaluation
+        feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
+        ckpt["feat2idx"] = feat2idx
+        ckpt["item_feat_mat"] = item_feat_np
+        ckpt["item_feature_cols"] = getattr(cfg, "item_feature_cols", [])
+        ckpt["max_item_features"] = int(getattr(cfg, "max_item_features", 32))
+
+        # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
+        # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
         train_item_meta: Dict[str, Dict[str, str]] = {}
         nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
         if os.path.isfile(nom_path):
             nom = _read_csv_pipe(nom_path)
             nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
+
+            if "КодНоменклатуры" not in nom.columns:
+                raise ValueError(
+                    "Номенклатура.csv не содержит обязательную колонку "
+                    "КодНоменклатуры"
+                )
 
             want_cols = [
                 "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
@@ -746,31 +926,67 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
                 "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
             ]
             cols = [c for c in want_cols if c in nom.columns]
-            if "КодНоменклатуры" in cols:
-                sub = nom[cols].copy()
-                sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
-                sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
+            sub = nom[cols].copy()
+            sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
+            sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
 
-                for code in maps.idx2item:
-                    if code in sub.index:
-                        row = sub.loc[code].to_dict()
-                        # гарантируем строковые значения
-                        train_item_meta[str(code)] = {k: ("" if row.get(k) is None else str(row.get(k))) for k in
-                                                      row.keys()}
+            for code in maps.idx2item:
+                if code in sub.index:
+                    row = sub.loc[code].to_dict()
+                    # гарантируем строковые значения
+                    train_item_meta[str(code)] = {
+                        k: ("" if row.get(k) is None else str(row.get(k)))
+                        for k in row.keys()
+                    }
 
         ckpt["train_item_meta"] = train_item_meta
 
+        with open(mappings_path, "r", encoding="utf-8") as f:
+            saved_mappings = json.load(f)
+        _validate_model_artifacts(saved_mappings, ckpt)
+
+        with open(checkpoint_path, "wb") as f:
+            torch.save(ckpt, f)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if not os.path.isfile(checkpoint_path) or os.path.getsize(checkpoint_path) <= 0:
+            raise OSError("Failed to create a complete bprmf.pt checkpoint")
+
+        os.rename(staging_dir, generation_dir)
+        generation_finalized = True
+
+        with open(manifest_temp_path, "w", encoding="utf-8") as f:
+            manifest_temp_created = True
+            json.dump({"generation": generation}, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(manifest_temp_path, current_path)
+        manifest_temp_created = False
     except Exception:
+        if (
+            staging_created
+            and not generation_finalized
+            and os.path.isdir(staging_dir)
+        ):
+            try:
+                shutil.rmtree(staging_dir)
+            except OSError as cleanup_error:
+                _diagnose_artifact_cleanup_error(staging_dir, cleanup_error)
 
-        ckpt["train_item_meta"] = {}
-
-    torch.save(ckpt, os.path.join(out_dir, "bprmf.pt"))
+        if manifest_temp_created and os.path.exists(manifest_temp_path):
+            try:
+                os.remove(manifest_temp_path)
+            except OSError as cleanup_error:
+                _diagnose_artifact_cleanup_error(
+                    manifest_temp_path, cleanup_error
+                )
+        raise
 
 
 def _load_artifacts(model_dir: str = "Модель") -> Tuple[Dict[str, List[str]], dict]:
-    out_dir = os.path.join(os.getcwd(), model_dir)
-    mappings_path = os.path.join(out_dir, "mappings.json")
-    ckpt_path = os.path.join(out_dir, "bprmf.pt")
+    mappings_path, ckpt_path = _resolve_model_artifact_paths(model_dir)
 
     if not (os.path.isfile(mappings_path) and os.path.isfile(ckpt_path)):
         raise FileNotFoundError("Не найдена обученная модель, необходимо выполнить обучение.")
@@ -779,6 +995,7 @@ def _load_artifacts(model_dir: str = "Модель") -> Tuple[Dict[str, List[str
         maps_json = json.load(f)
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    _validate_model_artifacts(maps_json, ckpt)
     return maps_json, ckpt
 
 
@@ -831,14 +1048,11 @@ def _load_selected_collections_from_settings() -> List[str]:
     path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
     if not os.path.isfile(path):
         return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        vals = data.get("collections_selected") or data.get("seasons_selected") or []
-        out = [_norm_text(v) for v in vals if _norm_text(v)]
-        return out
-    except Exception:
-        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    vals = data.get("collections_selected") or data.get("seasons_selected") or []
+    out = [_norm_text(v) for v in vals if _norm_text(v)]
+    return out
 
 
 def _similarity_score(old_meta: Dict[str, str], new_meta: Dict[str, str]) -> float:
@@ -875,10 +1089,7 @@ def _load_item_names(data_dir: str) -> Dict[str, str]:
     nom_path = os.path.join(data_dir, "Номенклатура.csv")
     if not os.path.isfile(nom_path):
         return {}
-    try:
-        nom = _read_csv_pipe(nom_path)
-    except Exception:
-        return {}
+    nom = _read_csv_pipe(nom_path)
 
     if "КодНоменклатуры" not in nom.columns:
         return {}
@@ -957,15 +1168,17 @@ def _load_item_stocks(data_dir: str) -> Dict[str, str]:
     if not os.path.isfile(nom_path):
         return {}
 
-    try:
-        nom = _read_csv_pipe(nom_path)
-    except Exception:
-        return {}
+    nom = _read_csv_pipe(nom_path)
 
     nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
 
-    if "КодНоменклатуры" not in nom.columns or "Остаток" not in nom.columns:
-        return {}
+    required_columns = {"КодНоменклатуры", "Остаток"}
+    missing_columns = required_columns.difference(nom.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(
+            f"Номенклатура.csv не содержит обязательные колонки остатков: {missing}"
+        )
 
     sub = nom[["КодНоменклатуры", "Остаток"]].copy()
 
@@ -1034,6 +1247,8 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
     Prints top-K recommendations to console using saved artifacts (BPR-MF only).
     """
     cfg = TrainConfig()
+    _require_interaction_sources(cfg.data_dir)
+    _validate_interaction_source_schemas(cfg.data_dir)
     maps_json, ckpt = _load_artifacts()
 
     idx2user = maps_json["idx2user"]
@@ -1046,7 +1261,15 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
         return
 
     seen_idx = _user_seen_items_from_processed(cfg.data_dir, mindbox_id, item2idx, cfg)
-    names = _load_item_names(cfg.data_dir)
+    try:
+        names = _load_item_names(cfg.data_dir)
+    except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        print(
+            f"[{_now()}] Не удалось загрузить названия товаров: {exc}. "
+            "Рекомендации будут выведены без названий.",
+            file=sys.stderr,
+        )
+        names = {}
 
     num_users = int(ckpt["num_users"])
     num_items = int(ckpt["num_items"])
@@ -1094,7 +1317,7 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
 
 # ============================= Training entry point (UI button) =============================
 
-def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
+def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
     cfg = cfg or TrainConfig()
     _set_seed(cfg.seed)
 
@@ -1110,7 +1333,13 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
         for p in missing:
             print(f"  - {p}")
         print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
-        return
+        return False
+
+    try:
+        _validate_interaction_source_schemas(data_dir)
+    except _InvalidInteractionSchemaError as exc:
+        print(f"[{_now()}] {exc}")
+        return False
 
     orders = _read_csv_pipe(orders_path)
     views = _read_csv_pipe(views_path)
@@ -1128,7 +1357,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
     events = _collect_user_item_events(orders, views, fav, maps, cfg)
     if len(events) == 0:
         print(f"[{_now()}] Не найдено взаимодействий пользователь-товар.")
-        return
+        return False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device_label = "GPU (графический процессор, видеокарта)" if device.type == "cuda" else "CPU (центральный процессор)"
@@ -1136,6 +1365,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> None:
 
     model, _splits = train_bprmf(maps, events, cfg, device)
     _save_artifacts(cfg, maps, model)
+    return True
 
 
 def train_recommender(*_args, **_kwargs) -> None:
@@ -1157,21 +1387,72 @@ def train_recommender(*_args, **_kwargs) -> None:
 
 # ============================= CLI =============================
 
+TRAIN_EXIT_SUCCESS = 0
+TRAIN_EXIT_NO_DATA = 2
+
 
 def _load_train_config_from_json(path: str) -> TrainConfig:
-    cfg = TrainConfig()
     if not path:
-        return cfg
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Apply only known fields (ignore everything else)
-        allowed = set(cfg.__dict__.keys())
-        for k, v in data.items():
-            if k in allowed:
-                setattr(cfg, k, v)
-    except Exception as e:
-        print(f"[{_now()}] WARNING: failed to load train config from '{path}': {e}. Using defaults.")
+        raise ValueError("Train config path must not be empty")
+
+    cfg = TrainConfig()
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise TypeError("Train config root must be a JSON object")
+
+    string_fields = {"data_dir", "early_stop_metric", "feature_norm"}
+    boolean_fields = {"early_stop", "use_item_features"}
+    integer_fields = {
+        "embedding_dim",
+        "epochs",
+        "batch_size",
+        "n_neg",
+        "seed",
+        "topk",
+        "min_user_interactions_for_eval",
+        "early_stop_patience",
+        "early_stop_min_epochs",
+        "max_item_features",
+    }
+    float_fields = {
+        "w_view_item",
+        "w_favorite",
+        "w_purchase",
+        "lr",
+        "weight_decay",
+        "bpr_reg",
+        "early_stop_min_delta",
+        "feature_dropout",
+        "feature_scale",
+        "feat_reg_mult",
+    }
+    list_fields = {"item_feature_cols"}
+
+    allowed = set(cfg.__dict__.keys())
+    for key, value in data.items():
+        if key not in allowed:
+            continue
+
+        if key in string_fields and not isinstance(value, str):
+            raise TypeError(f"Train config field '{key}' must be a string")
+        if key in boolean_fields and type(value) is not bool:
+            raise TypeError(f"Train config field '{key}' must be a boolean")
+        if key in integer_fields and type(value) is not int:
+            raise TypeError(f"Train config field '{key}' must be an integer")
+        if key in float_fields:
+            if type(value) not in (int, float):
+                raise TypeError(f"Train config field '{key}' must be a number")
+            value = float(value)
+        if key in list_fields and (
+            not isinstance(value, list)
+            or any(not isinstance(item, str) for item in value)
+        ):
+            raise TypeError(f"Train config field '{key}' must be a list of strings")
+
+        setattr(cfg, key, value)
+
     return cfg
 
 
@@ -1183,6 +1464,12 @@ def _parse_cli(argv: List[str]) -> Tuple[bool, Optional[str], int, Optional[str]
 
     if "--config" in argv:
         i = argv.index("--config")
+        if do_train and (
+            i + 1 >= len(argv)
+            or not argv[i + 1]
+            or argv[i + 1].startswith("--")
+        ):
+            raise ValueError("--config requires a path")
         if i + 1 < len(argv):
             config_path = argv[i + 1]
 
@@ -1323,6 +1610,21 @@ def _build_user_seen_sets(
     return seen
 
 
+def _item_kind_mapping_fingerprint(
+    item_kind_by_code: Dict[str, str],
+) -> str:
+    normalized_pairs = sorted(
+        (str(code), _norm_text(kind))
+        for code, kind in item_kind_by_code.items()
+    )
+    payload = json.dumps(
+        normalized_pairs,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _load_historical_item_conversion(
     data_dir: str,
     item_kind_by_code: Dict[str, str],
@@ -1349,20 +1651,36 @@ def _load_historical_item_conversion(
     orders_path = _path_csv(data_dir, "Заказы")
     nom_path = _path_csv(data_dir, "Номенклатура")
 
-    if not os.path.isfile(views_path) or not os.path.isfile(orders_path):
+    def _regular_file_mtime(path: str) -> Optional[float]:
+        try:
+            mtime = os.path.getmtime(path)
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            return None
+
+        if not stat.S_ISREG(mode):
+            raise OSError(
+                f"Historical conversion source is not a regular file: {path}"
+            )
+        return mtime
+
+    views_mtime = _regular_file_mtime(views_path)
+    if views_mtime is None:
         print(f"[{_now()}] Историческая конверсия не рассчитана: отсутствуют Просмотры.csv или Заказы.csv.")
         return {}, 0.0
 
-    def _mtime(path: str) -> float:
-        try:
-            return os.path.getmtime(path)
-        except OSError:
-            return 0.0
+    orders_mtime = _regular_file_mtime(orders_path)
+    if orders_mtime is None:
+        print(f"[{_now()}] Историческая конверсия не рассчитана: отсутствуют Просмотры.csv или Заказы.csv.")
+        return {}, 0.0
+
+    nom_mtime = _regular_file_mtime(nom_path)
 
     cache_key = (
-        os.path.abspath(views_path), _mtime(views_path),
-        os.path.abspath(orders_path), _mtime(orders_path),
-        os.path.abspath(nom_path), _mtime(nom_path),
+        os.path.abspath(views_path), views_mtime,
+        os.path.abspath(orders_path), orders_mtime,
+        os.path.abspath(nom_path), nom_mtime,
+        _item_kind_mapping_fingerprint(item_kind_by_code),
         int(window_days), float(prior_strength),
     )
 
@@ -1558,6 +1876,105 @@ def _load_historical_item_conversion(
         "global": global_pct,
     }
     return conversion_by_code, global_pct
+
+
+def _diagnose_export_cleanup_error(
+    operation: str,
+    path: str,
+    error: BaseException,
+) -> None:
+    try:
+        print(
+            f"[{_now()}] Failed to {operation} export resource "
+            f"'{path}': {error}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
+def _create_export_temp_path(target_path: str) -> str:
+    target_path = os.fspath(target_path)
+    target_dir = os.path.dirname(target_path) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    prefix = f".{os.path.basename(target_path)}."
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".tmp",
+        dir=target_dir,
+    )
+    try:
+        os.close(temp_fd)
+    except BaseException:
+        try:
+            os.remove(temp_path)
+        except OSError as cleanup_error:
+            _diagnose_export_cleanup_error(
+                "remove",
+                temp_path,
+                cleanup_error,
+            )
+        raise
+    return temp_path
+
+
+def _cleanup_export_temp(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as cleanup_error:
+        _diagnose_export_cleanup_error("remove", path, cleanup_error)
+
+
+def _close_export_csv_files(
+    resources: List[Tuple[str, object]],
+    primary_error: Optional[BaseException],
+) -> None:
+    first_error: Optional[BaseException] = None
+
+    def record_error(operation: str, path: str, error: BaseException) -> None:
+        nonlocal first_error
+        if primary_error is not None or first_error is not None:
+            _diagnose_export_cleanup_error(operation, path, error)
+        else:
+            first_error = error
+
+    for path, file_object in resources:
+        try:
+            file_object.flush()
+        except BaseException as flush_error:
+            record_error("flush", path, flush_error)
+
+        try:
+            file_object.close()
+        except BaseException as close_error:
+            record_error("close", path, close_error)
+
+    if primary_error is None and first_error is not None:
+        raise first_error
+
+
+def _validate_export_csv(path: str, expected_header: List[str]) -> None:
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        raise OSError(f"Failed to create a complete CSV export: {path}")
+
+    with open(path, "r", newline="", encoding="utf-8-sig") as file_object:
+        actual_header = next(csv.reader(file_object, delimiter=";"), None)
+    if actual_header != expected_header:
+        raise OSError(f"CSV export has an invalid header: {path}")
+
+
+def _validate_export_xlsx(path: str) -> None:
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        raise OSError(f"Failed to create a complete XLSX export: {path}")
+
+    with zipfile.ZipFile(path, "r") as archive:
+        bad_member = archive.testzip()
+    if bad_member is not None:
+        raise OSError(
+            f"XLSX export contains a corrupted ZIP member: {bad_member}"
+        )
 
 
 # -------------------------------------------ВЫГРУЗКА В ЭКСЕЛЬ----------------------------------------------------------
@@ -1870,24 +2287,18 @@ def export_recommendations_excel(
 
         return ranked_indices
 
-    mappings_path = os.path.join(model_dir, "mappings.json")
-    ckpt_path = os.path.join(model_dir, "bprmf.pt")
-
-    if not (os.path.isfile(mappings_path) and os.path.isfile(ckpt_path)):
-        raise FileNotFoundError(f"Не найдены файлы модели: {mappings_path} и/или {ckpt_path}")
-
-    with open(mappings_path, "r", encoding="utf-8") as f:
-        maps_json = json.load(f)
+    maps_json, ckpt = _load_artifacts(model_dir)
 
     idx2user: List[str] = maps_json["idx2user"]
     idx2item: List[str] = maps_json["idx2item"]
     user2idx = {u: i for i, u in enumerate(idx2user)}
     item2idx = {it: i for i, it in enumerate(idx2item)}
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-
     device = torch.device(device_str if (device_str == "cpu" or torch.cuda.is_available()) else "cpu")
     model, cfg, num_users, num_items = _build_model_from_ckpt(ckpt, device)
+    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
+    _require_interaction_sources(data_dir)
+    _validate_interaction_source_schemas(data_dir)
 
     # --------- подготовка данных для сезонного маппинга ---------
     train_item_meta: Dict[str, Dict[str, str]] = ckpt.get("train_item_meta", {}) or {}
@@ -2052,10 +2463,6 @@ def export_recommendations_excel(
     k = max(int(csv_min_k), int(k))
     k = max(1, min(int(k), num_items))
 
-    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
-
-    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
-
     # Нормализуем выбранные пользователем виды номенклатуры.
     # Пустое множество означает, что ограничение не применяется.
     export_kind_names = sorted({
@@ -2080,21 +2487,54 @@ def export_recommendations_excel(
             f"в итоговой выгрузке не установлено."
         )
 
-    item_names: Dict[str, str] = (
-        _load_item_names(data_dir)
-        if include_item_names
-        else {}
-    )
+    item_names: Dict[str, str] = {}
+    item_names_warning_emitted = False
+    if include_item_names:
+        try:
+            item_names = _load_item_names(data_dir)
+        except (
+            OSError,
+            UnicodeError,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+        ) as exc:
+            print(
+                f"[{_now()}] Не удалось загрузить названия товаров: {exc}. "
+                "Выгрузка будет продолжена без актуальных названий.",
+                file=sys.stderr,
+            )
+            item_names_warning_emitted = True
 
-    item_names: Dict[str, str] = _load_item_names(data_dir) if include_item_names else {}
+    if include_item_names:
+        try:
+            second_item_names = _load_item_names(data_dir)
+        except (
+            OSError,
+            UnicodeError,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+        ) as exc:
+            if not item_names_warning_emitted:
+                print(
+                    f"[{_now()}] Не удалось загрузить названия товаров: {exc}. "
+                    "Выгрузка будет продолжена без актуальных названий.",
+                    file=sys.stderr,
+                )
+                item_names_warning_emitted = True
+        else:
+            item_names = second_item_names
 
     # Остатки берём из текущей номенклатуры, потому что после сезонного сопоставления
     # код товара может быть заменён на товар из актуальной коллекции.
     current_data_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-    item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)
-
-    # fallback на cfg.data_dir
-    if not item_stocks:
+    current_nomenclature_path = os.path.join(
+        current_data_dir,
+        "Номенклатура.csv",
+    )
+    if os.path.isfile(current_nomenclature_path):
+        item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)
+    else:
+        # Historical fallback сохраняется только при отсутствии current source.
         item_stocks = _load_item_stocks(data_dir)
 
     # Вид номенклатуры нужен для сглаживания конверсии и fallback новых товаров.
@@ -2105,10 +2545,24 @@ def export_recommendations_excel(
         item_kind_by_code[str(code)] = _norm_text((meta or {}).get("ВидНоменклатуры", ""))
 
     # Для расчёта используем только текущие обработанные файлы.
+    def _current_conversion_source_exists(path: str) -> bool:
+        try:
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            return False
+
+        if not stat.S_ISREG(mode):
+            raise OSError(
+                f"Current conversion source is not a regular file: {path}"
+            )
+        return True
+
     conversion_data_dir = current_data_dir
+    current_views_path = _path_csv(conversion_data_dir, "Просмотры")
+    current_orders_path = _path_csv(conversion_data_dir, "Заказы")
     if not (
-        os.path.isfile(_path_csv(conversion_data_dir, "Просмотры"))
-        and os.path.isfile(_path_csv(conversion_data_dir, "Заказы"))
+        _current_conversion_source_exists(current_views_path)
+        and _current_conversion_source_exists(current_orders_path)
     ):
         conversion_data_dir = data_dir
 
@@ -2216,414 +2670,529 @@ def export_recommendations_excel(
             .replace(",", " ")
         )
 
-    os.makedirs(os.path.dirname(out_xlsx) or ".", exist_ok=True)
-    wb = Workbook(write_only=True)
-    ws = wb.create_sheet("Рекомендации")
+    temp_paths: List[str] = []
+    csv_resources: List[Tuple[str, object]] = []
+    csv1_temp_path: Optional[str] = None
+    csvml_temp_path: Optional[str] = None
+    wb = None
 
-    header = ["MindboxID"]
-    if include_discount_card:
-        header.append("ДисконтнаяКарта")
-    if include_email:
-        header.append("Почта")
-    if include_phone:
-        header.append("Телефон")
+    try:
+        xlsx_temp_path = _create_export_temp_path(out_xlsx)
+        temp_paths.append(xlsx_temp_path)
 
-    for r in range(1, k + 1):
-        header.append(f"КодНоменклатуры_{r}")
-        if include_item_names:
-            header.append(f"НазваниеНоменклатуры_{r}")
-        header.append(f"Коллекция_{r}")
-        if include_scores:
-            header.append(f"Коэффициент_{r}")
-        header.append(f"Конверсия_{r}")
-        header.append(f"Остаток_{r}")
+        if out_csv_format1:
+            csv1_temp_path = _create_export_temp_path(out_csv_format1)
+            temp_paths.append(csv1_temp_path)
 
-    ws.append(header)
+        if out_csv_kanzler_ml:
+            csvml_temp_path = _create_export_temp_path(out_csv_kanzler_ml)
+            temp_paths.append(csvml_temp_path)
 
-    # --- Статистика по коллекциям в итоговом Excel-файле ---
-    collection_counts: Dict[str, int] = {}
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Рекомендации")
 
-    def _add_collection_to_stats(collection_value: str) -> None:
-        coll = _clean_name(collection_value)
+        header = ["MindboxID"]
+        if include_discount_card:
+            header.append("ДисконтнаяКарта")
+        if include_email:
+            header.append("Почта")
+        if include_phone:
+            header.append("Телефон")
 
-        if not coll:
-            coll = "Без коллекции"
+        for r in range(1, k + 1):
+            header.append(f"КодНоменклатуры_{r}")
+            if include_item_names:
+                header.append(f"НазваниеНоменклатуры_{r}")
+            header.append(f"Коллекция_{r}")
+            if include_scores:
+                header.append(f"Коэффициент_{r}")
+            header.append(f"Конверсия_{r}")
+            header.append(f"Остаток_{r}")
 
-        collection_counts[coll] = collection_counts.get(coll, 0) + 1
+        ws.append(header)
 
-    # --- CSV outputs (additional to Excel) ---
-    csv1_f = csvml_f = None
-    csv1_w = csvml_w = None
+        # --- Статистика по коллекциям в итоговом Excel-файле ---
+        collection_counts: Dict[str, int] = {}
 
-    if out_csv_format1:
-        os.makedirs(os.path.dirname(out_csv_format1) or ".", exist_ok=True)
-        csv1_f = open(out_csv_format1, "w", newline="", encoding="utf-8-sig")
-        csv1_w = csv.writer(csv1_f, delimiter=";")
-        csv1_w.writerow(["CustomerID", "ProductID"])
+        def _add_collection_to_stats(collection_value: str) -> None:
+            coll = _clean_name(collection_value)
 
-    if out_csv_kanzler_ml:
-        os.makedirs(os.path.dirname(out_csv_kanzler_ml) or ".", exist_ok=True)
-        csvml_f = open(out_csv_kanzler_ml, "w", newline="", encoding="utf-8-sig")
-        csvml_w = csv.writer(csvml_f, delimiter=";")
-        csvml_w.writerow(["CustomerMindboxId", "Quantity", "ProductGroupOffline1C", "CustomFieldKoefficient"])
+            if not coll:
+                coll = "Без коллекции"
 
-    exported_users = 0
-    stop_export = False
+            collection_counts[coll] = collection_counts.get(coll, 0) + 1
 
-    for batch_start in range(
-            0,
-            len(ranked_user_indices),
-            batch_users,
-    ):
-        if stop_export:
-            break
+        # --- CSV outputs (additional to Excel) ---
+        csv1_w = csvml_w = None
 
-        batch_user_indices = ranked_user_indices[
-                             batch_start:batch_start + batch_users
-                             ]
+        if csv1_temp_path is not None:
+            csv1_f = open(
+                csv1_temp_path,
+                "w",
+                newline="",
+                encoding="utf-8-sig",
+            )
+            csv_resources.append((csv1_temp_path, csv1_f))
+            csv1_w = csv.writer(csv1_f, delimiter=";")
+            csv1_w.writerow(["CustomerID", "ProductID"])
 
-        if not batch_user_indices:
-            continue
+        if csvml_temp_path is not None:
+            csvml_f = open(
+                csvml_temp_path,
+                "w",
+                newline="",
+                encoding="utf-8-sig",
+            )
+            csv_resources.append((csvml_temp_path, csvml_f))
+            csvml_w = csv.writer(csvml_f, delimiter=";")
+            csvml_w.writerow(
+                [
+                    "CustomerMindboxId",
+                    "Quantity",
+                    "ProductGroupOffline1C",
+                    "CustomFieldKoefficient",
+                ]
+            )
 
-        u_idx = torch.tensor(
-            batch_user_indices,
-            device=device,
-            dtype=torch.long,
-        )
+        exported_users = 0
+        stop_export = False
 
-        u_emb = model.user_emb(u_idx)  # [B, d]
-        scores = u_emb @ item_vec.t()  # [B, I]
-
-        if filter_seen and user_seen is not None:
-            for bi, uu in enumerate(batch_user_indices):
-                seen_items = user_seen[uu]
-
-                if seen_items:
-                    scores[
-                        bi,
-                        torch.tensor(
-                            list(seen_items),
-                            device=device,
-                            dtype=torch.long,
-                        )
-                    ] = -1e9
-
-        # Убираем из ранжирования все виды номенклатуры,
-        # которые пользователь не выбрал для выгрузки.
-        if export_kind_mask is not None:
-            scores[:, ~export_kind_mask] = -1e9
-
-        # Берём больше кандидатов, потому что часть товаров будет отсеяна по остатку < 100
-        cand_k = min(scores.shape[1], max(k * 100, 1000, k))
-        top = torch.topk(scores, k=cand_k, dim=1)
-        top_idx = top.indices.detach().cpu().numpy()
-        top_val = top.values.detach().cpu().numpy()
-
-        for bi, uu in enumerate(batch_user_indices):
-            if (
-                    export_user_limit is not None
-                    and exported_users >= export_user_limit
-            ):
-                stop_export = True
+        for batch_start in range(
+                0,
+                len(ranked_user_indices),
+                batch_users,
+        ):
+            if stop_export:
                 break
 
-            mindbox_id = str(idx2user[uu])
+            batch_user_indices = ranked_user_indices[
+                                 batch_start:batch_start + batch_users
+                                 ]
 
-            row: List[object] = [mindbox_id]
-
-            if include_discount_card:
-                row.append(str(discount_cards.get(mindbox_id, "")))
-            if include_email:
-                row.append(str(emails.get(mindbox_id, "")))
-            if include_phone:
-                row.append(str(phones.get(mindbox_id, "")))
-
-            rec_items = top_idx[bi].tolist()
-            rec_scores = [float(x) for x in top_val[bi].tolist()]
-
-            used = set()
-            out_codes: List[str] = []
-            out_names: List[str] = []
-            out_collections: List[str] = []
-            out_scores: List[float] = []
-            out_conversions: List[float] = []
-            out_stocks: List[str] = []
-
-            def _stock_for_code(code: str) -> str:
-                code = str(code or "").strip()
-                if not code:
-                    return ""
-
-                # основной источник — текущая Номенклатура.csv
-                val = item_stocks.get(code)
-                if val is not None:
-                    return _format_stock_value(val)
-
-                # fallback — метаданные текущего каталога
-                meta = new_meta_by_code.get(code, {}) or {}
-                return _format_stock_value(meta.get("Остаток", 0))
-
-            def _stock_to_int(stock_value) -> int:
-                """
-                Преобразует остаток к int для фильтрации:
-                  "150" -> 150
-                  "150.0" -> 150
-                  "150,0" -> 150
-                  пусто/NaN -> 0
-                """
-                try:
-                    return int(_format_stock_value(stock_value))
-                except Exception:
-                    return 0
-
-            def _collection_for_code(code_out: str, code_old: str = "") -> str:
-                """
-                Возвращает коллекцию итогового товара после сезонного сопоставления.
-                Сначала ищем по итоговому коду в текущей Номенклатура.csv,
-                затем в метаданных обучения.
-                """
-                code_out = str(code_out or "").strip()
-                code_old = str(code_old or "").strip()
-
-                if code_out:
-                    meta = new_meta_by_code.get(code_out, {}) or {}
-                    coll = _clean_name(meta.get("Коллекция"))
-                    if coll:
-                        return coll
-
-                    meta = train_item_meta.get(code_out, {}) or {}
-                    coll = _clean_name(meta.get("Коллекция"))
-                    if coll:
-                        return coll
-
-                if code_old:
-                    meta = train_item_meta.get(code_old, {}) or {}
-                    coll = _clean_name(meta.get("Коллекция"))
-                    if coll:
-                        return coll
-
-                return ""
-
-            def _kind_for_code(
-                code_out: str,
-                code_old: str = "",
-            ) -> str:
-                return _kind_for_export(
-                    code_out,
-                    code_old
-                )
-
-            def _is_autumn_winter_collection(collection_value: str) -> bool:
-                """
-                True для любых коллекций Осень-Зима любого года:
-                  Осень-Зима 2024
-                  Осень-Зима 2025
-                  Осень-Зима 2025 переходящий остаток
-                  Осень-Зима 2026
-                """
-                coll = _norm_text(collection_value).upper()
-                return "ОСЕНЬ" in coll and "ЗИМА" in coll
-
-            def _is_gift_card_kind(kind_value: str) -> bool:
-                """
-                True для вида номенклатуры Подарочные карты.
-                """
-                kind = _norm_text(kind_value).upper()
-                return kind == "ПОДАРОЧНЫЕ КАРТЫ" or ("ПОДАРОЧН" in kind and "КАРТ" in kind)
-
-
-            ptr = 0
-
-            while len(out_codes) < k and ptr < len(rec_items):
-                code_old = str(idx2item[int(rec_items[ptr])])
-                score_old = float(rec_scores[ptr])
-
-                # Значение -1e9 используется для исключённых,
-                # уже просмотренных или запрещённых товаров.
-                if score_old <= -1e8:
-                    ptr += 1
-                    continue
-
-                code_out = _map_old_code_to_active(code_old)
-
-                if code_out in used:
-                    ptr += 1
-                    continue
-
-                collection_out = _collection_for_code(code_out, code_old)
-                kind_out = _kind_for_code(code_out, code_old)
-
-                # Отбор по видам номенклатуры, выбранным пользователем.
-                # Пустой список означает отсутствие ограничения.
-                if (
-                        export_kind_keys
-                        and _norm_text(kind_out).upper()
-                        not in export_kind_keys
-                ):
-                    ptr += 1
-                    continue
-
-                # Фильтр по коллекции: убираем всю Осень-Зиму любого года
-                if _is_autumn_winter_collection(collection_out):
-                    ptr += 1
-                    continue
-
-                # Фильтр по виду номенклатуры: убираем подарочные карты
-                if _is_gift_card_kind(kind_out):
-                    ptr += 1
-                    continue
-
-                stock_out = _stock_for_code(code_out)
-
-                # Фильтр по остатку: в выгрузку попадают только товары с остатком >= 100
-                if _stock_to_int(stock_out) < 100:
-                    ptr += 1
-                    continue
-
-                used.add(code_out)
-                out_codes.append(code_out)
-                out_scores.append(score_old)
-                out_collections.append(collection_out)
-                out_conversions.append(
-                    float(historical_conversion_by_code.get(code_out, historical_conversion_global))
-                )
-                out_stocks.append(stock_out)
-
-                if include_item_names:
-                    nm = _clean_name(item_names.get(code_out, ""))
-
-                    if not nm:
-                        if code_out == code_old:
-                            om = train_item_meta.get(code_old, {}) or {}
-                            nm = _clean_name(om.get("НазваниеНаСайте")) or _clean_name(om.get("Номенклатура"))
-                        else:
-                            nm = _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("НазваниеНаСайте")) \
-                                 or _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("Номенклатура"))
-
-                    out_names.append(nm)
-
-                ptr += 1
-
-            if not out_codes:
+            if not batch_user_indices:
                 continue
 
-            # добиваем до k, чтобы структура Excel не ломалась
-            while len(out_codes) < k:
-                out_codes.append("")
-                out_scores.append(0.0)
-                out_collections.append("")
-                out_conversions.append(0.0)
-                out_stocks.append("")
-                if include_item_names:
-                    out_names.append("")
-            # --- CSV format #1: CustomerID=discount card, ProductID=comma-separated codes ---
-            # --- CSV InternetMagazin:
-            # CustomerID = номер телефона,
-            # ProductID = коды рекомендаций через запятую.
-            if csv1_w is not None:
-                customer_id = _normalize_phone(
-                    phones.get(mindbox_id, "")
-                )
+            u_idx = torch.tensor(
+                batch_user_indices,
+                device=device,
+                dtype=torch.long,
+            )
 
-                product_codes_csv = [
-                    str(code).strip()
-                    for code in out_codes[:k]
-                    if str(code or "").strip()
-                ]
+            u_emb = model.user_emb(u_idx)  # [B, d]
+            scores = u_emb @ item_vec.t()  # [B, I]
 
-                product_id = ",".join(product_codes_csv)
+            if filter_seen and user_seen is not None:
+                for bi, uu in enumerate(batch_user_indices):
+                    seen_items = user_seen[uu]
 
-                # Пустые идентификаторы и пустые рекомендации не записываем.
-                if customer_id and product_id:
-                    csv1_w.writerow([
-                        customer_id,
-                        product_id,
-                    ])
+                    if seen_items:
+                        scores[
+                            bi,
+                            torch.tensor(
+                                list(seen_items),
+                                device=device,
+                                dtype=torch.long,
+                            )
+                        ] = -1e9
 
-            # --- CSV Kanzler ML: one row per recommended item ---
-            if csvml_w is not None:
-                def _fmt_coef_ru(val: float) -> str:
-                    try:
-                        return f"{float(val):.2f}".replace(".", ",")
-                    except Exception:
+            # Убираем из ранжирования все виды номенклатуры,
+            # которые пользователь не выбрал для выгрузки.
+            if export_kind_mask is not None:
+                scores[:, ~export_kind_mask] = -1e9
+
+            # Берём больше кандидатов, потому что часть товаров будет отсеяна по остатку < 100
+            cand_k = min(scores.shape[1], max(k * 100, 1000, k))
+            top = torch.topk(scores, k=cand_k, dim=1)
+            top_idx = top.indices.detach().cpu().numpy()
+            top_val = top.values.detach().cpu().numpy()
+
+            for bi, uu in enumerate(batch_user_indices):
+                if (
+                        export_user_limit is not None
+                        and exported_users >= export_user_limit
+                ):
+                    stop_export = True
+                    break
+
+                mindbox_id = str(idx2user[uu])
+
+                row: List[object] = [mindbox_id]
+
+                if include_discount_card:
+                    row.append(str(discount_cards.get(mindbox_id, "")))
+                if include_email:
+                    row.append(str(emails.get(mindbox_id, "")))
+                if include_phone:
+                    row.append(str(phones.get(mindbox_id, "")))
+
+                rec_items = top_idx[bi].tolist()
+                rec_scores = [float(x) for x in top_val[bi].tolist()]
+
+                used = set()
+                out_codes: List[str] = []
+                out_names: List[str] = []
+                out_collections: List[str] = []
+                out_scores: List[float] = []
+                out_conversions: List[float] = []
+                out_stocks: List[str] = []
+
+                def _stock_for_code(code: str) -> str:
+                    code = str(code or "").strip()
+                    if not code:
                         return ""
-                for code_val, sc_val in zip(out_codes[:k], out_scores[:k]):
-                    code_val = str(code_val or "")
-                    if not code_val:
+
+                    # основной источник — текущая Номенклатура.csv
+                    val = item_stocks.get(code)
+                    if val is not None:
+                        return _format_stock_value(val)
+
+                    # fallback — метаданные текущего каталога
+                    meta = new_meta_by_code.get(code, {}) or {}
+                    return _format_stock_value(meta.get("Остаток", 0))
+
+                def _stock_to_int(stock_value) -> int:
+                    """
+                    Преобразует остаток к int для фильтрации:
+                      "150" -> 150
+                      "150.0" -> 150
+                      "150,0" -> 150
+                      пусто/NaN -> 0
+                    """
+                    try:
+                        return int(_format_stock_value(stock_value))
+                    except Exception:
+                        return 0
+
+                def _collection_for_code(code_out: str, code_old: str = "") -> str:
+                    """
+                    Возвращает коллекцию итогового товара после сезонного сопоставления.
+                    Сначала ищем по итоговому коду в текущей Номенклатура.csv,
+                    затем в метаданных обучения.
+                    """
+                    code_out = str(code_out or "").strip()
+                    code_old = str(code_old or "").strip()
+
+                    if code_out:
+                        meta = new_meta_by_code.get(code_out, {}) or {}
+                        coll = _clean_name(meta.get("Коллекция"))
+                        if coll:
+                            return coll
+
+                        meta = train_item_meta.get(code_out, {}) or {}
+                        coll = _clean_name(meta.get("Коллекция"))
+                        if coll:
+                            return coll
+
+                    if code_old:
+                        meta = train_item_meta.get(code_old, {}) or {}
+                        coll = _clean_name(meta.get("Коллекция"))
+                        if coll:
+                            return coll
+
+                    return ""
+
+                def _kind_for_code(
+                    code_out: str,
+                    code_old: str = "",
+                ) -> str:
+                    return _kind_for_export(
+                        code_out,
+                        code_old
+                    )
+
+                def _is_autumn_winter_collection(collection_value: str) -> bool:
+                    """
+                    True для любых коллекций Осень-Зима любого года:
+                      Осень-Зима 2024
+                      Осень-Зима 2025
+                      Осень-Зима 2025 переходящий остаток
+                      Осень-Зима 2026
+                    """
+                    coll = _norm_text(collection_value).upper()
+                    return "ОСЕНЬ" in coll and "ЗИМА" in coll
+
+                def _is_gift_card_kind(kind_value: str) -> bool:
+                    """
+                    True для вида номенклатуры Подарочные карты.
+                    """
+                    kind = _norm_text(kind_value).upper()
+                    return kind == "ПОДАРОЧНЫЕ КАРТЫ" or ("ПОДАРОЧН" in kind and "КАРТ" in kind)
+
+
+                ptr = 0
+
+                while len(out_codes) < k and ptr < len(rec_items):
+                    code_old = str(idx2item[int(rec_items[ptr])])
+                    score_old = float(rec_scores[ptr])
+
+                    # Значение -1e9 используется для исключённых,
+                    # уже просмотренных или запрещённых товаров.
+                    if score_old <= -1e8:
+                        ptr += 1
                         continue
-                    csvml_w.writerow([mindbox_id, 1, code_val, _fmt_coef_ru(sc_val)])
 
-            for j in range(k):
-                row.append(out_codes[j])
-                if include_item_names:
-                    row.append(out_names[j])
-                row.append(out_collections[j])
-                if include_scores:
-                    row.append(round(out_scores[j], 2))
-                # Историческая конверсия хранится только в Excel, в процентах.
-                row.append(round(out_conversions[j], 2) if out_codes[j] else "")
-                row.append(out_stocks[j])
+                    code_out = _map_old_code_to_active(code_old)
 
-                # Считаем коллекции только по реально выгружаемым рекомендациям
-            for code_val, coll_val in zip(out_codes[:k], out_collections[:k]):
-                code_val = str(code_val or "").strip()
+                    if code_out in used:
+                        ptr += 1
+                        continue
 
-                if not code_val:
+                    collection_out = _collection_for_code(code_out, code_old)
+                    kind_out = _kind_for_code(code_out, code_old)
+
+                    # Отбор по видам номенклатуры, выбранным пользователем.
+                    # Пустой список означает отсутствие ограничения.
+                    if (
+                            export_kind_keys
+                            and _norm_text(kind_out).upper()
+                            not in export_kind_keys
+                    ):
+                        ptr += 1
+                        continue
+
+                    # Фильтр по коллекции: убираем всю Осень-Зиму любого года
+                    if _is_autumn_winter_collection(collection_out):
+                        ptr += 1
+                        continue
+
+                    # Фильтр по виду номенклатуры: убираем подарочные карты
+                    if _is_gift_card_kind(kind_out):
+                        ptr += 1
+                        continue
+
+                    stock_out = _stock_for_code(code_out)
+
+                    # Фильтр по остатку: в выгрузку попадают только товары с остатком >= 100
+                    if _stock_to_int(stock_out) < 100:
+                        ptr += 1
+                        continue
+
+                    used.add(code_out)
+                    out_codes.append(code_out)
+                    out_scores.append(score_old)
+                    out_collections.append(collection_out)
+                    out_conversions.append(
+                        float(historical_conversion_by_code.get(code_out, historical_conversion_global))
+                    )
+                    out_stocks.append(stock_out)
+
+                    if include_item_names:
+                        nm = _clean_name(item_names.get(code_out, ""))
+
+                        if not nm:
+                            if code_out == code_old:
+                                om = train_item_meta.get(code_old, {}) or {}
+                                nm = _clean_name(om.get("НазваниеНаСайте")) or _clean_name(om.get("Номенклатура"))
+                            else:
+                                nm = _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("НазваниеНаСайте")) \
+                                     or _clean_name((new_meta_by_code.get(code_out, {}) or {}).get("Номенклатура"))
+
+                        out_names.append(nm)
+
+                    ptr += 1
+
+                if not out_codes:
                     continue
 
-                _add_collection_to_stats(coll_val)
+                # добиваем до k, чтобы структура Excel не ломалась
+                while len(out_codes) < k:
+                    out_codes.append("")
+                    out_scores.append(0.0)
+                    out_collections.append("")
+                    out_conversions.append(0.0)
+                    out_stocks.append("")
+                    if include_item_names:
+                        out_names.append("")
+                # --- CSV format #1: CustomerID=discount card, ProductID=comma-separated codes ---
+                # --- CSV InternetMagazin:
+                # CustomerID = номер телефона,
+                # ProductID = коды рекомендаций через запятую.
+                if csv1_w is not None:
+                    customer_id = _normalize_phone(
+                        phones.get(mindbox_id, "")
+                    )
 
-            ws.append(row)
-            exported_users += 1
+                    product_codes_csv = [
+                        str(code).strip()
+                        for code in out_codes[:k]
+                        if str(code or "").strip()
+                    ]
 
-    print(
-        f"[{_now()}] В итоговые файлы выгружено клиентов: "
-        f"{exported_users:,}".replace(",", " ")
+                    product_id = ",".join(product_codes_csv)
+
+                    # Пустые идентификаторы и пустые рекомендации не записываем.
+                    if customer_id and product_id:
+                        csv1_w.writerow([
+                            customer_id,
+                            product_id,
+                        ])
+
+                # --- CSV Kanzler ML: one row per recommended item ---
+                if csvml_w is not None:
+                    def _fmt_coef_ru(val: float) -> str:
+                        try:
+                            return f"{float(val):.2f}".replace(".", ",")
+                        except Exception:
+                            return ""
+                    for code_val, sc_val in zip(out_codes[:k], out_scores[:k]):
+                        code_val = str(code_val or "")
+                        if not code_val:
+                            continue
+                        csvml_w.writerow([mindbox_id, 1, code_val, _fmt_coef_ru(sc_val)])
+
+                for j in range(k):
+                    row.append(out_codes[j])
+                    if include_item_names:
+                        row.append(out_names[j])
+                    row.append(out_collections[j])
+                    if include_scores:
+                        row.append(round(out_scores[j], 2))
+                    # Историческая конверсия хранится только в Excel, в процентах.
+                    row.append(round(out_conversions[j], 2) if out_codes[j] else "")
+                    row.append(out_stocks[j])
+
+                    # Считаем коллекции только по реально выгружаемым рекомендациям
+                for code_val, coll_val in zip(out_codes[:k], out_collections[:k]):
+                    code_val = str(code_val or "").strip()
+
+                    if not code_val:
+                        continue
+
+                    _add_collection_to_stats(coll_val)
+
+                ws.append(row)
+                exported_users += 1
+
+        print(
+            f"[{_now()}] В итоговые файлы выгружено клиентов: "
+            f"{exported_users:,}".replace(",", " ")
+        )
+
+        if (
+                export_user_limit is not None
+                and exported_users < export_user_limit
+        ):
+            print(
+                f"[{_now()}] Предупреждение: требовалось "
+                f"{export_user_limit:,}, но удалось сформировать рекомендации "
+                f"только для {exported_users:,} клиентов."
+                .replace(",", " ")
+            )
+        wb.save(xlsx_temp_path)
+        workbook_to_close = wb
+        wb = None
+        workbook_to_close.close()
+
+        print("\n[RECS COLLECTIONS] Количество рекомендаций по коллекциям в Excel:")
+
+        if collection_counts:
+            total_recs = sum(collection_counts.values())
+
+            for coll, cnt in sorted(collection_counts.items(), key=lambda x: (-x[1], x[0])):
+                print(f"  {coll}: {cnt}")
+
+            print(f"  Итого рекомендаций: {total_recs}")
+        else:
+            print("  Нет рекомендаций для подсчёта.")
+
+        print()
+
+        resources_to_close = csv_resources
+        csv_resources = []
+        _close_export_csv_files(resources_to_close, primary_error=None)
+
+        if csv1_temp_path is not None:
+            _validate_export_csv(
+                csv1_temp_path,
+                ["CustomerID", "ProductID"],
+            )
+        if csvml_temp_path is not None:
+            _validate_export_csv(
+                csvml_temp_path,
+                [
+                    "CustomerMindboxId",
+                    "Quantity",
+                    "ProductGroupOffline1C",
+                    "CustomFieldKoefficient",
+                ],
+            )
+        _validate_export_xlsx(xlsx_temp_path)
+
+        publication_paths = []
+        if csv1_temp_path is not None:
+            publication_paths.append((csv1_temp_path, out_csv_format1))
+        if csvml_temp_path is not None:
+            publication_paths.append((csvml_temp_path, out_csv_kanzler_ml))
+        publication_paths.append((xlsx_temp_path, out_xlsx))
+
+        for temp_path, final_path in publication_paths:
+            os.replace(temp_path, os.fspath(final_path))
+
+        return out_xlsx
+
+    except BaseException as primary_error:
+        resources_to_close = csv_resources
+        csv_resources = []
+        _close_export_csv_files(
+            resources_to_close,
+            primary_error=primary_error,
+        )
+
+        if wb is not None:
+            workbook_to_close = wb
+            wb = None
+            try:
+                workbook_to_close.save(xlsx_temp_path)
+            except BaseException as finalize_error:
+                _diagnose_export_cleanup_error(
+                    "finalize",
+                    xlsx_temp_path,
+                    finalize_error,
+                )
+            try:
+                workbook_to_close.close()
+            except BaseException as close_error:
+                _diagnose_export_cleanup_error(
+                    "close",
+                    os.fspath(out_xlsx),
+                    close_error,
+                )
+        raise
+    finally:
+        for temp_path in temp_paths:
+            _cleanup_export_temp(temp_path)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    do_train, mindbox, k, config_path = _parse_cli(
+        sys.argv[1:] if argv is None else argv
     )
 
-    if (
-            export_user_limit is not None
-            and exported_users < export_user_limit
-    ):
-        print(
-            f"[{_now()}] Предупреждение: требовалось "
-            f"{export_user_limit:,}, но удалось сформировать рекомендации "
-            f"только для {exported_users:,} клиентов."
-            .replace(",", " ")
+    if do_train:
+        cfg = (
+            _load_train_config_from_json(config_path)
+            if config_path is not None
+            else TrainConfig()
         )
-    wb.save(out_xlsx)
+        trained = _train_in_this_process(cfg)
+        return TRAIN_EXIT_SUCCESS if trained else TRAIN_EXIT_NO_DATA
 
-    print("\n[RECS COLLECTIONS] Количество рекомендаций по коллекциям в Excel:")
+    if mindbox is not None:
+        try:
+            print_recommendations(mindbox, k=k)
+        except (
+            _MissingInteractionSourcesError,
+            _InvalidInteractionSchemaError,
+        ) as exc:
+            print(f"[{_now()}] {exc}", file=sys.stderr)
+            return TRAIN_EXIT_NO_DATA
 
-    if collection_counts:
-        total_recs = sum(collection_counts.values())
-
-        for coll, cnt in sorted(collection_counts.items(), key=lambda x: (-x[1], x[0])):
-            print(f"  {coll}: {cnt}")
-
-        print(f"  Итого рекомендаций: {total_recs}")
-    else:
-        print("  Нет рекомендаций для подсчёта.")
-
-    print()
-
-    # close CSV files
-    if csv1_f is not None:
-        csv1_f.close()
-    if csvml_f is not None:
-        csvml_f.close()
-
-    return out_xlsx
+    return TRAIN_EXIT_SUCCESS
 
 
 if __name__ == "__main__":
-    do_train, mindbox, k, config_path = _parse_cli(sys.argv[1:])
-
-    if do_train:
-        cfg = _load_train_config_from_json(config_path) if config_path else TrainConfig()
-        _train_in_this_process(cfg)
+    cli_args = sys.argv[1:]
+    if "--train" in cli_args:
         # hard-exit helps avoid rare native crashes during Python shutdown on Windows
-        os._exit(0)
-
-    if mindbox is not None:
-        print_recommendations(mindbox, k=k)
+        os._exit(main(cli_args))
+    raise SystemExit(main(cli_args))

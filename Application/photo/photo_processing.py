@@ -7,6 +7,9 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QLabel, QTableWidget)
 
 
+_PHOTO_URL_NOT_PROVIDED = object()
+
+
 def _clean_code(value) -> str:
     s = str(value or "").strip()
     s = re.sub(r"\.0$", "", s)
@@ -60,7 +63,14 @@ def _ensure_photo_map(aboba):
     )
     
 
-def _set_photo_cell(aboba, table: QTableWidget, r: int, code: str, gen: int) -> None:
+def _set_photo_cell(
+        aboba,
+        table: QTableWidget,
+        r: int,
+        code: str,
+        gen: int,
+        photo_url=_PHOTO_URL_NOT_PROVIDED,
+) -> None:
     PAD = 6
     PHOTO_W = 100
     ASPECT = 1600 / 1066
@@ -80,7 +90,11 @@ def _set_photo_cell(aboba, table: QTableWidget, r: int, code: str, gen: int) -> 
     table.setRowHeight(r, PHOTO_H + PAD * 2)
     table.setColumnWidth(0, PHOTO_W + PAD * 2)
 
-    url = _photo_url_for_code(aboba, code)
+    if photo_url is _PHOTO_URL_NOT_PROVIDED:
+        url = _photo_url_for_code(aboba, code)
+    else:
+        url = photo_url
+
     if not url:
         lbl.clear()
         lbl.setText("Нет фото")
