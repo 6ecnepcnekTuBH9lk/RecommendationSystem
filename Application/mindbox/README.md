@@ -782,3 +782,80 @@ recoverable ошибки, безопасный CLI/complete, и raw -> prepared 
 на один CPU epoch с выключенными features, без публикации artifacts.
 Production UI/CLI training source остаётся legacy CSV; wiring от API экспорта
 до explicit directories и orchestration будет отдельной задачей.
+
+## M02-09: coordinated training batch
+
+`Application/mindbox/training_batch.py` фиксирует связанный набор exports:
+TrainingBatchWindow, TrainingBatchExport и MindboxTrainingBatch — frozen records.
+Batch/export repr скрыт. Window содержит timezone-aware UTC interaction_since,
+interaction_until и обязательный merge_since: `merge_since <= since < until`.
+Окна полуоткрытые [since, until), для merges — [merge_since, until).
+Как в M01 smoke transport, payload dates имеют формат YYYY-MM-DD HH:MM;
+subminute input отклоняется вместо неявного усечения. Offset-aware input приводится
+к UTC. Нет скрытого lookback/default merge_since.
+
+`create_training_batch(client, raw_root=..., window=...)` последовательно вызывает
+существующие start_export/wait_for_export/download_export для customer_merges,
+actions, orders. Actions/Orders получают одинаковый payload периода; merges —
+свой since и общий until. Export IDs берутся из start_export. ExportOutput и
+exportId в initial payload не добавляются. Retry/polling/gzip/raw atomic storage
+не изменены. Customers не экспортируется.
+
+После успешной публикации всех raw exports создаётся
+`training_batches/<uuid hex>/manifest.json`. Только manifest означает опубликованный
+batch; пустой каталог после ошибки публикации batch не представляет. При API/download
+failure manifest отсутствует, готовые raw artifacts не удаляются. Публикация:
+exclusive UUID directory -> manifest.tmp -> flush -> fsync -> os.replace(manifest.json).
+При ошибке временный manifest удаляется; raw не откатываются. Повторный запуск создаёт
+новый batch, а не перезаписывает предыдущий. Это атомарная видимость manifest;
+содержимое raw не хешируется и filesystem artifacts должны оставаться неизменными.
+
+Manifest schema v1 — только metadata: schema_version, batch_id, created_at_utc,
+window и exports (name/export_id/operation/relative_directory/parts_count).
+Три ссылки относительны raw root: `<export type>/<timestamp>`.
+URLs, exportResult, headers, credentials, raw fragments и IDs клиентов/товаров
+не передаются serializer. Operation names и export IDs — разрешённая metadata.
+
+`load_training_batch(manifest_path, raw_root=...)` и `validate_training_batch(batch,
+raw_root)` проверяют version, required fields, уникальные JSON keys, batch ID,
+периоды, ровно три различных ссылки, тип каталогов, границы resolved paths,
+наличие и последовательность parts и совпадение parts_count. Absolute paths,
+Windows drive/UNC/backslash и traversal запрещены. Symlink targets за raw root
+отклоняются. Raw JSON содержимое не читается: это следующий raw_reader этап.
+Manifest — локальная запись происхождения; validator не может доказать, что
+кто-то вручную не изменил metadata периода или raw files после публикации.
+
+`prepare_training_data_from_batch(batch, raw_root=..., catalog_path=...,
+train_config=..., diagnose=False)` валидирует batch и делегирует M02-08 с точными
+directory paths. Library никогда не ищет latest и не копирует preparation logic.
+Transport-complete batch может дать training-data complete=False из-за malformed
+VIEW/unresolved products. Это разные состояния; prepare не запускает обучение.
+
+CLI `scripts/mindbox_training_batch.py`: export — единственная live-команда,
+читает .env; validate/prepare полностью offline, не читают .env. Ошибки выводят
+только тип исключения. Export печатает batch ID, manifest path и counts;
+prepare — безопасные aggregates и training-data complete flag (False -> exit 1).
+Credentials и download URLs не логируются.
+
+Пример самостоятельного запуска в PowerShell из корня проекта:
+
+```powershell
+& .\.venv310aboba\Scripts\python.exe scripts/mindbox_training_batch.py export `
+  --since "2026-08-01 00:00" `
+  --until "2026-09-01 00:00" `
+  --merge-since "2025-01-01 00:00"
+```
+
+merge-since в примере выбран явно: caller должен указать подходящее начало истории
+merges для своих данных. После успеха использовать напечатанный manifest path:
+
+```powershell
+python scripts/mindbox_training_batch.py validate --manifest "ВходныеДанные/MindboxRaw/training_batches/<batch_id>/manifest.json"
+python scripts/mindbox_training_batch.py prepare --manifest "ВходныеДанные/MindboxRaw/training_batches/<batch_id>/manifest.json" --diagnose
+```
+
+Тесты используют mocked API и настоящий M01 raw storage на синтетических байтах:
+окна, последовательность, multipart, failure без manifest, fsync/replace, загрузка,
+повреждённые metadata/paths, bridge exact dirs и отсутствие synthetic secrets в
+manifest/CLI. Live API во время реализации не вызывается. Старые exports из разных
+окон не маркируются coherent batch задним числом; новый batch создаёт caller явно.
