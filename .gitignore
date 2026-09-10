@@ -25,3 +25,11 @@ venv/
 
 .DS_Store
 Thumbs.db
+
+# Mindbox API
+.env
+.env.*
+!.env.example
+
+# Raw Mindbox exports
+ВходныеДанные/MindboxRaw/
