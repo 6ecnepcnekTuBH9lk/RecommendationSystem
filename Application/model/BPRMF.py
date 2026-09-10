@@ -24,6 +24,11 @@ import csv
 import re
 from difflib import SequenceMatcher
 
+if __package__:
+    from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
+    from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+
 # --- make CPU BLAS usage predictable (often important for UI apps on Windows) ---
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -183,23 +188,6 @@ def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 # ============================= Data prep =============================
-
-@dataclass
-class Mappings:
-    user2idx: Dict[str, int]
-    idx2user: List[str]
-    item2idx: Dict[str, int]
-    idx2item: List[str]
-
-
-@dataclass
-class Splits:
-    train_pairs: np.ndarray  # [N,2] (u,i)
-    train_weights: np.ndarray  # [N]
-    eval_users: np.ndarray  # [M]
-    eval_items: np.ndarray  # [M]
-    user_pos_train: List[set]  # per user: set(items)
-
 
 def _build_mappings(orders: pd.DataFrame, views: pd.DataFrame, fav: pd.DataFrame) -> Mappings:
     users = pd.concat(
@@ -609,13 +597,21 @@ def _eval_bprmf_recall_ndcg(
 
 
 def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: torch.device) -> Tuple[BPRMF, Splits]:
+    """Compatibility wrapper for existing callers supplying event-level data."""
+    prepared = PreparedBprData(maps, _train_test_split_last_per_user(events, cfg, len(maps.idx2user)))
+    return train_prepared_data(cfg, prepared, device)
+
+
+def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device) -> Tuple[BPRMF, Splits]:
+    """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
+    validate_prepared_data(prepared_data)
+    maps, splits = prepared_data.mappings, prepared_data.splits
     # keep PyTorch thread usage stable (important for desktop apps)
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
 
     num_users = len(maps.idx2user)
     num_items = len(maps.idx2item)
-    splits = _train_test_split_last_per_user(events, cfg, num_users)
 
     # build item side-features from Номенклатура.csv (no cold-start)
     feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
@@ -1317,29 +1313,14 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
 
 # ============================= Training entry point (UI button) =============================
 
-def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
-    cfg = cfg or TrainConfig()
-    _set_seed(cfg.seed)
-
+def prepare_training_data_from_csv(cfg: TrainConfig) -> PreparedBprData:
     data_dir = cfg.data_dir
     orders_path = _path_csv(data_dir, "Заказы")
     views_path = _path_csv(data_dir, "Просмотры")
     fav_path = _path_csv(data_dir, "Избранное")
 
-    required = [orders_path, views_path, fav_path]
-    missing = [p for p in required if not os.path.isfile(p)]
-    if missing:
-        print(f"[{_now()}] Отсутствуют следующие необходимые файлы для обучения:")
-        for p in missing:
-            print(f"  - {p}")
-        print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
-        return False
-
-    try:
-        _validate_interaction_source_schemas(data_dir)
-    except _InvalidInteractionSchemaError as exc:
-        print(f"[{_now()}] {exc}")
-        return False
+    _require_interaction_sources(data_dir)
+    _validate_interaction_source_schemas(data_dir)
 
     orders = _read_csv_pipe(orders_path)
     views = _read_csv_pipe(views_path)
@@ -1356,15 +1337,33 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
 
     events = _collect_user_item_events(orders, views, fav, maps, cfg)
     if len(events) == 0:
-        print(f"[{_now()}] Не найдено взаимодействий пользователь-товар.")
+        raise PreparedDataError("Не найдено взаимодействий пользователь-товар.")
+    return PreparedBprData(maps, _train_test_split_last_per_user(events, cfg, len(maps.idx2user)))
+
+
+def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
+    cfg = cfg or TrainConfig()
+    _set_seed(cfg.seed)
+    try:
+        prepared = prepare_training_data_from_csv(cfg)
+    except _MissingInteractionSourcesError:
+        print(f"[{_now()}] Отсутствуют следующие необходимые файлы для обучения:")
+        for name in ("Заказы", "Просмотры", "Избранное"):
+            path = _path_csv(cfg.data_dir, name)
+            if not os.path.isfile(path):
+                print(f"  - {path}")
+        print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
+        return False
+    except (_InvalidInteractionSchemaError, PreparedDataError) as exc:
+        print(f"[{_now()}] {exc}")
         return False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device_label = "GPU (графический процессор, видеокарта)" if device.type == "cuda" else "CPU (центральный процессор)"
     print(f"[{_now()}] Устройство для обучения: {device_label}\n")
 
-    model, _splits = train_bprmf(maps, events, cfg, device)
-    _save_artifacts(cfg, maps, model)
+    model, _splits = train_prepared_data(cfg, prepared, device)
+    _save_artifacts(cfg, prepared.mappings, model)
     return True
 
 

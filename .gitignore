@@ -33,3 +33,6 @@ Thumbs.db
 
 # Raw Mindbox exports
 ВходныеДанные/MindboxRaw/
+
+# Generated Mindbox schema reports
+ВходныеДанные/MindboxReports/

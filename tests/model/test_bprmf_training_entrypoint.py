@@ -245,7 +245,7 @@ def test_training_rejects_invalid_interaction_schema(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
-    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "train_prepared_data", _fail_if_called("train_prepared_data"))
     monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
 
     frames = _training_frames()
@@ -283,11 +283,11 @@ def test_training_accepts_schema_valid_empty_individual_source(
     _write_training_frames(data_dir, frames)
     calls = []
 
-    def train(maps, events, cfg, device):
-        calls.append(("train", len(events)))
+    def train(cfg, prepared, device):
+        calls.append(("train", len(prepared.splits.train_pairs)))
         return object(), object()
 
-    monkeypatch.setattr(BPRMF, "train_bprmf", train)
+    monkeypatch.setattr(BPRMF, "train_prepared_data", train)
     monkeypatch.setattr(
         BPRMF,
         "_save_artifacts",
@@ -318,16 +318,16 @@ def test_training_orders_without_quantity_use_one(tmp_path, monkeypatch):
     captured_events = []
     cfg = BPRMF.TrainConfig(data_dir=str(data_dir), w_purchase=7.5)
 
-    def train(maps, events, train_cfg, device):
-        captured_events.append(events.copy())
+    def train(train_cfg, prepared, device):
+        captured_events.append(prepared.splits.train_weights.copy())
         return object(), object()
 
-    monkeypatch.setattr(BPRMF, "train_bprmf", train)
+    monkeypatch.setattr(BPRMF, "train_prepared_data", train)
     monkeypatch.setattr(BPRMF, "_save_artifacts", lambda *args: None)
 
     assert BPRMF._train_in_this_process(cfg) is True
     assert len(captured_events) == 1
-    assert captured_events[0]["w"].tolist() == [pytest.approx(cfg.w_purchase)]
+    assert captured_events[0].tolist() == [pytest.approx(cfg.w_purchase)]
 
 
 @pytest.mark.parametrize(
@@ -345,7 +345,7 @@ def test_training_interaction_schema_read_error_remains_technical(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
-    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "train_prepared_data", _fail_if_called("train_prepared_data"))
     monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
 
     data_dir = tmp_path / "training_data"
@@ -367,7 +367,7 @@ def test_training_rejects_zero_byte_interaction_source(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
-    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "train_prepared_data", _fail_if_called("train_prepared_data"))
     monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
 
     data_dir = tmp_path / "training_data"
@@ -389,7 +389,7 @@ def test_training_reports_controlled_failure_when_required_csv_is_missing(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
-    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "train_prepared_data", _fail_if_called("train_prepared_data"))
     monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
 
     data_dir = tmp_path / "training_data"
@@ -408,7 +408,7 @@ def test_training_reports_controlled_failure_when_interactions_are_empty(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(BPRMF, "_set_seed", lambda seed: None)
-    monkeypatch.setattr(BPRMF, "train_bprmf", _fail_if_called("train_bprmf"))
+    monkeypatch.setattr(BPRMF, "train_prepared_data", _fail_if_called("train_prepared_data"))
     monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
 
     data_dir = tmp_path / "training_data"
@@ -430,7 +430,7 @@ def test_training_reports_success_only_after_artifacts_are_saved(tmp_path, monke
     calls = []
     synthetic_model = object()
 
-    def train(maps, events, cfg, device):
+    def train(cfg, prepared, device):
         calls.append("train")
         return synthetic_model, object()
 
@@ -438,7 +438,7 @@ def test_training_reports_success_only_after_artifacts_are_saved(tmp_path, monke
         assert model is synthetic_model
         calls.append("save")
 
-    monkeypatch.setattr(BPRMF, "train_bprmf", train)
+    monkeypatch.setattr(BPRMF, "train_prepared_data", train)
     monkeypatch.setattr(BPRMF, "_save_artifacts", save)
 
     result = BPRMF._train_in_this_process(BPRMF.TrainConfig(data_dir=str(data_dir)))
@@ -458,7 +458,7 @@ def test_training_propagates_train_bprmf_exception(tmp_path, monkeypatch):
     def fail_training(*args, **kwargs):
         raise RuntimeError("synthetic training error")
 
-    monkeypatch.setattr(BPRMF, "train_bprmf", fail_training)
+    monkeypatch.setattr(BPRMF, "train_prepared_data", fail_training)
     monkeypatch.setattr(BPRMF, "_save_artifacts", _fail_if_called("_save_artifacts"))
 
     with pytest.raises(RuntimeError, match="synthetic training error"):
@@ -473,7 +473,7 @@ def test_training_propagates_artifact_save_exception(tmp_path, monkeypatch):
     data_dir = tmp_path / "training_data"
     _write_training_csvs(data_dir, with_interaction=True)
 
-    monkeypatch.setattr(BPRMF, "train_bprmf", lambda *args: (object(), object()))
+    monkeypatch.setattr(BPRMF, "train_prepared_data", lambda *args: (object(), object()))
 
     def fail_save(*args, **kwargs):
         raise OSError("synthetic artifact save error")
