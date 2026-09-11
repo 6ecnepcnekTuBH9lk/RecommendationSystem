@@ -25,10 +25,12 @@ import re
 from difflib import SequenceMatcher
 
 if __package__:
+    from .interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
     from .seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
     from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics
     from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
+    from interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
     from seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
     from training_metrics import TrainingEpochMetrics, TrainingRunMetrics
     from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
@@ -837,6 +839,7 @@ def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
             "Model artifact mismatch: len(idx2item) does not equal num_items"
         )
     seen_items_from_checkpoint(checkpoint)
+    analytics_from_checkpoint(checkpoint)
 
 
 def _resolve_model_artifact_paths(model_dir: str) -> Tuple[str, str]:
@@ -875,11 +878,14 @@ def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
         pass
 
 
-def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_items: SeenItemsIndex | None = None) -> None:
+def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_items: SeenItemsIndex | None = None,
+                    analytics=None) -> None:
 
     if seen_items is not None and (not isinstance(seen_items, SeenItemsIndex)
             or seen_items.num_users != len(maps.idx2user) or seen_items.num_items != len(maps.idx2item)):
         raise SeenItemsError("Seen dimensions do not match mappings")
+    if analytics is not None and (analytics.num_users != len(maps.idx2user) or analytics.num_items != len(maps.idx2item)):
+        raise AnalyticsError("Analytics dimensions do not match mappings")
 
     out_dir = os.path.join(os.getcwd(), "Модель")
     _ensure_dir(out_dir)
@@ -924,6 +930,8 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
         if seen_items is not None:
             ckpt["seen_items_indptr"] = seen_items.indptr.copy()
             ckpt["seen_items_indices"] = seen_items.indices.copy()
+        if analytics is not None:
+            ckpt["interaction_analytics"] = analytics.to_checkpoint()
 
         # save item features for consistent inference/evaluation
         feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
@@ -1374,7 +1382,18 @@ def prepare_training_data_from_csv(cfg: TrainConfig) -> PreparedBprData:
     events = _collect_user_item_events(orders, views, fav, maps, cfg)
     if len(events) == 0:
         raise PreparedDataError("Не найдено взаимодействий пользователь-товар.")
-    return PreparedBprData(maps, _train_test_split_last_per_user(events, cfg, len(maps.idx2user)))
+    collector = AnalyticsCollector()
+    for frame, kind in ((views, "VIEW"), (fav, "FAVORITE"), (orders, "PURCHASE")):
+        if kind == "VIEW":
+            frame = frame.loc[frame["ТипТовара"] == "Номенклатура"]
+        dates = _parse_date_col(frame, "Дата")
+        quantities = pd.to_numeric(frame.get("Количество", pd.Series(1., index=frame.index)), errors="coerce").fillna(1).clip(1, 10)
+        for user, item, date, quantity in zip(frame["MindboxID"], frame["КодНоменклатуры"], dates, quantities):
+            if pd.isna(user) or pd.isna(item) or str(user) not in maps.user2idx or str(item) not in maps.item2idx:
+                continue
+            collector.add(str(user), str(item), kind, None if pd.isna(date) else date, quantity)
+    analytics = collector.finalize(maps, load_catalog_kinds(_path_csv(cfg.data_dir, "Номенклатура")))
+    return PreparedBprData(maps, _train_test_split_last_per_user(events, cfg, len(maps.idx2user)), analytics=analytics)
 
 
 def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
@@ -1399,7 +1418,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
     print(f"[{_now()}] Устройство для обучения: {device_label}\n")
 
     model, _splits = train_prepared_data(cfg, prepared, device)
-    _save_artifacts(cfg, prepared.mappings, model, seen_items=build_seen_items_index(prepared))
+    _save_artifacts(cfg, prepared.mappings, model, seen_items=build_seen_items_index(prepared), analytics=prepared.analytics)
     return True
 
 
@@ -2122,6 +2141,7 @@ def export_recommendations_excel(
             phones: Dict[str, str],
             chunksize: int = 500_000,
             require_phone: bool = True,
+            analytics=None,
     ) -> List[int]:
         """
         Возвращает индексы пользователей, отсортированные от наиболее
@@ -2235,22 +2255,14 @@ def export_recommendations_excel(
                 target[grouped_indices] += grouped_values
 
         # Покупки имеют наибольший приоритет.
-        _accumulate_activity(
-            file_name="Заказы",
-            target=purchase_activity,
-            use_quantity=True,
-        )
-
-        _accumulate_activity(
-            file_name="Избранное",
-            target=favorite_activity,
-        )
-
-        _accumulate_activity(
-            file_name="Просмотры",
-            target=view_activity,
-            only_nomenclature_views=True,
-        )
+        if analytics is None:
+            _accumulate_activity(file_name="Заказы", target=purchase_activity, use_quantity=True)
+            _accumulate_activity(file_name="Избранное", target=favorite_activity)
+            _accumulate_activity(file_name="Просмотры", target=view_activity, only_nomenclature_views=True)
+        else:
+            purchase_activity = analytics.purchase_activity
+            favorite_activity = analytics.favorite_activity
+            view_activity = analytics.view_activity
 
         purchase_weight = float(getattr(cfg, "w_purchase", 10.0))
         favorite_weight = float(getattr(cfg, "w_favorite", 2.0))
@@ -2332,8 +2344,10 @@ def export_recommendations_excel(
     device = torch.device(device_str if (device_str == "cpu" or torch.cuda.is_available()) else "cpu")
     model, cfg, num_users, num_items = _build_model_from_ckpt(ckpt, device)
     data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
-    _require_interaction_sources(data_dir)
-    _validate_interaction_source_schemas(data_dir)
+    embedded_analytics = analytics_from_checkpoint(ckpt)
+    if embedded_analytics is None or (filter_seen and seen_items_from_checkpoint(ckpt) is None):
+        _require_interaction_sources(data_dir)
+        _validate_interaction_source_schemas(data_dir)
 
     # --------- подготовка данных для сезонного маппинга ---------
     train_item_meta: Dict[str, Dict[str, str]] = ckpt.get("train_item_meta", {}) or {}
@@ -2595,19 +2609,20 @@ def export_recommendations_excel(
     conversion_data_dir = current_data_dir
     current_views_path = _path_csv(conversion_data_dir, "Просмотры")
     current_orders_path = _path_csv(conversion_data_dir, "Заказы")
-    if not (
+    if embedded_analytics is None and not (
         _current_conversion_source_exists(current_views_path)
         and _current_conversion_source_exists(current_orders_path)
     ):
         conversion_data_dir = data_dir
 
-    historical_conversion_by_code, historical_conversion_global = _load_historical_item_conversion(
+    historical_conversion_by_code, historical_conversion_global = (embedded_analytics.conversion(idx2item, item_kind_by_code)
+        if embedded_analytics is not None else _load_historical_item_conversion(
         data_dir=conversion_data_dir,
         item_kind_by_code=item_kind_by_code,
         window_days=30,
         prior_strength=20.0,
         chunksize=chunksize_seen,
-    )
+    ))
 
     discount_cards: Dict[str, str] = {}
     emails: Dict[str, str] = {}
@@ -2639,6 +2654,7 @@ def export_recommendations_excel(
         phones=phones,
         chunksize=chunksize_seen,
         require_phone=bool(out_csv_format1),
+        analytics=embedded_analytics,
     )
 
     if not ranked_user_indices:

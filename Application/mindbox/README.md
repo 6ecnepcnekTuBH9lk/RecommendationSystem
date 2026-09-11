@@ -1138,3 +1138,65 @@ checkpoint or production artifacts. Tests cover independent pre-holdout pair par
 legacy CSV parity (views only ТипТовара == Номенклатура), immutable/invalid layouts,
 artifact roundtrip/corruption, print without interaction CSV, mass-export helper spies
 and filter_seen=False. Artifact tests use temporary directories only.
+
+### M02-14: source-neutral interaction analytics
+
+NEW published training models embed `interaction_analytics` version 1 in the torch
+checkpoint. The block contains dimensions, int64 per-item unique viewers/converted
+counts, float64 per-user purchase/favorite/view activity, item-kind metadata in mapping
+order, window_days=30 and prior_strength=20. No user IDs, item event lists, event
+timestamps, contacts, raw records or extra ID mappings are included. Kind/global
+counts and rates are derived from per-item counts (no inconsistent duplicate totals).
+Arrays have immutable bytes backing; repr exposes dimensions/config only. Validation
+checks the exact schema/version, dtypes/shapes, finite nonnegative values, integral
+view/favorite counts, converted <= viewers <= num_users and model dimension parity.
+An absent block means OLD fallback; a partial/corrupt block is an error.
+
+`PreparedBprData.analytics` is an optional keyword-only extension, so existing
+two-positional-argument callers and the shared training validator remain compatible.
+MindboxPreparationResult exposes the same value via `.analytics`. Mindbox collects
+resolved canonical interactions in its existing single raw-export pass, before
+to_bpr_event/aggregation/holdout. Malformed, unmapped and unresolved records do not
+enter analytics; quality diagnostics/policy remain unchanged. Legacy CSV preparation
+collects from its already loaded frames using mapped valid rows and nomenclature
+views, before temporal split. New legacy training explicitly passes analytics to
+artifact publication. Older three-argument save callers remain compatible.
+
+Conversion uses the first calendar date of VIEW for each canonical user-item pair,
+then any purchase on that date through date+30 inclusive. Time of day is discarded
+(LEGACY_DATE); purchase-before-view and later-than-window do not convert. Repeated
+views/purchases do not multiply conversion counts. Bayesian smoothing is unchanged:
+`(converted + 20 * prior_rate) / (viewers + 20)`, with kind prior then global prior.
+Percentages retain legacy rounding to four decimals. Training-kind priors are frozen
+in the artifact. At export, a seasonally mapped code with no own view history uses
+its current catalog kind's stored rate, then global. Catalog duplicates retain
+keep="last". Catalog/settings/seasonal/stock handling are not migrated.
+
+Analytics memory is incremental: activity counters per canonical user, one first-view
+day per unique pair, and merged intervals `[purchase_day-30, purchase_day]` per pair.
+Repeated purchases do not accumulate occurrences; intervals merge when overlapping
+or adjacent. For a year, a pair has roughly at most 12 separated intervals at the
+default window. This handles orders before or after views without depending on
+stream arrival order. Finalization produces only O(users+items) aggregate arrays.
+This avoids an additional giant event DataFrame; existing BPR preparation's own
+memory behavior is unchanged and is not claimed to be a streaming annual trainer.
+
+Raw activity: purchase quantity (missing -> 1, clip 1..10), favorite count, mapped
+view count. Export uses checkpoint TrainConfig weights and preserves the existing
+lexsort priorities: score, purchases, favorites, views, stable mapping order for ties.
+Phone eligibility is still applied independently by the existing contact path.
+
+NEW models need no interaction CSV for seen filtering, historical conversion or
+loyalty/activity calculation. OLD models retain each legacy fallback independently.
+The remaining legacy recommendation dependency is customer/profile/contact fields
+from Заказы.csv: phone, email, discount card (M02-15). Catalog and settings inputs
+also remain. Mass export no longer requires interaction schemas when both embedded
+contracts suffice; reading orders for contacts is still permitted and explicit.
+Print recommendations and M02-12 shadow publication isolation are unchanged.
+
+Synthetic tests cover dates/boundary/order, repeated pairs, quantity clipping,
+kind/global/new-item fallback, canonical merges, skipped malformed/unmapped actions,
+single raw parse, legacy conversion/ranking parity, safe immutable roundtrip and
+corrupt blocks. A full export spy test removes views/favorites, forbids legacy
+conversion/seen helpers and chunked activity reads, and observes only the existing
+orders contact read. No API requests or live model training are required.

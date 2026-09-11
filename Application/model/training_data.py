@@ -4,9 +4,13 @@ Containers/arrays are retained by reference for legacy compatibility. The owner
 must not mutate them during training; consumers validate immediately before use.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .interaction_analytics import InteractionAnalytics
 
 
 @dataclass(repr=False)
@@ -30,6 +34,7 @@ class Splits:
 class PreparedBprData:
     mappings: Mappings
     splits: Splits
+    analytics: "InteractionAnalytics | None" = field(default=None, kw_only=True, repr=False)
 
 
 class PreparedDataError(ValueError):

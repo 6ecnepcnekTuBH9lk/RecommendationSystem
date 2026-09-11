@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
+from .interaction_analytics import AnalyticsCollector, load_catalog_kinds
 
 from Application.interactions import InteractionBuilder, InteractionBuildError
 from Application.mindbox.adapters import adapt_action, adapt_customer_merge, adapt_order
@@ -53,6 +54,10 @@ class MindboxPreparationResult:
     diagnostics: MindboxPreparationDiagnostics
     complete: bool
 
+    @property
+    def analytics(self):
+        return self.prepared_data.analytics
+
 
 def prepare_training_data_from_mindbox(
     *, actions_export_dir: str | Path, orders_export_dir: str | Path,
@@ -97,6 +102,13 @@ def _prepare_training_data_from_mindbox_sources(
 
     customers = CustomerIdResolver(merges())
     builder = InteractionBuilder()
+    analytics = AnalyticsCollector()
+
+    def collect(resolved):
+        interaction = resolved.interaction
+        analytics.add(interaction.customer_id, resolved.item_id, interaction.interaction_type,
+                      interaction.event_datetime_utc, interaction.quantity)
+        return to_bpr_event(resolved, config.weights)
 
     def sources(name, directories):
         for directory in directories:
@@ -115,7 +127,7 @@ def _prepare_training_data_from_mindbox_sources(
             for interaction in interactions:
                 resolved = products.resolve_interaction(interaction, strict=not diagnose)
                 if resolved is not None:
-                    yield to_bpr_event(resolved, config.weights)
+                    yield collect(resolved)
         for raw in sources("orders", orders_export_dirs):
             order_count += 1
             for line in adapt_order(raw, customers):
@@ -123,10 +135,11 @@ def _prepare_training_data_from_mindbox_sources(
                 if interaction is not None:
                     resolved = products.resolve_interaction(interaction, strict=not diagnose)
                     if resolved is not None:
-                        yield to_bpr_event(resolved, config.weights)
+                        yield collect(resolved)
 
     prepared = prepare_bpr(events(), config)
     validate_prepared_data(prepared)
+    prepared.analytics = analytics.finalize(prepared.mappings, load_catalog_kinds(catalog_path))
     interactions, resolution = builder.diagnostics, products.diagnostics
     diagnostics = MindboxPreparationDiagnostics(
         merge_count, interactions.actions_total, interactions.order_lines_total,

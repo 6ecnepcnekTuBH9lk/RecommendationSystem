@@ -434,9 +434,10 @@ def test_training_reports_success_only_after_artifacts_are_saved(tmp_path, monke
         calls.append("train")
         return synthetic_model, object()
 
-    def save(cfg, maps, model, *, seen_items):
+    def save(cfg, maps, model, *, seen_items, analytics):
         assert model is synthetic_model
         assert seen_items.num_items == len(maps.idx2item)
+        assert analytics.num_users == len(maps.idx2user)
         calls.append("save")
 
     monkeypatch.setattr(BPRMF, "train_prepared_data", train)

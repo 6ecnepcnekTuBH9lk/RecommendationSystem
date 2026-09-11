@@ -103,6 +103,32 @@ def test_merges_applied_before_mappings(data):
     assert result.diagnostics.customer_merges == 1
 
 
+def test_analytics_canonical_stream_excludes_malformed_unmapped(data, monkeypatch):
+    data[0]["customer_merges"] = [merge("SECRET_A", "SECRET_B")]
+    data[0]["actions"][1]["customer"]["ids"]["mindboxId"] = "SECRET_B"
+    data[0]["actions"][2]["products"] = []
+    data[0]["actions"][3]["actionTemplate"]["ids"]["systemName"] = "UnmappedSynthetic"
+    # Same product: view history from both aliases, purchase from merged alias.
+    data[0]["orders"][0]["lines"][0]["product"]["ids"]["offline1C"] = "001234_FULL"
+    calls = []
+    original = pipeline.iter_export
+    def read(name, **kwargs):
+        calls.append(name)
+        return original(name, **kwargs)
+    monkeypatch.setattr(pipeline, "iter_export", read)
+    result = run(data, diagnose=True)
+    assert calls == ["customer_merges", "actions", "orders"]
+    a = result.analytics
+    u = result.prepared_data.mappings.user2idx["SECRET_B"]
+    i = result.prepared_data.mappings.item2idx["001234"]
+    assert a.view_activity[u] == 7
+    assert a.favorite_activity[u] == 1
+    assert a.purchase_activity[u] == 2.5
+    assert a.viewers[i] == a.converted[i] == 1
+    assert result.diagnostics.malformed_actions == 1
+    assert "SECRET" not in repr(a)
+
+
 def test_missing_product_names_do_not_change_preparation(data):
     named = run(data)
     for order in data[0]["orders"]:

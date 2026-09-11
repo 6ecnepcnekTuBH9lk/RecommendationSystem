@@ -405,6 +405,51 @@ def test_embedded_seen_export_bypasses_legacy_seen(tmp_path, monkeypatch, filter
     assert any(expected in cell for row in rows[1:] for cell in row)
 
 
+def test_embedded_analytics_export_only_reads_contacts_and_ranking_parity(tmp_path, monkeypatch):
+    from datetime import datetime
+    from Application.model.interaction_analytics import AnalyticsCollector
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    mappings, checkpoint = BPRMF._load_artifacts()
+    mappings["idx2user"] = ["user-1", "user-2", "user-3"]
+    cfg = BPRMF.TrainConfig(data_dir=str(tmp_path / "synthetic-data"))
+    monkeypatch.setattr(BPRMF, "_build_model_from_ckpt", lambda *a: (_SyntheticExportModel(), cfg, 3, 1))
+    c = AnalyticsCollector()
+    rows = []
+    for user, quantity in (("user-1", 1), ("user-2", 5), ("user-3", 5)):
+        rows.append({"MindboxID": user, "КодНоменклатуры": "item-1", "Количество": quantity,
+                     "Телефон": "+79001234567"})
+        c.add(user, "item-1", "PURCHASE", datetime(2026, 1, 1), quantity)
+    pd.DataFrame(rows).to_csv(Path(cfg.data_dir) / "Заказы.csv", sep="|", encoding="utf-8-sig", index=False)
+    _run_export(paths, max_export_users=0)
+    old_order = [row[0] for row in _read_xlsx_rows(paths["xlsx"])[1:]]
+    assert old_order == ["user-2", "user-3", "user-1"]
+    maps = BPRMF.Mappings({u: i for i, u in enumerate(mappings["idx2user"])}, mappings["idx2user"],
+                          {"item-1": 0}, ["item-1"])
+    a = c.finalize(maps, {})
+    checkpoint.update(num_users=3, num_items=1, interaction_analytics=a.to_checkpoint(),
+                      seen_items_indptr=np.zeros(4, dtype=np.int64), seen_items_indices=np.array([], dtype=np.int64))
+    for name in ("Просмотры.csv", "Избранное.csv"):
+        (Path(cfg.data_dir) / name).unlink()
+    def forbidden(*args, **kwargs):
+        pytest.fail("New analytics must not use legacy interaction helpers")
+    for name in ("_load_historical_item_conversion", "_build_user_seen_sets", "_require_interaction_sources",
+                 "_validate_interaction_source_schemas"):
+        monkeypatch.setattr(BPRMF, name, forbidden)
+    read_csv = pd.read_csv
+    reads = []
+    def read(path, *args, **kwargs):
+        if str(path).endswith(("Заказы.csv", "Просмотры.csv", "Избранное.csv")):
+            assert str(path).endswith("Заказы.csv")
+            assert "chunksize" not in kwargs  # Activity/conversion readers are chunked.
+            reads.append(Path(path).name)
+        return read_csv(path, *args, **kwargs)
+    monkeypatch.setattr(pd, "read_csv", read)
+    _run_export(paths, max_export_users=0, filter_seen=True)
+    assert reads == ["Заказы.csv"]  # Existing contact loader only.
+    assert [row[0] for row in _read_xlsx_rows(paths["xlsx"])[1:]] == old_order
+    assert a.rank_users(cfg) == [1, 2, 0]
+
+
 def _write_old_outputs(paths):
     old_bytes = {
         "xlsx": b"old-complete-xlsx",
