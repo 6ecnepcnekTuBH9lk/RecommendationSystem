@@ -220,7 +220,9 @@ def test_cli_offline_prepare_completeness(published, tmp_path, monkeypatch, caps
     stats = SimpleNamespace(unique_users=2, unique_items=3, events_total=10, train_pairs_after_aggregation=4,
                             eval_events=1, total_train_weight=20)
     result = SimpleNamespace(complete=complete, diagnostics=SimpleNamespace(bpr=stats,
-        malformed_actions=0 if complete else 1, resolution=SimpleNamespace(total=SimpleNamespace(unresolved=0))))
+        malformed_actions=0 if complete else 1,
+        malformed_action_system_names={} if complete else {"ProsmotrProdukta": 1},
+        resolution=SimpleNamespace(total=SimpleNamespace(unresolved=0))))
     monkeypatch.setattr(batch_api, "prepare_training_data_from_batch", lambda *a, **kw: result)
     assert main(["prepare", "--raw-root", str(tmp_path), "--manifest", str(manifest), "--diagnose"]) == int(not complete)
     assert f"Training data complete: {complete}" in capsys.readouterr().out

@@ -90,6 +90,36 @@ def test_view_without_products_is_diagnostic_error_even_with_category(action, na
     assert builder.diagnostics.actions_total == builder.diagnostics.actions_view == 1
     assert builder.diagnostics.actions_malformed == 1
     assert builder.diagnostics.view_interactions == 0
+    assert builder.diagnostics.malformed_action_system_names == {name: 1}
+
+
+def test_malformed_names_aggregate_and_snapshots_are_independent(action):
+    from Application.interactions import InteractionDiagnostics
+
+    builder = InteractionBuilder()
+    names = ["ProsmotrProdukta", "ProsmotrProdukta", "ProsmotrProduktaVApiMethod",
+             "DobavlenieProduktaVSpisokVOperaciiDobavlenie"]
+    for name in names:
+        with pytest.raises(InteractionBuildError):
+            builder.from_action(replace(action, action_system_name=name, products=()))
+    snapshot = builder.diagnostics
+    assert snapshot.malformed_action_system_names == {
+        "ProsmotrProdukta": 2, "ProsmotrProduktaVApiMethod": 1,
+        "DobavlenieProduktaVSpisokVOperaciiDobavlenie": 1,
+    }
+    builder.from_action(action)
+    builder.from_action(replace(action, action_system_name="Unmapped", products=()))
+    assert builder.diagnostics.malformed_action_system_names == snapshot.malformed_action_system_names
+    with pytest.raises(TypeError):
+        snapshot.malformed_action_system_names["ProsmotrProdukta"] = 99
+    with pytest.raises(InteractionBuildError):
+        builder.from_action(replace(action, products=()))
+    assert snapshot.malformed_action_system_names["ProsmotrProdukta"] == 2
+    assert builder.diagnostics.malformed_action_system_names["ProsmotrProdukta"] == 3
+    source = {"ProsmotrProdukta": 1}
+    direct = InteractionDiagnostics(malformed_action_system_names=source)
+    source.clear()
+    assert direct.malformed_action_system_names == {"ProsmotrProdukta": 1}
 
 
 @pytest.mark.parametrize("name", [

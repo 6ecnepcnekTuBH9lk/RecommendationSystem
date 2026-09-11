@@ -94,10 +94,13 @@ class InteractionDiagnostics:
     order_lines_filtered_by_status: int = 0
     purchase_interactions: int = 0
     unmapped_action_system_names: Mapping[str, int] = field(default_factory=dict)
+    malformed_action_system_names: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "unmapped_action_system_names",
                            MappingProxyType(dict(self.unmapped_action_system_names)))
+        object.__setattr__(self, "malformed_action_system_names",
+                           MappingProxyType(dict(self.malformed_action_system_names)))
 
     @property
     def total_interactions(self) -> int:
@@ -115,6 +118,7 @@ class InteractionBuilder:
         self._rules = rules
         self._counts: Counter[str] = Counter()
         self._unmapped: Counter[str] = Counter()
+        self._malformed: Counter[str] = Counter()
 
     @property
     def rules(self) -> InteractionRules:
@@ -124,6 +128,7 @@ class InteractionBuilder:
     def diagnostics(self) -> InteractionDiagnostics:
         return InteractionDiagnostics(
             **self._counts, unmapped_action_system_names=dict(sorted(self._unmapped.items())),
+            malformed_action_system_names=dict(sorted(self._malformed.items())),
         )
 
     def from_action(self, action: ActionRecord) -> tuple[InteractionRecord, ...]:
@@ -137,6 +142,7 @@ class InteractionBuilder:
         self._counts["actions_" + counter_name] += 1
         if not action.products:
             self._counts["actions_malformed"] += 1
+            self._malformed[action.action_system_name] += 1
             raise InteractionBuildError(f"{kind.value} action: требуется хотя бы один product")
         records = tuple(InteractionRecord(
             source_customer_id=action.source_customer_id,

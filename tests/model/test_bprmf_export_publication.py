@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 import pytest
 import torch
 from openpyxl import load_workbook
@@ -385,6 +386,23 @@ def _run_export(paths, **overrides):
     return BPRMF.export_recommendations_excel(
         **arguments,
     )
+
+
+@pytest.mark.parametrize("filter_seen,expected", [(True, "item-2"), (False, "item-1")])
+def test_embedded_seen_export_bypasses_legacy_seen(tmp_path, monkeypatch, filter_seen, expected):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch, model=_SyntheticRecommendationImpactModel(),
+                                      idx2item=["item-1", "item-2"])
+    mappings, checkpoint = BPRMF._load_artifacts()
+    checkpoint.update(num_users=1, num_items=2, seen_items_indptr=np.array([0, 1], dtype=np.int64),
+                      seen_items_indices=np.array([0], dtype=np.int64))
+    def forbidden(*args, **kwargs):
+        pytest.fail("Embedded seen filtering must not use CSV seen helpers")
+    monkeypatch.setattr(BPRMF, "_build_user_seen_sets", forbidden)
+    monkeypatch.setattr(BPRMF, "_user_seen_items_from_processed", forbidden)
+    monkeypatch.setattr(BPRMF, "_load_item_stocks", lambda *a: {"item-1": "150", "item-2": "150"})
+    _run_export(paths, filter_seen=filter_seen)
+    rows = list(csv.reader(paths["csv1"].open(encoding="utf-8-sig"), delimiter=";"))
+    assert any(expected in cell for row in rows[1:] for cell in row)
 
 
 def _write_old_outputs(paths):

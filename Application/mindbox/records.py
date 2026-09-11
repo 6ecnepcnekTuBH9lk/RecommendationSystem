@@ -54,7 +54,7 @@ class OrderLineRecord:
     line_id: str
     line_number: int
     product: ProductKey
-    product_name: str
+    product_name: str | None
     quantity: Decimal
     base_price_per_item: Decimal
     price_of_line: Decimal

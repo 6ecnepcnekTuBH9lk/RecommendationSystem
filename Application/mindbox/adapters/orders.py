@@ -5,7 +5,14 @@ from typing import Any
 
 from ..identity import CustomerIdResolver
 from ..records import OrderLineRecord
-from ._common import get, identifier, integer, number, objects, product_key, text, timestamp
+from ._common import AdapterError, get, identifier, integer, number, objects, product_key, text, timestamp
+
+
+def _product_name(line: Mapping[str, Any]) -> str | None:
+    value = text(line, "product.name", required=False)
+    if value is not None and not value.strip():
+        raise AdapterError("product.name: ожидается строка")
+    return value
 
 
 def adapt_order(raw: Mapping[str, Any], resolver: CustomerIdResolver) -> tuple[OrderLineRecord, ...]:
@@ -24,7 +31,7 @@ def adapt_order(raw: Mapping[str, Any], resolver: CustomerIdResolver) -> tuple[O
     return tuple(OrderLineRecord(
         **common, line_id=identifier(line, "id"), line_number=integer(line, "number"),
         product=product_key(get(line, "product", required=True), ("offline1C", "kanzlerKz")),
-        product_name=text(line, "product.name", required=True), quantity=number(line, "quantity"),
+        product_name=_product_name(line), quantity=number(line, "quantity"),
         base_price_per_item=number(line, "basePricePerItem"), price_of_line=number(line, "priceOfLine"),
         line_status=identifier(line, "status.ids.externalId"),
     ) for line in objects(raw, "lines", required=True))

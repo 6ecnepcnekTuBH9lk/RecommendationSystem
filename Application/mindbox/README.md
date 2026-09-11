@@ -303,7 +303,21 @@ resolver. Кеш растёт только с числом aliases, а не с �
 | Record | Обязательные данные |
 |---|---|
 | ActionRecord | ids.mindboxId, actionTemplate.ids.systemName, dateTimeUtc, creationDateTimeUtc, customer.ids.mindboxId |
-| OrderLineRecord | order/customer mindboxId, firstAction.dateTimeUtc, channel externalId/name, lines; в каждой позиции id, number, quantity, basePricePerItem, priceOfLine, product.name, поддержанный product ID, status.ids.externalId |
+| OrderLineRecord | order/customer mindboxId, firstAction.dateTimeUtc, channel externalId/name, lines; в каждой позиции id, number, quantity, basePricePerItem, priceOfLine, поддержанный product ID, status.ids.externalId |
+
+M02-09A: Orders `product.ids` остаётся required identity; `product.name` — optional
+metadata (`OrderLineRecord.product_name: str | None`). Отсутствие/null даёт None;
+присутствующая непустая строка сохраняется без преобразования. Неверный тип,
+пустая или whitespace-only строка по-прежнему вызывает AdapterError. Отсутствие
+названия не меняет PURCHASE, quantity, resolution или completeness preparation.
+Исторические результаты schema profiler M02-01 не изменяются.
+
+InteractionDiagnostics.malformed_action_system_names — immutable snapshot counts
+по техническим systemName mapped VIEW/FAVORITE без products. Counter обновляется
+перед прежним InteractionBuildError; normal/unmapped actions в него не входят.
+Snapshot передаётся в MindboxPreparationDiagnostics. Batch CLI prepare печатает
+`Malformed action types` с systemName/count без event/customer/product IDs и PII.
+Strict/diagnostic policy и completeness не изменены.
 | CustomerRecord | ids.mindboxId; остальные поля профиля optional |
 | CustomerMergeRecord | id, dateTimeUtc, resultingCustomer mindboxId и непустой mergedCustomers со всеми mindboxId |
 
@@ -859,3 +873,268 @@ python scripts/mindbox_training_batch.py prepare --manifest "ВходныеДа�
 повреждённые metadata/paths, bridge exact dirs и отсутствие synthetic secrets в
 manifest/CLI. Live API во время реализации не вызывается. Старые exports из разных
 окон не маркируются coherent batch задним числом; новый batch создаёт caller явно.
+
+## M02-10: daily chunked / resumable batches
+
+Новый `daily_training_batch.py` и отдельный CLI `scripts/mindbox_daily_batch.py`
+расширяют M02-09, не заменяя single-window API и CLI. `split_daily_windows(since,
+until)` — pure function: UTC-aware даты приводятся к UTC, требуют midnight alignment
+и since < until, возвращают последовательные полуоткрытые сутки без gaps/overlaps.
+Offset-aware значения допустимы только если обозначают UTC midnight. Произвольные
+minute-aligned окна остаются в прежнем single-window API.
+
+`create_chunked_training_batch(client, raw_root=..., window=TrainingBatchWindow(...))`
+создаёт batch ID и durable state до первого API request. Один batch-level merges
+export использует [merge_since, interaction_until). Затем строго последовательно:
+Actions(day1), Orders(day1), Actions(day2), Orders(day2), ... . День — логический
+сегмент из двух компонентов; каждый export может иметь любое число parts >=1.
+Parts скачивает/распаковывает/публикует существующий M01 client/storage.
+
+Schema v2 хранит created UTC, batch ID, общее window, fingerprint endpoint/operations
+и упорядоченные components: name, since, until, operation, status и optional export
+metadata с относительным directory/parts_count. Компоненты идут merges, затем пары
+actions/orders на каждый день. Final records frozen; snapshots состояния создаются
+через replace. READY образуют последовательный prefix; PENDING/FAILED не имеют
+export reference. Loader проверяет точное покрытие дней, порядок/периоды, статусы,
+JSON duplicate keys, schema, batch identity/path, metadata и все READY part references.
+Validation не читает содержимое raw parts. Paths проверяются относительно raw root
+по правилам M02-09, включая traversal и resolved symlink boundaries.
+
+`training_batches/<batch_id>/state.json` обновляется после каждого подтверждённого
+READY: новый temp -> flush -> fsync -> os.replace. Ошибки компонента сохраняют FAILED;
+process kill оставляет последний durable checkpoint, незавершённый компонент может
+остаться PENDING. Нет удаления/rollback опубликованных raw exports. Temp files,
+оставленные аварийным завершением, не блокируют resume: следующая запись использует
+новое уникальное temp name. OS writer lock одного batch автоматически освобождается
+при завершении процесса; существование .writer.lock само по себе не означает lock.
+Один batch не может иметь двух concurrent writers. Разные batches caller должен
+запускать последовательно с учётом общего лимита Mindbox.
+
+`resume_chunked_training_batch(client, state_path=..., raw_root=...)` загружает периоды
+из state, повторно проверяет READY references и продолжает только PENDING/FAILED.
+API URL/endpoint/operations должны совпадать с сохранённым fingerprint; SecretKey
+не хешируется/не сохраняется, поэтому его ротация разрешена. Изменение общего периода,
+нарушающее coverage компонентов, отклоняется. State — доверенная локальная metadata,
+не криптографически подписанный документ: согласованную ручную подмену всех периодов
+loader доказать не может. Не редактировать state вручную.
+
+Ограничение resume: server-side exportId не checkpoint-ится до локальной публикации.
+После timeout незавершённый export может быть создан заново; предыдущий server-side
+job может ещё выполняться, и caller должен учитывать сервисный лимит. Падение между
+raw publication и durable READY также оставляет неподтверждённый компонент, который
+будет повторён; orphan raw artifact сохраняется. Уже checkpointed READY никогда не
+экспортируется повторно. Повреждённый/пропавший READY artifact вызывает ошибку вместо
+скрытой повторной выгрузки.
+
+manifest.json появляется атомарно только после всех READY и имеет
+transport_complete=True. state сохраняется как audit с READY-компонентами;
+manifest — commit marker. При сбое финализации resume публикует manifest без новых
+exports. Повторный resume finalized batch возвращает тот же manifest без API calls.
+
+`prepare_training_data_from_chunked_batch(...)` требует final contract и вызывает
+общую внутреннюю path-sequence boundary M02-08. Старый public API M02-08 оборачивает
+singleton dirs. Читаются ВСЕ actions directories в порядке дней, ЗАТЕМ ВСЕ orders
+directories; внутри каждого сохраняется part order. Физического склеивания JSON нет.
+Один CustomerIdResolver, InteractionBuilder, ProductResolver и BPR preparation на
+весь batch обеспечивают общие mappings/split и накопительные diagnostics. Добавлен
+raw orders count; malformed_action_system_names суммируется прежним builder.
+LEGACY_DATE, weights, eval threshold, aggregation и known evaluation issue сохранены.
+
+Transport complete и training-data complete независимы: recoverable malformed
+actions не мешают экспорту, но diagnostic preparation вернёт complete=False.
+Quality gate и shadow/production training здесь не добавлены.
+
+CLI команды: export-daily/resume — LIVE; status/validate/prepare — offline. Только
+live-команды читают .env. При прерывании экспортов CLI печатает batch ID, state path,
+последний завершённый component и текущие статусы, без response text/URLs/IDs/PII.
+Если checkpoint ещё не удалось записать, CLI явно сообщает, что state недоступен.
+Status показывает дни/READY/FAILED и читает final manifest при его наличии.
+Prepare выводит cumulative safe diagnostics, но не обучает и не пишет prepared files.
+
+Первый ручной live test на три дня (PowerShell из корня проекта):
+
+```powershell
+& .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py export-daily `
+  --since "2026-08-01" `
+  --until "2026-08-04" `
+  --merge-since "2025-01-01 00:00" `
+  --timeout 3600
+```
+
+После вывода batch ID подставить его в путь:
+
+```powershell
+$batchDir = ".\ВходныеДанные\MindboxRaw\training_batches\<batch_id>"
+& .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py status --state "$batchDir\state.json"
+& .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py resume --state "$batchDir\state.json" --timeout 3600
+& .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py validate --manifest "$batchDir\manifest.json"
+& .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py prepare --manifest "$batchDir\manifest.json" --diagnose
+```
+
+Тесты только synthetic/mocked: календарные границы/leap day, failure merges/actions/
+orders/download, restart с PENDING, READY skip, config mismatch, повреждение state,
+atomic updates/finalization, OS writer lock, отсутствие secrets/URLs в metadata/CLI.
+Single large exports vs daily multipart проходят полный pipeline и дают одинаковые
+mappings/splits/diagnostics, в том числе для malformed событий разных дней.
+Ни live export, ни model training при реализации M02-10 не запускались.
+
+## M02-11: training data quality gate
+
+`Application/model/training_quality.py` — отдельная source-neutral policy после
+successful preparation. Зависит от shared training_data validation, не от Mindbox,
+API/raw parsing или PyQt. Immutable contracts: QualityLevel(PASS/WARN/BLOCK),
+TrainingQualityDiagnostics, TrainingQualityConfig, QualityIssue, TrainingQualityReport.
+Report хранит только counts/rates и разрешённый технический systemName breakdown;
+не хранит PreparedBprData, customer/item/event IDs или PII. Mapping snapshots копируются
+в MappingProxyType, issues — tuple. training_allowed вычисляется из level.
+
+`evaluate_training_quality(prepared_data, diagnostics, config=...)` переиспользует
+validate_prepared_data. Любой PreparedDataError даёт BLOCK/INVALID_PREPARED_DATA;
+сложная validation logic не дублируется. Пустой train, users/items, неверные indexes,
+NaN/inf/negative weights блокируются тем же validator. Summary sizes для invalid
+prepared input равны None (не выдаются за валидные измерения). Некорректные counters
+или config вызывают ValueError. Structural preparation exceptions не перехватываются
+и не превращаются в WARN: gate вызывается только после возврата preparation result.
+
+PASS — policy не нашла issues; WARN — валидные данные с recoverable потерями, training
+allowed; BLOCK — training запрещён. Unresolved products >0 и unsupported products >0
+дают отдельные BLOCK issues, даже если diagnostic preparation исключила их и вернула
+валидный набор. Unsupported также входит в unresolved по resolver contract, поэтому
+оба issue могут описывать частично одни и те же события; их counts не суммируются.
+Unmapped actions — только informational metric, не issue.
+
+Default mapped_action_malformed_warn_rate=0.0: любое malformed mapped action даёт
+WARN/MAPPED_ACTION_WITHOUT_PRODUCT; BLOCK percentage не существует. Настраиваемый
+warn threshold сравнивается строго `rate > threshold`, лежит в [0,1]. При default
+0 malformed — PASS, >0 — WARN, если нет независимых BLOCK conditions.
+
+Denominator: `actions_view + actions_favorite`, включая mapped actions без products.
+InteractionBuilder увеличивает эти counters после classification ДО проверки products.
+M02-08 diagnostics теперь передаёт их отдельно от view/favorite_interactions.
+`malformed_rate = malformed / mapped_actions`; при нулевом denominator — 0.0.
+Malformed > mapped отклоняется как некорректная диагностика. Все Actions (включая
+unmapped) и число InteractionRecord не используются в denominator.
+
+Daily CLI prepare после successful preparation строит quality diagnostics явно,
+печатает level, training_allowed, counts/rate/issues и прежний complete flag.
+Новая exit policy только этой команды: PASS/WARN -> 0, BLOCK/preparation error -> 1.
+`--diagnose` по-прежнему требуется для продолжения после recoverable malformed;
+strict preparation не ослаблена. Возможен честный вывод:
+`Training data complete: False`, `Training quality: WARN`, `Training allowed: True`.
+Сумма весов форматируется через .12g без изменения underlying float.
+
+Transport complete проверяет final batch loader до preparation; gate не принимает
+transport decisions. TrainingQualityReport — snapshot policy decision, а не изменение
+core training API или автоматический запуск обучения. В будущей production orchestration
+нужно явно применять training_allowed; существующий training core не переключён.
+Мутации PreparedBprData после проверки требуют повторной validation/quality evaluation.
+Single-window CLI сохраняет прежнюю exit policy, core preparation.complete не меняется.
+
+Тесты: clean/unmapped PASS, VIEW/FAVORITE/mixed malformed WARN, правильный denominator
+при нескольких products на action, identity loss/invalid prepared BLOCK, immutable
+snapshots и CLI exit 0 для WARN при complete=False. Проверяется отсутствие IDs/PII
+в report repr и CLI. Никаких новых API-запросов или model training.
+
+### M02-12: explicit offline shadow training
+
+`scripts/mindbox_shadow_train.py` validates a final daily manifest, prepares with
+`diagnose=True`, evaluates the unchanged M02-11 gate, and trains only for PASS/WARN.
+Legacy CSV remains the production source. No PyQt/inference integration is added.
+The same TrainConfig instance supplies preparation weights/eval eligibility and all
+training settings. CLI overrides only epochs and data_dir (catalog parent); CPU is
+the supported device. The catalog must be named Номенклатура.csv and match data_dir
+so product resolution and item features read the same file. Existing feature math,
+including duplicate catalog keep="last", remains unchanged.
+
+Source-neutral `shadow_training.py` evaluates quality again on supplied prepared
+data, seeds as the legacy process does, then calls the shared structured training
+API. BLOCK yields training_started=False, training_completed=False, QUALITY_BLOCK.
+Training exceptions yield training_started=True, training_completed=False,
+TRAINING_FAILED; exception text is excluded. Preparation/manifest failures propagate
+to the CLI, which prints a safe error and does not train. CLI exit: 0 for completed
+PASS/WARN, 1 for BLOCK/preparation/training/report failure. Complete=False is retained.
+
+`train_prepared_data(cfg, prepared_data, device)` still returns `(model, splits)`.
+`train_prepared_data_with_metrics` returns `(model, splits, TrainingRunMetrics)`.
+Both delegate to one implementation; sampling, loss, evaluation, early stopping,
+best-state restoration and console output are preserved. Immutable epoch metrics
+contain epoch/loss/recall/ndcg; run metrics contain history, epochs_completed,
+best_epoch, best_recall, best_ndcg, best_metric_name and early_stopped. Best metrics
+are those of the existing selected epoch, not independent maxima. No stdout parsing.
+The existing process-level PyTorch interop initialization is unchanged: CLI runs in
+a fresh process; synthetic multi-run tests isolate that initialization.
+
+ShadowTrainingResult is frozen; it contains a copied immutable preparation summary,
+quality report, metrics, status flags and optional report path. Model remains in
+memory and is excluded from repr (as is report path); no mappings/IDs enter reports.
+The model itself remains an ordinary mutable PyTorch model.
+
+Reports are written only below project `ВходныеДанные/MindboxReports/shadow_training/`
+at `<run_id>/report.json`. JSON sections: run_id/timestamp/batch_id/interaction_window,
+quality (level, allowed, metrics, issue counts/rates/systemName breakdown), dataset
+(safe counts, complete, total weight), config (allowlisted scalar training parameters
+and standard feature column names), training (status/error code/structured metrics),
+production_model_published=false. Arbitrary config attributes, paths, custom feature
+column names and raw data are excluded; nonstandard column names contribute only a
+count. JSON disallows NaN/Infinity. Writer uses a same-directory temporary file,
+flush, fsync and replace, cleaning up the temporary file on failure. BLOCK and
+training failure also get reports; failed preparation has no fabricated summary.
+
+Shadow never calls `_save_artifacts`, saves checkpoints, or enters the production
+publication orchestration. Synthetic regression tests forbid publication/network,
+verify sentinel bytes and directory listings under Модель (current/runs/.staging),
+exercise actual feature-enabled/disabled CPU training, deterministic API parity,
+early stopping, full synthetic manifest CLI, safe JSON and atomic replace failure.
+The real three-day batch is NOT trained automatically.
+
+Manual first smoke, from project root in PowerShell:
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_shadow_train.py `
+  --manifest '.\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json' `
+  --catalog '.\ВходныеДанные\Номенклатура.csv' `
+  --epochs 2 `
+  --device cpu
+```
+
+### M02-13: source-neutral seen items
+
+`Application/model/seen_items.py` defines SeenItemsIndex and SeenItemsError.
+`build_seen_items_index(prepared_data)` reuses prepared validation and constructs
+`user_pos_train[u] UNION eval_items for u`. Eval-only items remain seen; repeated
+train/eval targets deduplicate. Evaluation and temporal holdout are unchanged.
+CSR layout: int64 indptr[num_users+1], int64 indices, sorted unique per-user segments.
+Dimensions, offsets, bounds, order and uniqueness are validated. Arrays are copied
+onto immutable bytes backing; items_for_user returns a read-only view whose write
+flag cannot be re-enabled. Repr contains only users/items/pair/covered-user counts.
+
+Checkpoint optional fields: `seen_items_indptr`, `seen_items_indices`. Existing
+num_users/num_items and mappings supply dimensions. Both fields absent means OLD
+artifact and permits legacy fallback; any partial/corrupt contract is rejected,
+never silently replaced by CSV. `_save_artifacts(..., seen_items=index)` validates
+dimensions and stores only integer mapping indices. Its three-argument compatibility
+call remains supported. New legacy CSV training explicitly builds and saves the
+index from PreparedBprData. No separate identity-to-products JSON is written.
+
+For an embedded index, print_recommendations neither requires nor reads interaction
+CSV for seen filtering. Номенклатура.csv can still supply display names. Train and
+eval-only seen items are excluded, including when fewer than k unseen items exist.
+The print inference function now uses no_grad: the synthetic full-path test exposed
+an existing requires-grad Tensor.numpy error. Output formatting remains unchanged.
+Old artifacts continue using the legacy CSV seen helper/schema requirements.
+
+Mass export also selects embedded seen when available and never invokes either
+legacy seen helper for that branch. filter_seen=False leaves scores unmasked.
+It still validates/reads legacy interaction sources for other responsibilities;
+this is NOT a complete recommendation-source migration. Remaining M02-14/M02-15 work:
+
+- Historical conversion: Просмотры.csv + Заказы.csv.
+- Loyalty ranking: Заказы.csv + Избранное.csv + Просмотры.csv.
+- Contact/profile fields (phone, email, discount card): currently Заказы.csv.
+
+Stock handling, seasonal mapping, recommendation output formats, customer sources,
+quality policy, BPR math and PyQt are unchanged. M02-12 shadow still publishes no
+checkpoint or production artifacts. Tests cover independent pre-holdout pair parity,
+legacy CSV parity (views only ТипТовара == Номенклатура), immutable/invalid layouts,
+artifact roundtrip/corruption, print without interaction CSV, mass-export helper spies
+and filter_seen=False. Artifact tests use temporary directories only.

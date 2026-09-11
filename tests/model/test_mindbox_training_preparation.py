@@ -103,6 +103,21 @@ def test_merges_applied_before_mappings(data):
     assert result.diagnostics.customer_merges == 1
 
 
+def test_missing_product_names_do_not_change_preparation(data):
+    named = run(data)
+    for order in data[0]["orders"]:
+        for line in order["lines"]:
+            del line["product"]["name"]
+    unnamed = run(data)
+    assert unnamed.complete is True
+    assert unnamed.diagnostics == named.diagnostics
+    assert unnamed.prepared_data.mappings == named.prepared_data.mappings
+    for field in ("train_pairs", "train_weights", "eval_users", "eval_items"):
+        np.testing.assert_array_equal(getattr(unnamed.prepared_data.splits, field),
+                                      getattr(named.prepared_data.splits, field))
+    assert unnamed.prepared_data.splits.user_pos_train == named.prepared_data.splits.user_pos_train
+
+
 def test_custom_eval_threshold_is_used(data):
     data[0]["actions"] = data[0]["actions"][:3]
     result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=4))
@@ -209,3 +224,104 @@ def test_cli_safe_aggregates_and_complete(data, tmp_path, capsys, malformed):
     for secret in ("SECRET", "001234", "001235", "001236", "_FULL"):
         assert secret not in output.out + output.err
     assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+def test_batch_cli_malformed_names_safe_and_snapshot_immutable(data, monkeypatch, capsys):
+    from Application.mindbox import training_batch
+    from scripts.mindbox_training_batch import main as batch_main
+
+    data[0]["actions"][0]["products"] = []
+    result = run(data, diagnose=True)
+    assert result.diagnostics.malformed_action_system_names == {"ProsmotrProdukta": 1}
+    with pytest.raises(TypeError):
+        result.diagnostics.malformed_action_system_names["ProsmotrProdukta"] = 2
+    monkeypatch.setattr(training_batch, "load_training_batch", lambda *a, **kw: object())
+    monkeypatch.setattr(training_batch, "prepare_training_data_from_batch", lambda *a, **kw: result)
+    assert batch_main(["prepare", "--manifest", "synthetic.json", "--diagnose"]) == 1
+    output = capsys.readouterr()
+    assert "Malformed actions: 1\nMalformed action types:\n  ProsmotrProdukta: 1" in output.out
+    for secret in ("SECRET_A", "SECRET_C", "SECRET_ACTION", "SECRET_ORDER", "001234", "_FULL",
+                   "secret@example.test", "+79999999999"):
+        assert secret not in output.out + output.err
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_single_vs_daily_preparation_parity(data, malformed):
+    from datetime import datetime, timezone, timedelta
+    import uuid
+    from Application.mindbox.daily_training_batch import (
+        BatchComponent, ChunkedTrainingBatch, prepare_training_data_from_chunked_batch,
+    )
+    from Application.mindbox.training_batch import TrainingBatchExport, TrainingBatchWindow
+
+    raw, dirs, catalog = data
+    root = catalog.parent
+    # Mixed types and repeat items, with equal timestamps within each day.
+    for action in raw["actions"][5:]:
+        action["dateTimeUtc"] = action["creationDateTimeUtc"] = "2026-01-02T12:00:00Z"
+    raw["orders"][1]["firstAction"]["dateTimeUtc"] = "2026-01-02T12:00:00Z"
+    if malformed:
+        raw["actions"][0]["products"] = []
+        raw["actions"][5]["products"] = []
+    single = run(data, diagnose=malformed)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    until = start + timedelta(days=2)
+    merge_entry = TrainingBatchExport("customer_merges", "merge-id", "Merges",
+                                      dirs["customer_merges"].relative_to(root).as_posix(), 1)
+    components = [BatchComponent("customer_merges", start, until, "Merges", "READY", merge_entry)]
+    for index in range(2):
+        day = start + timedelta(days=index)
+        for name, records in (("actions", raw["actions"][index * 5:(index + 1) * 5]),
+                              ("orders", raw["orders"][index:index + 1])):
+            directory = root / name / f"2026020{index + 1}_000000"
+            # Multiple physical parts in a logical day.
+            midpoint = len(records) // 2
+            directory.mkdir(parents=True)
+            for number, subset in enumerate((records[:midpoint], records[midpoint:]), 1):
+                (directory / f"{name}_part_{number:03d}.json").write_text(
+                    json.dumps({EXPORT_ROOTS[name]: subset}), encoding="utf-8")
+            entry = TrainingBatchExport(name, f"{name}-{index}", name, directory.relative_to(root).as_posix(), 2)
+            components.append(BatchComponent(name, day, day + timedelta(days=1), name, "READY", entry))
+    batch = ChunkedTrainingBatch(uuid.uuid4().hex, start, TrainingBatchWindow(start, until, start),
+                                "0" * 64, tuple(components), True)
+    chunked = prepare_training_data_from_chunked_batch(batch, raw_root=root, catalog_path=catalog,
+                                                     train_config=legacy.TrainConfig(), diagnose=malformed)
+    assert chunked.prepared_data.mappings == single.prepared_data.mappings
+    for field in ("train_pairs", "train_weights", "eval_users", "eval_items"):
+        np.testing.assert_array_equal(getattr(chunked.prepared_data.splits, field),
+                                      getattr(single.prepared_data.splits, field))
+    assert chunked.prepared_data.splits.user_pos_train == single.prepared_data.splits.user_pos_train
+    assert chunked.diagnostics == single.diagnostics
+    assert chunked.complete == single.complete == (not malformed)
+    assert chunked.diagnostics.orders == 2
+    if malformed:
+        assert chunked.diagnostics.malformed_action_system_names == {"ProsmotrProdukta": 2}
+
+
+@pytest.mark.parametrize("problem,level,allowed", [(None, "PASS", True), ("malformed", "WARN", True),
+                                                   ("unresolved", "BLOCK", False)])
+def test_daily_prepare_quality_exit_and_safe_output(data, monkeypatch, capsys, problem, level, allowed):
+    from Application.mindbox import daily_training_batch as daily
+    from scripts.mindbox_daily_batch import main as daily_main
+
+    if problem:
+        data[0]["actions"][0]["products"] = ([] if problem == "malformed"
+                                             else [{"ids": {"offline1C": "999999_UNKNOWN"}}])
+    # More than one product per action must not inflate mapped-actions denominator.
+    data[0]["actions"][1]["products"] *= 3
+    result = run(data, diagnose=True)
+    assert result.diagnostics.actions_view == 9
+    assert result.diagnostics.actions_favorite == 1
+    monkeypatch.setattr(daily, "load_chunked_training_batch", lambda *a, **kw: object())
+    monkeypatch.setattr(daily, "prepare_training_data_from_chunked_batch", lambda *a, **kw: result)
+    assert daily_main(["prepare", "--manifest", "synthetic.json", "--diagnose"]) == int(not allowed)
+    output = capsys.readouterr()
+    assert f"Training quality: {level}" in output.out
+    assert f"Training allowed: {allowed}" in output.out
+    assert f"Training data complete: {problem is None}" in output.out
+    assert "Mapped actions: 10" in output.out
+    if problem == "malformed":
+        assert "Malformed rate: 10.0000%" in output.out
+        assert "WARN MAPPED_ACTION_WITHOUT_PRODUCT: 1" in output.out
+    for secret in ("SECRET", "001234", "999999_UNKNOWN", "secret@example.test", "+79999999999"):
+        assert secret not in output.out + output.err

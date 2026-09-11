@@ -1,7 +1,9 @@
 """Explicit local exports -> validated training input. No training or API calls."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 from Application.interactions import InteractionBuilder, InteractionBuildError
@@ -34,6 +36,14 @@ class MindboxPreparationDiagnostics:
     purchase_interactions: int
     resolution: ProductResolutionDiagnostics
     bpr: BprDiagnostics
+    malformed_action_system_names: Mapping[str, int] = field(default_factory=dict)
+    orders: int = 0
+    actions_view: int = 0
+    actions_favorite: int = 0
+
+    def __post_init__(self):
+        object.__setattr__(self, "malformed_action_system_names",
+                           MappingProxyType(dict(self.malformed_action_system_names)))
 
 
 @dataclass(frozen=True, repr=False)
@@ -49,7 +59,22 @@ def prepare_training_data_from_mindbox(
     customer_merges_export_dir: str | Path, catalog_path: str | Path,
     train_config: PreparationTrainConfig, diagnose: bool = False,
 ) -> MindboxPreparationResult:
-    for directory in (actions_export_dir, orders_export_dir, customer_merges_export_dir, catalog_path):
+    return _prepare_training_data_from_mindbox_sources(
+        actions_export_dirs=(actions_export_dir,), orders_export_dirs=(orders_export_dir,),
+        customer_merges_export_dir=customer_merges_export_dir, catalog_path=catalog_path,
+        train_config=train_config, diagnose=diagnose)
+
+
+def _prepare_training_data_from_mindbox_sources(
+    *, actions_export_dirs, orders_export_dirs, customer_merges_export_dir,
+    catalog_path, train_config, diagnose=False,
+) -> MindboxPreparationResult:
+    if not actions_export_dirs or not orders_export_dirs:
+        raise ValueError("Explicit export directory sequences required")
+    for directories in (actions_export_dirs, orders_export_dirs):
+        if not isinstance(directories, (tuple, list)):
+            raise ValueError("Explicit export directory sequences required")
+    for directory in (*actions_export_dirs, *orders_export_dirs, customer_merges_export_dir, catalog_path):
         if not isinstance(directory, (str, Path)) or not str(directory).strip():
             raise ValueError("Explicit export directories and catalog path are required")
     if type(diagnose) is not bool:
@@ -62,6 +87,7 @@ def prepare_training_data_from_mindbox(
     )
     products = ProductResolver(load_catalog(Path(catalog_path)))
     merge_count = 0
+    order_count = 0
 
     def merges():
         nonlocal merge_count
@@ -72,8 +98,13 @@ def prepare_training_data_from_mindbox(
     customers = CustomerIdResolver(merges())
     builder = InteractionBuilder()
 
+    def sources(name, directories):
+        for directory in directories:
+            yield from iter_export(name, input_dir=directory)
+
     def events():
-        for raw in iter_export("actions", input_dir=actions_export_dir):
+        nonlocal order_count
+        for raw in sources("actions", actions_export_dirs):
             action = adapt_action(raw, customers)
             try:
                 interactions = builder.from_action(action)
@@ -85,7 +116,8 @@ def prepare_training_data_from_mindbox(
                 resolved = products.resolve_interaction(interaction, strict=not diagnose)
                 if resolved is not None:
                     yield to_bpr_event(resolved, config.weights)
-        for raw in iter_export("orders", input_dir=orders_export_dir):
+        for raw in sources("orders", orders_export_dirs):
+            order_count += 1
             for line in adapt_order(raw, customers):
                 interaction = builder.from_order_line(line)
                 if interaction is not None:
@@ -101,6 +133,10 @@ def prepare_training_data_from_mindbox(
         interactions.actions_malformed, interactions.actions_unmapped,
         interactions.view_interactions, interactions.favorite_interactions, interactions.purchase_interactions,
         resolution, prepared.diagnostics,
+        malformed_action_system_names=interactions.malformed_action_system_names,
+        orders=order_count,
+        actions_view=interactions.actions_view,
+        actions_favorite=interactions.actions_favorite,
     )
     return MindboxPreparationResult(prepared, diagnostics,
                                     not (interactions.actions_malformed or resolution.total.unresolved))

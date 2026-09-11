@@ -64,6 +64,9 @@ def main(argv=None):
         print(f"BPR events: {stats.events_total}; Train pairs: {stats.train_pairs_after_aggregation}")
         print(f"Eval events: {stats.eval_events}; Train weight: {stats.total_train_weight:.12g}")
         print(f"Malformed actions: {result.diagnostics.malformed_actions}")
+        print("Malformed action types:")
+        for name, count in sorted(result.diagnostics.malformed_action_system_names.items()):
+            print(f"  {name}: {count}")
         print(f"Unresolved: {result.diagnostics.resolution.total.unresolved}")
         print(f"Training data complete: {result.complete}")
         return 0 if result.complete else 1

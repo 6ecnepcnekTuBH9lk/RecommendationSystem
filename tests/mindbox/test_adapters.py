@@ -197,6 +197,34 @@ def test_many_order_lines_optional_totals_and_empty_lines(order, resolver):
     assert adapt_order(order, resolver) == ()
 
 
+def test_order_without_product_name_creates_purchase(order, resolver):
+    from Application.interactions import InteractionBuilder, InteractionType
+
+    del order["lines"][0]["product"]["name"]
+    order["lines"][0]["status"]["ids"]["externalId"] = "CP"
+    line, = adapt_order(order, resolver)
+    assert line.product_name is None
+    builder = InteractionBuilder()
+    interaction = builder.from_order_line(line)
+    assert interaction.interaction_type is InteractionType.PURCHASE
+    assert interaction.product is line.product
+    assert interaction.quantity == line.quantity == Decimal("2.5")
+    assert builder.diagnostics.actions_malformed == 0
+
+
+@pytest.mark.parametrize("name", ["synthetic product", " Название товара ", None])
+def test_optional_order_product_name_preserved(order, resolver, name):
+    order["lines"][0]["product"]["name"] = name
+    assert adapt_order(order, resolver)[0].product_name == name
+
+
+@pytest.mark.parametrize("name", [123, False, [], {}, "", "   "])
+def test_invalid_present_order_product_name_rejected(order, resolver, name):
+    order["lines"][0]["product"]["name"] = name
+    with pytest.raises(AdapterError, match="product.name"):
+        adapt_order(order, resolver)
+
+
 @pytest.mark.parametrize("ids", [{}, {"unsupported": "secret"}, {"offline1C": "a", "kanzlerKz": "b"},
                                   {"offline1C": None, "kanzlerKz": "b"}, {"offline1C": ""}])
 def test_order_missing_or_ambiguous_product(order, resolver, ids):

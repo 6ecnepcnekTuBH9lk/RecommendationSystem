@@ -291,7 +291,7 @@ def test_training_accepts_schema_valid_empty_individual_source(
     monkeypatch.setattr(
         BPRMF,
         "_save_artifacts",
-        lambda cfg, maps, model: calls.append(("save", len(maps.idx2item))),
+        lambda cfg, maps, model, **kwargs: calls.append(("save", len(maps.idx2item))),
     )
 
     result = BPRMF._train_in_this_process(
@@ -323,7 +323,7 @@ def test_training_orders_without_quantity_use_one(tmp_path, monkeypatch):
         return object(), object()
 
     monkeypatch.setattr(BPRMF, "train_prepared_data", train)
-    monkeypatch.setattr(BPRMF, "_save_artifacts", lambda *args: None)
+    monkeypatch.setattr(BPRMF, "_save_artifacts", lambda *args, **kwargs: None)
 
     assert BPRMF._train_in_this_process(cfg) is True
     assert len(captured_events) == 1
@@ -434,8 +434,9 @@ def test_training_reports_success_only_after_artifacts_are_saved(tmp_path, monke
         calls.append("train")
         return synthetic_model, object()
 
-    def save(cfg, maps, model):
+    def save(cfg, maps, model, *, seen_items):
         assert model is synthetic_model
+        assert seen_items.num_items == len(maps.idx2item)
         calls.append("save")
 
     monkeypatch.setattr(BPRMF, "train_prepared_data", train)

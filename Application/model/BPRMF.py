@@ -25,8 +25,12 @@ import re
 from difflib import SequenceMatcher
 
 if __package__:
+    from .seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
+    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics
     from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
+    from seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
+    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics
     from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 
 # --- make CPU BLAS usage predictable (often important for UI apps on Windows) ---
@@ -603,6 +607,18 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
 
 
 def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device) -> Tuple[BPRMF, Splits]:
+    """Compatibility API returning the original model/splits pair."""
+    model, splits, _metrics = _train_prepared_data_impl(cfg, prepared_data, device)
+    return model, splits
+
+
+def train_prepared_data_with_metrics(
+    cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
+) -> Tuple[BPRMF, Splits, TrainingRunMetrics]:
+    return _train_prepared_data_impl(cfg, prepared_data, device)
+
+
+def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device):
     """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
     validate_prepared_data(prepared_data)
     maps, splits = prepared_data.mappings, prepared_data.splits
@@ -706,6 +722,8 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
 
     best = {"metric": -1e9, "RECALL": -1.0, "NDCG": -1.0, "epoch": -1, "state": None}
     bad_epochs = 0
+    history = []
+    early_stopped = False
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -744,6 +762,7 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
 
         model.eval()
         recall, ndcg = _eval_bprmf_recall_ndcg(model, splits, num_items, cfg.topk, device)
+        history.append(TrainingEpochMetrics(epoch, total_loss / steps, float(recall), float(ndcg)))
 
         print(
             f"[{_now()}] Итерация {epoch} из {cfg.epochs}: "
@@ -762,6 +781,7 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
             if use_early_stop and epoch >= min_epochs:
                 bad_epochs += 1
                 if bad_epochs >= patience:
+                    early_stopped = True
                     print(
                         f"[{_now()}] Преждевременная остановка на итерации {epoch}: {metric_name}@{cfg.topk} не улучшается "
                         f"{patience} итерации подряд (лучший показатель = {best['metric']:.4f})"
@@ -775,7 +795,9 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
         f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
         f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
     )
-    return model, splits
+    metrics = TrainingRunMetrics(len(history), best["epoch"], best["RECALL"], best["NDCG"],
+                                 metric_name, early_stopped, tuple(history))
+    return model, splits, metrics
 
 
 # ============================= Saving / Loading =============================
@@ -814,6 +836,7 @@ def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
         raise ValueError(
             "Model artifact mismatch: len(idx2item) does not equal num_items"
         )
+    seen_items_from_checkpoint(checkpoint)
 
 
 def _resolve_model_artifact_paths(model_dir: str) -> Tuple[str, str]:
@@ -852,7 +875,11 @@ def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
         pass
 
 
-def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
+def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_items: SeenItemsIndex | None = None) -> None:
+
+    if seen_items is not None and (not isinstance(seen_items, SeenItemsIndex)
+            or seen_items.num_users != len(maps.idx2user) or seen_items.num_items != len(maps.idx2item)):
+        raise SeenItemsError("Seen dimensions do not match mappings")
 
     out_dir = os.path.join(os.getcwd(), "Модель")
     _ensure_dir(out_dir)
@@ -894,6 +921,9 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
             "num_items": len(maps.idx2item),
             "state_dict": model.state_dict(),
         }
+        if seen_items is not None:
+            ckpt["seen_items_indptr"] = seen_items.indptr.copy()
+            ckpt["seen_items_indices"] = seen_items.indices.copy()
 
         # save item features for consistent inference/evaluation
         feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
@@ -1238,14 +1268,17 @@ def _user_seen_items_from_processed(data_dir: str, mindbox_id: str, item2idx: Di
     return np.fromiter(seen, dtype=np.int64)
 
 
+@torch.no_grad()
 def print_recommendations(mindbox_id: str, k: int = 20) -> None:
     """
     Prints top-K recommendations to console using saved artifacts (BPR-MF only).
     """
     cfg = TrainConfig()
-    _require_interaction_sources(cfg.data_dir)
-    _validate_interaction_source_schemas(cfg.data_dir)
     maps_json, ckpt = _load_artifacts()
+    embedded_seen = seen_items_from_checkpoint(ckpt)
+    if embedded_seen is None:
+        _require_interaction_sources(cfg.data_dir)
+        _validate_interaction_source_schemas(cfg.data_dir)
 
     idx2user = maps_json["idx2user"]
     idx2item = maps_json["idx2item"]
@@ -1256,7 +1289,8 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
         print(f"[{_now()}] User {mindbox_id} not found in mappings.json.")
         return
 
-    seen_idx = _user_seen_items_from_processed(cfg.data_dir, mindbox_id, item2idx, cfg)
+    seen_idx = (embedded_seen.items_for_user(user2idx[str(mindbox_id)]) if embedded_seen is not None
+                else _user_seen_items_from_processed(cfg.data_dir, mindbox_id, item2idx, cfg))
     try:
         names = _load_item_names(cfg.data_dir)
     except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
@@ -1300,6 +1334,8 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
 
     top = np.argpartition(-scores, min(k, len(scores) - 1))[:k]
     top = top[np.argsort(-scores[top])]
+    if embedded_seen is not None:
+        top = top[~np.isin(top, seen_idx)]
 
     print(f"[{_now()}] Recommendations (BPR-MF) for MindboxID={mindbox_id} top{k}:")
     for rank, ii in enumerate(top, start=1):
@@ -1363,7 +1399,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
     print(f"[{_now()}] Устройство для обучения: {device_label}\n")
 
     model, _splits = train_prepared_data(cfg, prepared, device)
-    _save_artifacts(cfg, prepared.mappings, model)
+    _save_artifacts(cfg, prepared.mappings, model, seen_items=build_seen_items_index(prepared))
     return True
 
 
@@ -2611,9 +2647,10 @@ def export_recommendations_excel(
             "и корректным номером телефона."
         )
 
-    user_seen: Optional[List[set]] = None
+    user_seen = None
+    embedded_seen = seen_items_from_checkpoint(ckpt)
 
-    if filter_seen:
+    if filter_seen and embedded_seen is None:
         user_seen = _build_user_seen_sets(
             data_dir=data_dir,
             user2idx=user2idx,
@@ -2780,11 +2817,11 @@ def export_recommendations_excel(
             u_emb = model.user_emb(u_idx)  # [B, d]
             scores = u_emb @ item_vec.t()  # [B, I]
 
-            if filter_seen and user_seen is not None:
+            if filter_seen and (embedded_seen is not None or user_seen is not None):
                 for bi, uu in enumerate(batch_user_indices):
-                    seen_items = user_seen[uu]
+                    seen_items = embedded_seen.items_for_user(uu) if embedded_seen is not None else user_seen[uu]
 
-                    if seen_items:
+                    if len(seen_items):
                         scores[
                             bi,
                             torch.tensor(

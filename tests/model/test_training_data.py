@@ -111,7 +111,7 @@ def test_csv_preparation_and_public_entrypoint_parity(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bpr, "prepare_training_data_from_csv", prepare)
     monkeypatch.setattr(bpr, "train_prepared_data", train)
-    monkeypatch.setattr(bpr, "_save_artifacts", lambda *args: calls.append("save"))
+    monkeypatch.setattr(bpr, "_save_artifacts", lambda *args, **kwargs: calls.append("save"))
     assert bpr._train_in_this_process(cfg)
     assert calls == ["prepare", "train", "save"]
 
