@@ -450,6 +450,71 @@ def test_embedded_analytics_export_only_reads_contacts_and_ranking_parity(tmp_pa
     assert a.rank_users(cfg) == [1, 2, 0]
 
 
+@pytest.mark.parametrize("phone,eligible", [("+7 (900) 123-45-67", True), ("8 900 123-45-67", True),
+                                          ("9001234567", True), (None, False)])
+def test_customers_snapshot_export_zero_interaction_csv_and_output_parity(tmp_path, monkeypatch, phone, eligible):
+    import inspect
+    from datetime import datetime, timezone
+    from Application.mindbox.customer_profile_snapshot import CustomerProfileSnapshot, _publish_snapshot, load_customer_contact_index
+    from Application.model.interaction_analytics import AnalyticsCollector
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    if phone is not None:
+        orders_path = tmp_path / "synthetic-data" / "Заказы.csv"
+        orders = pd.read_csv(orders_path, sep="|", dtype=str)
+        orders["Телефон"] = phone
+        orders.to_csv(orders_path, sep="|", encoding="utf-8-sig", index=False)
+    _run_export(paths)
+    expected_csv = paths["csv1"].read_bytes(), paths["csv2"].read_bytes()
+    expected_xlsx = _read_xlsx_rows(paths["xlsx"])
+    mappings, checkpoint = BPRMF._load_artifacts()
+    c = AnalyticsCollector()
+    c.add("user-1", "item-1", "PURCHASE", datetime(2026, 1, 1), 1)
+    a = c.finalize(BPRMF.Mappings({"user-1": 0}, ["user-1"], {"item-1": 0}, ["item-1"]), {})
+    checkpoint.update(num_users=1, num_items=1, interaction_analytics=a.to_checkpoint(),
+                      seen_items_indptr=np.zeros(2, dtype=np.int64), seen_items_indices=np.array([], dtype=np.int64))
+    root = tmp_path / "raw"
+    profile = {"ids": {"mindboxId": "user-1"}, "email": "user-1@example.test", "mobilePhone": phone,
+               "lastActivatedCard": {"ids": {"number": "card-1"}}}
+    for name, payload in (("customers", {"customers": [profile]}), ("customer_merges", {"customerMerges": []})):
+        directory = root / name / "20260101_000000"
+        directory.mkdir(parents=True)
+        (directory / f"{name}_part_001.json").write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = CustomerProfileSnapshot("e" * 32, datetime.now(timezone.utc).isoformat(),
+                                      "customers/20260101_000000", 1, "customer_merges/20260101_000000", 1)
+    manifest = _publish_snapshot(snapshot, root)
+    index = load_customer_contact_index(manifest, mappings, raw_root=root)
+    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+        (tmp_path / "synthetic-data" / name).unlink()
+    def forbidden(*args, **kwargs):
+        pytest.fail("New pathway must not access interaction CSV")
+    for name in ("_require_interaction_sources", "_validate_interaction_source_schemas", "_build_user_seen_sets",
+                 "_load_historical_item_conversion", "_read_csv_pipe_chunks", "_read_csv_pipe"):
+        monkeypatch.setattr(BPRMF, name, forbidden)
+    original_open = Path.open
+    def safe_open(path, *args, **kwargs):
+        assert path.name not in ("Заказы.csv", "Просмотры.csv", "Избранное.csv")
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", safe_open)
+    original_csv = pd.read_csv
+    def safe_read(path, *args, **kwargs):
+        assert Path(path).name not in ("Заказы.csv", "Просмотры.csv", "Избранное.csv")
+        return original_csv(path, *args, **kwargs)
+    monkeypatch.setattr(pd, "read_csv", safe_read)
+    if eligible:
+        _run_export(paths, customer_contacts=index, filter_seen=True)
+        assert (paths["csv1"].read_bytes(), paths["csv2"].read_bytes()) == expected_csv
+        assert b"79001234567" in expected_csv[0]
+        # Conversion source intentionally differs from the fixture's stub (12.34).
+        actual = _read_xlsx_rows(paths["xlsx"])
+        for header in ("ДисконтнаяКарта", "Почта", "Телефон"):
+            column = expected_xlsx[0].index(header)
+            assert actual[1][column] == expected_xlsx[1][column]
+    else:
+        with pytest.raises(ValueError, match="телефона"):
+            _run_export(paths, customer_contacts=index, filter_seen=True)
+    assert "customer_contacts" not in inspect.signature(BPRMF._save_artifacts).parameters
+
+
 def _write_old_outputs(paths):
     old_bytes = {
         "xlsx": b"old-complete-xlsx",

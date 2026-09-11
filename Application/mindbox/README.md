@@ -1200,3 +1200,92 @@ single raw parse, legacy conversion/ranking parity, safe immutable roundtrip and
 corrupt blocks. A full export spy test removes views/favorites, forbids legacy
 conversion/seen helpers and chunked activity reads, and observes only the existing
 orders contact read. No API requests or live model training are required.
+
+### M02-15: separate Customers profile snapshots
+
+The NEW recommendation data sources are now:
+
+- Behavior: model checkpoint (SeenItemsIndex + InteractionAnalytics).
+- Contacts: an explicitly supplied CustomersAPI profile snapshot.
+- Catalog: Номенклатура.csv.
+- Settings: Настройки.
+
+With both embedded behavior contracts and `customer_contacts=...`, mass export
+does not require Заказы.csv, Просмотры.csv or Избранное.csv. Without the contact
+index, the old Orders contact loader remains; old checkpoints retain their behavior
+fallbacks. No source switch or PyQt integration is performed automatically.
+
+`Application/customer_profiles.py` defines frozen CustomerContact (email,
+mobile_phone, discount_card) and CustomerContactIndex (tuple aligned to model u_idx,
+mapping-order SHA256 fingerprint, safe diagnostic counts). The fingerprint prevents
+injecting an index for different/reordered users. Neither repr displays PII or IDs.
+Contacts stay in memory; no JSON/CSV contact cache is created. `_save_artifacts`
+does not accept contacts, and model checkpoints/shadow reports are unchanged.
+Existing recommendation files naturally contain the requested output contact fields.
+
+Offline loading reuses adapt_customer_merge -> CustomerIdResolver -> adapt_customer.
+For each canonical user, choose a WHOLE profile: canonical source record first,
+then greatest change_datetime_utc (missing is oldest), then last row in deterministic
+part/export order. No cross-record field filling. Non-model profiles are ignored for
+alignment; missing model profiles yield three None fields. Snapshot-only inspect
+selects all canonical profiles; model inspect restricts coverage to model users.
+
+Email/phone come from the selected adapter record. Export keeps its existing single
+phone normalization function: normalized InternetMagazin number, existing raw-phone
+Excel presentation. Card policy: valid lastActivatedCard.ids.number wins; otherwise
+one distinct discountCards[*].ids.number is accepted. Multiple distinct numbers give
+None plus ambiguous_discount_cards. Empty/missing/unknown identifier keys and invalid
+number structures get safe cards_without_number / invalid_card_numbers counts.
+Only nonempty strings and nonnegative integer numbers are recognized; no alternate
+identifier is guessed. Card diagnostics refer to the selected profiles in coverage
+scope. with_phone measures presence, while export eligibility uses existing normalization.
+
+`customer_profile_snapshot.py` publishes metadata-only version-1 manifests under
+MindboxRaw/customer_profile_snapshots/<snapshot_id>/manifest.json. Fields: snapshot_id,
+created_at, relative customers/customer_merges directories, parts counts, optional
+originating_training_batch_id, transport_complete and schema_version. No export URLs,
+credentials, profile values or raw records. Raw Customers parts remain in their M01
+customers/timestamp directory and are not copied. Publication uses exclusive directory,
+temp file, flush, fsync, replace; a failed publication leaves no final manifest.
+
+Creation requires an existing final daily training manifest, reuses its exact merges
+reference and calls existing client.export("customers") ONCE, with no daily splitting
+or new merge export. Offline validation checks exact schema, relative paths/root
+containment, part listings, final originating batch and matching merge reference;
+it does not open raw profiles. Inspect parses only merges/customers, never Actions/Orders.
+The daily batch implementation and customer adapter contract remain unchanged.
+
+Snapshots may be newer than training. Canonicalization deliberately uses the supplied
+training batch's merge graph. New post-training canonical users may not match model
+users; mappings are never rewritten. Retraining addresses that drift. The caller must
+choose the originating batch of the model; index alignment verifies user order, not
+an otherwise absent model-to-batch provenance field.
+
+Integration from Python (paths supplied explicitly):
+
+```python
+maps, _ = BPRMF._load_artifacts(model_dir)
+contacts = load_customer_contact_index(profile_manifest, maps, raw_root=raw_root)
+BPRMF.export_recommendations_excel(model_dir=model_dir, customer_contacts=contacts)
+```
+
+First LIVE snapshot is user-run only, from project root in PowerShell:
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py export `
+  --training-manifest '.\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json' `
+  --timeout 3600
+
+$profileManifest = Read-Host 'Введите путь Manifest из вывода export'
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py validate --manifest $profileManifest
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py inspect --manifest $profileManifest
+```
+
+Without --model-dir, inspect reports snapshot canonical-profile coverage; add
+`--model-dir '.\Модель'` only when model artifacts exist, for model-aligned coverage.
+Inspect prints only counts. Significant ambiguous-card counts require a business-rule
+discussion; selection is not changed automatically. CLI errors suppress raw exception
+values. Tests mock transport and use temporary raw/model/output directories: canonical
+selection, card ambiguity, atomic write/failure, traversal/origin checks, safe CLI,
+no-contact checkpoint, full export with zero interaction CSV reads, contact-output
+parity and unchanged phone normalization/eligibility. No live API/training is run.

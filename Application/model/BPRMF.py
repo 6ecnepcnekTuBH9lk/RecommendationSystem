@@ -2050,6 +2050,7 @@ def export_recommendations_excel(
     export_item_kinds: Optional[List[str]] = None,
     max_export_users: Optional[int] = 1000,
     device_str: str = "cuda",
+    customer_contacts=None,
 ) -> str:
 
     # Обработка колонок в нормальный вид
@@ -2338,6 +2339,11 @@ def export_recommendations_excel(
 
     idx2user: List[str] = maps_json["idx2user"]
     idx2item: List[str] = maps_json["idx2item"]
+    if customer_contacts is not None:
+        from Application.customer_profiles import CustomerContactIndex, CustomerContactError
+        if not isinstance(customer_contacts, CustomerContactIndex):
+            raise CustomerContactError("CustomerContactIndex required")
+        customer_contacts.validate_alignment(idx2user)
     user2idx = {u: i for i, u in enumerate(idx2user)}
     item2idx = {it: i for i, it in enumerate(idx2item)}
 
@@ -2630,7 +2636,16 @@ def export_recommendations_excel(
     need_csv = bool(out_csv_format1) or bool(out_csv_kanzler_ml)
 
     if include_discount_card or include_email or include_phone or need_csv:
-        discount_cards, emails, phones = _load_user_fields(data_dir)
+        if customer_contacts is None:
+            discount_cards, emails, phones = _load_user_fields(data_dir)
+        else:
+            for user, contact in zip(idx2user, customer_contacts.contacts):
+                if contact.discount_card is not None:
+                    discount_cards[user] = contact.discount_card
+                if contact.email is not None:
+                    emails[user] = contact.email
+                if contact.mobile_phone is not None:
+                    phones[user] = contact.mobile_phone
 
     # Ограничение количества клиентов в итоговой выгрузке.
     # None или значение <= 0 означает выгрузку всех подходящих клиентов.
