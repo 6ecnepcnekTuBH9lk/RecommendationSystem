@@ -6,7 +6,7 @@ import pytest
 
 from Application.interactions import (
     InteractionBuilder, InteractionBuildError, InteractionConfigError,
-    InteractionRules, InteractionSource, InteractionType, classify_action,
+    InteractionRules, InteractionSource, InteractionType, classify_action, classify_action_system_name,
 )
 from Application.mindbox.records import ActionRecord, OrderLineRecord, ProductKey
 
@@ -32,6 +32,35 @@ def line():
         product_name="SECRET_PRODUCT_NAME", quantity=Decimal("2.50"),
         base_price_per_item=Decimal("100.00"), price_of_line=Decimal("250.00"), line_status="CP",
     )
+
+
+def test_register_unmapped_matches_full_record_diagnostics(action):
+    name = "UstanovkaSpiskaProduktovV"
+    fast, full = InteractionBuilder(), InteractionBuilder()
+    snapshot = fast.diagnostics
+    for _ in range(2):
+        fast.record_unmapped_action(name)
+        full.from_action(replace(action, action_system_name=name))
+    assert fast.diagnostics == full.diagnostics
+    assert fast.diagnostics.actions_total == fast.diagnostics.actions_unmapped == 2
+    assert snapshot.actions_total == 0
+    assert fast.diagnostics.total_interactions == fast.diagnostics.actions_malformed == 0
+
+
+@pytest.mark.parametrize("name", ["Custom.View", "Custom.Favorite", None, "", "  ", []])
+def test_register_unmapped_rejects_mapped_or_invalid_without_mutation(name):
+    rules = InteractionRules(view_action_system_names={"Custom.View"}, favorite_action_system_names={"Custom.Favorite"})
+    builder = InteractionBuilder(rules)
+    before = builder.diagnostics
+    with pytest.raises(InteractionConfigError):
+        builder.record_unmapped_action(name)
+    assert builder.diagnostics == before
+
+
+@pytest.mark.parametrize("name", ["Custom.View", "Custom.Favorite", "ProsmotrProdukta", "Custom.View "])
+def test_string_classification_matches_record_with_custom_rules(action, name):
+    rules = InteractionRules(view_action_system_names={"Custom.View"}, favorite_action_system_names={"Custom.Favorite"})
+    assert classify_action_system_name(name, rules) == classify_action(replace(action, action_system_name=name), rules)
 
 
 @pytest.mark.parametrize("name", ["ProsmotrProdukta", "ProsmotrProduktaVApiMethod"])

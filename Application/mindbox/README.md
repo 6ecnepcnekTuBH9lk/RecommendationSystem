@@ -1590,3 +1590,61 @@ automated acceptance, or retention/pruning of older generations. Synthetic tests
 use temporary model roots, actual one-epoch training/save/reload/reconstruction,
 corrupted disk writes, sentinel current bytes, failures around the exact commit,
 rollback/external-change/report failures, and a competing OS process lock.
+
+## Finalize a complete daily prefix
+
+`finalize_chunked_training_batch_prefix` / CLI `finalize-prefix` creates a new
+complete batch from the maximum continuous initial sequence of days for which
+both actions and orders are READY. At least one whole day is required; a day with
+only READY actions is excluded. The source is loaded and validated again under
+the same OS writer lock used by resume, so the two operations cannot overlap.
+Endpoint/operation fingerprint must match the source; credential rotation is allowed.
+
+Actions/orders keep their existing `TrainingBatchExport` references. No raw files
+are copied or re-exported. Existing directory/part validation permits shared raw
+references and retains all traversal protections. Only customer_merges is exported
+anew, using the original merge_since and the shorter interaction_until, through
+the existing client start/wait/download and RawExportStorage contracts.
+
+After merges publication, the new batch is validated with `require_complete=True`.
+A separate UUID directory receives an atomic state.json followed by atomic
+manifest.json, the final commit marker (temp, flush, fsync, replace). Source state
+bytes and its FAILED/PENDING history are never changed; no source manifest is
+created. The original batch remains resumable. If merges fail, no new final
+manifest is published; any already committed raw export follows the storage
+contract. If final manifest publication fails, the new READY state can remain for
+recovery; its temporary JSON files are cleaned. Ctrl+C exits 130 without changing
+the source. The command does not train, prepare, load Customers or export recommendations.
+
+Manual command for the current unfinished batch (this is a LIVE merges request;
+not run automatically by Codex):
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py finalize-prefix `
+  --state ".\ВходныеДанные\MindboxRaw\training_batches\149506b62787416492389a0b547a2c39\state.json" `
+  --timeout 3600
+```
+
+With the stated six READY days, the resulting window is 2026-08-01 → 2026-08-07,
+and the only export window is customer_merges 2025-01-01 → 2026-08-07. The actual
+cutoff is computed under lock from the state at invocation. CLI output reports
+source/new batch IDs, ready-day count, final window and manifest path, never
+customer/product IDs, signed URLs or credentials. Pass the **new** manifest to
+the existing offline prepare/preflight workflow.
+
+### Preparation: classify action names before adapting products
+
+Mindbox preparation first reads only the required `actionTemplate.ids.systemName`
+with `adapt_action_system_name`, then uses the current builder's rules through
+`classify_action_system_name`. Unmapped actions register exactly one total/unmapped
+event and one entry in `unmapped_action_system_names`, without adapting identities,
+products/categories, resolving products or creating interactions. Thus an unmapped
+`UstanovkaSpiskaProduktovV` with `product.ids.website` cannot block preparation.
+The returned preparation diagnostics include an immutable unmapped-name mapping.
+
+Mapped VIEW/FAVORITE events still use the full strict adapter. Unsupported product
+namespaces still raise AdapterError, including in diagnose mode. Missing required
+action system names also remain errors. Classification lists, ProductKey and
+ProductResolver namespaces, malformed mapped policy, weights, dates, quality gate
+and legacy CSV behavior are unchanged. The standalone full `adapt_action` remains
+strict regardless of whether its action name is mapped.

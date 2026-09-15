@@ -67,6 +67,66 @@ def run(data, cfg=None, diagnose=False):
         train_config=cfg or legacy.TrainConfig(), diagnose=diagnose)
 
 
+@pytest.mark.parametrize("payload", [[{"ids": {"website": "synthetic"}}], {"invalid": "SECRET"},
+                                     [None], [{"ids": {"offline1C": []}}]])
+@pytest.mark.parametrize("diagnose", [False, True])
+def test_unmapped_payload_never_reaches_full_adapter_or_resolver(data, monkeypatch, payload, diagnose):
+    baseline = run(data, diagnose=diagnose)
+    name = "UstanovkaSpiskaProduktovV"
+    # Identity/datetime/categories are irrelevant too; only the name is required.
+    data[0]["actions"].extend([{"actionTemplate": {"ids": {"systemName": name}},
+                               "products": payload, "productCategories": False}] * 2)
+    adapt = pipeline.adapt_action
+    calls = []
+    def checked(raw, resolver):
+        assert raw["actionTemplate"]["ids"]["systemName"] != name
+        calls.append(raw)
+        return adapt(raw, resolver)
+    monkeypatch.setattr(pipeline, "adapt_action", checked)
+    result = run(data, diagnose=diagnose)
+    d, b = result.diagnostics, baseline.diagnostics
+    assert len(calls) == 10
+    assert d.actions == b.actions + 2
+    assert d.unmapped_actions == b.unmapped_actions + 2
+    assert d.unmapped_action_system_names == {name: 2}
+    assert d.malformed_actions == b.malformed_actions == 0
+    assert (d.view_interactions, d.favorite_interactions) == (b.view_interactions, b.favorite_interactions)
+    assert d.resolution == b.resolution  # No resolver calls/counters for the skipped products.
+    assert result.prepared_data.mappings == baseline.prepared_data.mappings
+    assert result.complete
+    with pytest.raises(TypeError):
+        d.unmapped_action_system_names[name] = 99
+
+
+@pytest.mark.parametrize("name", ["ProsmotrProdukta", "DobavlenieProduktaVSpisokVOperaciiDobavlenie"])
+@pytest.mark.parametrize("diagnose", [False, True])
+def test_mapped_website_products_still_fail_adaptation(data, name, diagnose):
+    raw = data[0]["actions"][0]
+    raw["actionTemplate"]["ids"]["systemName"] = name
+    raw["products"] = [{"ids": {"website": "SECRET"}}]
+    with pytest.raises(AdapterError, match="product.ids"):
+        run(data, diagnose=diagnose)
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_preparation_prefilter_uses_builder_custom_rules(data, monkeypatch, mapped):
+    from Application.interactions import InteractionBuilder, InteractionRules
+    name = "UstanovkaSpiskaProduktovV"
+    rules = InteractionRules(view_action_system_names={name} if mapped else set(), favorite_action_system_names=set())
+    builder = InteractionBuilder(rules)
+    monkeypatch.setattr(pipeline, "InteractionBuilder", lambda: builder)
+    raw = data[0]["actions"][0]
+    raw["actionTemplate"]["ids"]["systemName"] = name
+    raw["products"] = [{"ids": {"website": "SECRET"}}]
+    if mapped:
+        with pytest.raises(AdapterError):
+            run(data, diagnose=True)
+    else:
+        result = run(data)
+        assert result.diagnostics.unmapped_actions == 10
+        assert result.diagnostics.view_interactions == result.diagnostics.favorite_interactions == 0
+
+
 @pytest.mark.parametrize("custom", [False, True])
 def test_end_to_end_raw_vs_legacy_equal_date_order_and_custom_weights(data, tmp_path, custom):
     cfg = legacy.TrainConfig(data_dir=str(tmp_path), **(

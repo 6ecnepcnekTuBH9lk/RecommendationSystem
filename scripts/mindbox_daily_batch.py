@@ -1,4 +1,4 @@
-"""Daily batch CLI. Only export-daily/resume contact Mindbox; never train."""
+"""Daily batch CLI. export-daily/resume/finalize-prefix contact Mindbox; never train."""
 
 import argparse
 from datetime import datetime, timezone
@@ -39,6 +39,7 @@ def main(argv=None):
     from Application.mindbox.daily_training_batch import (
         ChunkedBatchError, create_chunked_training_batch, resume_chunked_training_batch,
         load_chunked_training_batch, prepare_training_data_from_chunked_batch,
+        finalize_chunked_training_batch_prefix,
     )
     from Application.mindbox.training_batch import TrainingBatchWindow
     from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT, RawExportError
@@ -51,18 +52,19 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     export = commands.add_parser("export-daily", help="LIVE: start daily exports")
     resume = commands.add_parser("resume", help="LIVE: continue unfinished components")
+    prefix = commands.add_parser("finalize-prefix", help="LIVE: new complete prefix; export only customer merges")
     status = commands.add_parser("status", help="Offline state inspection")
     validate = commands.add_parser("validate", help="Offline final manifest validation")
     prepare = commands.add_parser("prepare", help="Offline preparation from final manifest")
-    for command in (export, resume, status, validate, prepare):
+    for command in (export, resume, prefix, status, validate, prepare):
         command.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
-    for command in (export, resume):
+    for command in (export, resume, prefix):
         command.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env")
         command.add_argument("--timeout", type=float, default=3600)
         command.add_argument("--poll-interval", type=float, default=5)
     for name in ("since", "until", "merge-since"):
         export.add_argument("--" + name, required=True)
-    for command in (resume, status):
+    for command in (resume, prefix, status):
         command.add_argument("--state", type=Path, required=True)
     for command in (validate, prepare):
         command.add_argument("--manifest", type=Path, required=True)
@@ -71,7 +73,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     state = getattr(args, "state", None)
     try:
-        if args.command in ("export-daily", "resume"):
+        if args.command in ("export-daily", "resume", "finalize-prefix"):
             if args.command == "export-daily":
                 def date(value, format):
                     return datetime.strptime(value, format).replace(tzinfo=timezone.utc)
@@ -82,9 +84,21 @@ def main(argv=None):
                 if args.command == "export-daily":
                     batch = create_chunked_training_batch(client, raw_root=args.raw_root, window=window,
                                                            timeout=args.timeout, poll_interval=args.poll_interval)
-                else:
+                elif args.command == "resume":
                     batch = resume_chunked_training_batch(client, state_path=state, raw_root=args.raw_root,
                                                            timeout=args.timeout, poll_interval=args.poll_interval)
+                else:
+                    batch = finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=args.raw_root,
+                                                                   timeout=args.timeout, poll_interval=args.poll_interval)
+            if args.command == "finalize-prefix":
+                print(f"Source batch: {state.resolve().parent.name}")
+                print(f"Ready days: {batch.diagnostics['days_ready']}")
+                print(f"Final window: {batch.window.interaction_since.date()} -> {batch.window.interaction_until.date()}")
+                print("Customer merges: READY")
+                print(f"New batch: {batch.batch_id}")
+                print("Transport complete: True")
+                print(f"Manifest: {args.raw_root / 'training_batches' / batch.batch_id / 'manifest.json'}")
+                return 0
             state = args.raw_root / "training_batches" / batch.batch_id / "state.json"
             print_status(batch, state)
             print(f"Manifest: {state.parent / 'manifest.json'}")

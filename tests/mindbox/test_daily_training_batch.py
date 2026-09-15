@@ -57,6 +57,165 @@ def state_path(root):
     return path
 
 
+class PrefixClient(Client):
+    def download_export(self, name, urls, storage):
+        assert name in ("customer_merges", "actions", "orders")  # Never CustomersAPI.
+        key = {"customer_merges": "customerMerges", "actions": "customerActions", "orders": "orders"}[name]
+        records = []
+        if name == "actions":
+            stamp = self.calls[-1][1]["sinceDateTimeUtc"].replace(" ", "T") + ":00Z"
+            records = [{"ids": {"mindboxId": "SECRET_ACTION"}, "customer": {"ids": {"mindboxId": "SECRET_CUSTOMER"}},
+                "actionTemplate": {"ids": {"systemName": "ProsmotrProdukta"}},
+                "dateTimeUtc": stamp, "creationDateTimeUtc": stamp,
+                "products": [{"ids": {"offline1C": "123456_SECRET"}}]}]
+        def write(url, path):
+            path.write_text(json.dumps({key: records}), encoding="utf-8")
+        return storage.save_export(name, urls, write)
+
+
+def prefix_source(root, ready_days=6, partial_actions=False):
+    client = PrefixClient(fail=2 + ready_days * 2 + int(partial_actions))
+    window = TrainingBatchWindow(utc("2026-08-01"), utc("2026-08-14"), utc("2025-01-01"))
+    with pytest.raises(api.ChunkedBatchError):
+        api.create_chunked_training_batch(client, raw_root=root, window=window)
+    state = state_path(root)
+    if partial_actions:
+        batch = api.load_chunked_training_batch(state, raw_root=root)
+        api._atomic_write(state, replace(batch, components=tuple(
+            replace(c, status="PENDING") if c.status == "FAILED" else c for c in batch.components)))
+    return state
+
+
+@pytest.mark.parametrize("partial_actions", [False, True])
+def test_finalize_prefix_reuses_six_days_and_prepares(tmp_path, partial_actions, monkeypatch):
+    from Application.model import BPRMF as core
+    import shutil
+    import socket
+    monkeypatch.setattr(socket.socket, "connect", lambda *a: pytest.fail("No network"))
+    for name in ("train_prepared_data_with_metrics", "export_recommendations_excel", "prepare_training_data_from_csv"):
+        monkeypatch.setattr(core, name, lambda *a, **kw: pytest.fail("No training/export/CSV"))
+    monkeypatch.setattr(shutil, "copyfile", lambda *a, **kw: pytest.fail("No raw copies"))
+    state = prefix_source(tmp_path, partial_actions=partial_actions)
+    old = state.read_bytes()
+    source = api.load_chunked_training_batch(state, raw_root=tmp_path)
+    raw_before = {p: p.read_bytes() for p in tmp_path.glob("*/*/*_part_*.json")}
+    client = PrefixClient()
+    final = api.finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=tmp_path)
+    assert client.calls == [("customer_merges", {"sinceDateTimeUtc": "2025-01-01 00:00", "tillDateTimeUtc": "2026-08-07 00:00"})]
+    assert final.batch_id != source.batch_id
+    assert final.diagnostics["days_ready"] == 6
+    assert final.window.interaction_until == utc("2026-08-07")
+    assert final.components[1:] == source.components[1:13]
+    assert final.components[0].export.relative_directory != source.components[0].export.relative_directory
+    assert state.read_bytes() == old
+    assert not state.with_name("manifest.json").exists()
+    assert all(p.read_bytes() == data for p, data in raw_before.items())
+    manifest = tmp_path / "training_batches" / final.batch_id / "manifest.json"
+    assert api.load_chunked_training_batch(manifest, raw_root=tmp_path, require_complete=True) == final
+    assert api.load_chunked_training_batch(manifest.with_name("state.json"), raw_root=tmp_path) == final
+    catalog = tmp_path / "Номенклатура.csv"
+    catalog.write_text("КодНоменклатуры\n123456\n", encoding="utf-8-sig")
+    prepared = api.prepare_training_data_from_chunked_batch(final, raw_root=tmp_path, catalog_path=catalog,
+        train_config=core.TrainConfig(data_dir=str(tmp_path)), diagnose=True)
+    assert prepared.diagnostics.view_interactions == 12  # Two published parts per day.
+    assert all(not (tmp_path / f"{name}.csv").exists() for name in ("Заказы", "Просмотры", "Избранное"))
+
+
+def test_finalize_prefix_minimum_day_and_source_lock(tmp_path):
+    state = prefix_source(tmp_path, ready_days=0, partial_actions=True)
+    client = PrefixClient()
+    with pytest.raises(TrainingBatchError, match="one complete"):
+        api.finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=tmp_path)
+    with api._writer_lock(state.parent):
+        with pytest.raises(TrainingBatchError, match="writer"):
+            api.finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=tmp_path)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("failure", ["start", "wait", "download", "cancel"])
+def test_finalize_prefix_failure_does_not_publish_or_change_source(tmp_path, monkeypatch, failure):
+    state = prefix_source(tmp_path, ready_days=1)
+    old = state.read_bytes()
+    client = PrefixClient()
+    def fail(*a, **kw):
+        raise KeyboardInterrupt() if failure == "cancel" else RuntimeError(" ".join(SECRETS))
+    monkeypatch.setattr(client, {"start": "start_export", "wait": "wait_for_export", "download": "download_export",
+                                "cancel": "wait_for_export"}[failure], fail)
+    with pytest.raises(KeyboardInterrupt if failure == "cancel" else TrainingBatchError):
+        api.finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=tmp_path)
+    assert not list(tmp_path.glob("training_batches/*/manifest.json"))
+    assert state.read_bytes() == old
+
+
+@pytest.mark.parametrize("damage", ["traversal", "config", "old_merges"])
+def test_finalize_prefix_validation_protections(tmp_path, monkeypatch, damage):
+    state = prefix_source(tmp_path, ready_days=1)
+    client = PrefixClient()
+    if damage == "traversal":
+        data = json.loads(state.read_text(encoding="utf-8"))
+        data["components"][1]["export"]["relative_directory"] = "../outside"
+        state.write_text(json.dumps(data), encoding="utf-8")
+    elif damage == "config":
+        client.config.endpoint_id = "other"
+    else:
+        batch = api.load_chunked_training_batch(state, raw_root=tmp_path)
+        parts = api.part_files(tmp_path / batch.components[0].export.relative_directory, "customer_merges")
+        monkeypatch.setattr(client, "download_export", lambda *a, **kw: parts)
+    old = state.read_bytes()
+    with pytest.raises(TrainingBatchError):
+        api.finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=tmp_path)
+    assert state.read_bytes() == old
+    assert not list(tmp_path.glob("training_batches/*/manifest.json"))
+    if damage != "old_merges":
+        assert client.calls == []
+
+
+def test_finalize_prefix_atomic_commit_and_lock_against_resume(tmp_path, monkeypatch):
+    state = prefix_source(tmp_path, ready_days=1)
+    old = state.read_bytes()
+    client = PrefixClient()
+    start = client.start_export
+    def locked_start(*a):
+        with pytest.raises(TrainingBatchError, match="writer"):
+            api.resume_chunked_training_batch(PrefixClient(), state_path=state, raw_root=tmp_path)
+        return start(*a)
+    monkeypatch.setattr(client, "start_export", locked_start)
+    original = api.os.replace
+    def fail_manifest(source, target):
+        if Path(target).name == "manifest.json":
+            assert Path(target).with_name("state.json").exists()
+            raise OSError("SecretKey")
+        return original(source, target)
+    monkeypatch.setattr(api.os, "replace", fail_manifest)
+    with pytest.raises(TrainingBatchError):
+        api.finalize_chunked_training_batch_prefix(client, state_path=state, raw_root=tmp_path)
+    assert state.read_bytes() == old
+    assert not list(tmp_path.glob("training_batches/*/manifest.json"))
+    assert not list(tmp_path.glob("training_batches/*/.state-*.tmp"))
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_finalize_prefix_cli_safe_output(tmp_path, monkeypatch, capsys, cancel):
+    import Application.mindbox as mindbox
+    state = prefix_source(tmp_path)
+    old = state.read_bytes()
+    client = PrefixClient()
+    if cancel:
+        def interrupt(*a, **kw):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(client, "start_export", interrupt)
+    monkeypatch.setattr(mindbox.MindboxConfig, "from_env", lambda *a: client.config)
+    monkeypatch.setattr(mindbox, "MindboxClient", lambda *a: client)
+    assert main(["finalize-prefix", "--state", str(state), "--raw-root", str(tmp_path), "--timeout", "3600"]) == (130 if cancel else 0)
+    output = capsys.readouterr()
+    assert all(secret not in output.out + output.err for secret in SECRETS)
+    if not cancel:
+        assert "Ready days: 6" in output.out
+        assert "Final window: 2026-08-01 -> 2026-08-07" in output.out
+    assert state.read_bytes() == old
+    assert not state.with_name("manifest.json").exists()
+
+
 @pytest.mark.parametrize("since,until,count", [("2026-08-01", "2026-08-02", 1),
     ("2026-08-01", "2026-08-08", 7), ("2026-01-31", "2026-02-02", 2),
     ("2025-12-31", "2026-01-02", 2), ("2024-02-28", "2024-03-01", 2)])

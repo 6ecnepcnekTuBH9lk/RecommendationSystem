@@ -72,10 +72,14 @@ DEFAULT_RULES = InteractionRules()
 
 
 def classify_action(action: ActionRecord, rules: InteractionRules = DEFAULT_RULES) -> InteractionType | None:
+    return classify_action_system_name(action.action_system_name, rules)
+
+
+def classify_action_system_name(system_name: str, rules: InteractionRules = DEFAULT_RULES) -> InteractionType | None:
     """Только точное совпадение. Классификация сама по себе не создаёт interactions."""
-    if action.action_system_name in rules.view_action_system_names:
+    if system_name in rules.view_action_system_names:
         return InteractionType.VIEW
-    if action.action_system_name in rules.favorite_action_system_names:
+    if system_name in rules.favorite_action_system_names:
         return InteractionType.FAVORITE
     return None
 
@@ -131,13 +135,22 @@ class InteractionBuilder:
             malformed_action_system_names=dict(sorted(self._malformed.items())),
         )
 
-    def from_action(self, action: ActionRecord) -> tuple[InteractionRecord, ...]:
+    def record_unmapped_action(self, system_name: str) -> None:
+        """Register an unmapped event without adapting irrelevant payload fields."""
+        if not isinstance(system_name, str) or not system_name.strip():
+            raise InteractionConfigError("Unmapped action requires a non-empty system name")
+        if classify_action_system_name(system_name, self.rules) is not None:
+            raise InteractionConfigError("Mapped action cannot be registered as unmapped")
         self._counts["actions_total"] += 1
+        self._counts["actions_unmapped"] += 1
+        self._unmapped[system_name] += 1
+
+    def from_action(self, action: ActionRecord) -> tuple[InteractionRecord, ...]:
         kind = classify_action(action, self.rules)
         if kind is None:
-            self._counts["actions_unmapped"] += 1
-            self._unmapped[action.action_system_name] += 1
+            self.record_unmapped_action(action.action_system_name)
             return ()
+        self._counts["actions_total"] += 1
         counter_name = "view" if kind is InteractionType.VIEW else "favorite"
         self._counts["actions_" + counter_name] += 1
         if not action.products:

@@ -7,8 +7,8 @@ from types import MappingProxyType
 from typing import Protocol
 from .interaction_analytics import AnalyticsCollector, load_catalog_kinds
 
-from Application.interactions import InteractionBuilder, InteractionBuildError
-from Application.mindbox.adapters import adapt_action, adapt_customer_merge, adapt_order
+from Application.interactions import InteractionBuilder, InteractionBuildError, classify_action_system_name
+from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
 from Application.mindbox.identity import CustomerIdResolver
 from Application.mindbox.raw_reader import iter_export
 from Application.product_resolution import ProductResolver, ProductResolutionDiagnostics, load_catalog
@@ -41,10 +41,13 @@ class MindboxPreparationDiagnostics:
     orders: int = 0
     actions_view: int = 0
     actions_favorite: int = 0
+    unmapped_action_system_names: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(self, "malformed_action_system_names",
                            MappingProxyType(dict(self.malformed_action_system_names)))
+        object.__setattr__(self, "unmapped_action_system_names",
+                           MappingProxyType(dict(self.unmapped_action_system_names)))
 
 
 @dataclass(frozen=True, repr=False)
@@ -117,6 +120,10 @@ def _prepare_training_data_from_mindbox_sources(
     def events():
         nonlocal order_count
         for raw in sources("actions", actions_export_dirs):
+            system_name = adapt_action_system_name(raw)
+            if classify_action_system_name(system_name, builder.rules) is None:
+                builder.record_unmapped_action(system_name)
+                continue
             action = adapt_action(raw, customers)
             try:
                 interactions = builder.from_action(action)
@@ -150,6 +157,7 @@ def _prepare_training_data_from_mindbox_sources(
         orders=order_count,
         actions_view=interactions.actions_view,
         actions_favorite=interactions.actions_favorite,
+        unmapped_action_system_names=interactions.unmapped_action_system_names,
     )
     return MindboxPreparationResult(prepared, diagnostics,
                                     not (interactions.actions_malformed or resolution.total.unresolved))

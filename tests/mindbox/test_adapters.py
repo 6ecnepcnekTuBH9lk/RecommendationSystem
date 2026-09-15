@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from Application.mindbox.adapters import (
-    AdapterError, adapt_action, adapt_customer, adapt_customer_merge, adapt_order,
+    AdapterError, adapt_action, adapt_action_system_name, adapt_customer, adapt_customer_merge, adapt_order,
 )
 from Application.mindbox.identity import CustomerIdResolver
 from Application.mindbox.raw_reader import EXPORT_ROOTS, RawExportError, iter_export
@@ -17,6 +17,25 @@ from scripts import mindbox_adapter_smoke as cli
 
 
 STAMP = "2026-01-01T12:30:45.123456Z"
+
+
+@pytest.mark.parametrize("value", [None, "", " ", 42, [], {"SECRET": "value"}])
+def test_minimal_action_name_stays_strict_and_safe(value):
+    with pytest.raises(AdapterError) as exc:
+        adapt_action_system_name({"actionTemplate": {"ids": {"systemName": value}}})
+    assert "SECRET" not in str(exc.value)
+    with pytest.raises(AdapterError):
+        adapt_action_system_name({})
+
+
+def test_minimal_name_preserves_exact_text_and_full_adapter_remains_strict(action, resolver):
+    name = "UstanovkaSpiskaProduktovV"
+    action["actionTemplate"]["ids"]["systemName"] = name
+    action["products"] = [{"ids": {"website": "SECRET"}}]
+    assert adapt_action_system_name(action) == name
+    with pytest.raises(AdapterError, match="product.ids"):
+        adapt_action(action, resolver)
+    assert adapt_action_system_name({"actionTemplate": {"ids": {"systemName": " Custom "}}}) == " Custom "
 
 
 @pytest.fixture

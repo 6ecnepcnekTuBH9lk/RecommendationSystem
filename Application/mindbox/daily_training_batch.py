@@ -293,6 +293,62 @@ def resume_chunked_training_batch(client, *, state_path, raw_root, poll_interval
             raise ChunkedBatchError(state) from None
 
 
+def finalize_chunked_training_batch_prefix(client, *, state_path, raw_root, poll_interval=5.0, timeout=3600.0):
+    """Publish a separate complete prefix, exporting only merges for its cutoff.
+
+    Source state is read under the same OS lock as resume and is never rewritten.
+    Existing interaction export entries are immutable references, not copied data.
+    """
+    state = Path(state_path).resolve()
+    root = Path(raw_root).resolve()
+    _poll_settings(poll_interval, timeout)
+    load_chunked_training_batch(state, raw_root=root)
+    if state.name != "state.json":
+        raise TrainingBatchError("Prefix finalization requires state.json")
+    with _writer_lock(state.parent):
+        source = load_chunked_training_batch(state, raw_root=root)
+        if (_fingerprint(client.config) != source.config_fingerprint or any(
+                c.operation != client.config.operations[c.name] for c in source.components)):
+            raise TrainingBatchError("Endpoint/operation config differs from saved batch")
+        ready = []
+        for index in range(1, len(source.components), 2):
+            pair = source.components[index:index + 2]
+            if not all(c.status == "READY" for c in pair):
+                break
+            ready.extend(pair)
+        if not ready:
+            raise TrainingBatchError("At least one complete initial day is required")
+        window = TrainingBatchWindow(source.window.interaction_since, ready[-1].until, source.window.merge_since)
+        try:
+            operation = client.config.operations["customer_merges"]
+            payload = {"sinceDateTimeUtc": window.merge_since.strftime("%Y-%m-%d %H:%M"),
+                       "tillDateTimeUtc": window.interaction_until.strftime("%Y-%m-%d %H:%M")}
+            export_id = client.start_export(operation, payload)
+            urls = client.wait_for_export(operation, export_id, poll_interval=poll_interval, timeout=timeout)
+            parts = client.download_export("customer_merges", urls, storage=RawExportStorage(root))
+            if not parts or len({Path(p).resolve().parent for p in parts}) != 1:
+                raise TrainingBatchError("Invalid published parts")
+            relative = Path(parts[0]).resolve().parent.relative_to(root).as_posix()
+            if relative == source.components[0].export.relative_directory:
+                raise TrainingBatchError("Prefix requires a new customer merges export")
+            entry = TrainingBatchExport("customer_merges", export_id, operation, relative, len(parts))
+            merges = BatchComponent("customer_merges", window.merge_since, window.interaction_until,
+                                    operation, "READY", entry)
+            final = ChunkedTrainingBatch(uuid.uuid4().hex, datetime.now(timezone.utc), window,
+                                         source.config_fingerprint, (merges, *ready), True)
+            validate_chunked_training_batch(final, raw_root=root, require_complete=True)
+            directory = _batch_directory(root, final.batch_id)
+            directory.mkdir()
+            with _writer_lock(directory):
+                _atomic_write(directory / "state.json", final)
+                _atomic_write(directory / "manifest.json", final)  # Final commit marker, written last.
+            return final
+        except Exception:
+            # Transport exceptions can contain signed URLs/credentials. Keep the
+            # source intact and let KeyboardInterrupt reach the CLI (exit 130).
+            raise TrainingBatchError("Prefix finalization failed; source batch unchanged") from None
+
+
 def prepare_training_data_from_chunked_batch(batch, *, raw_root, catalog_path, train_config, diagnose=False):
     from Application.model.mindbox_training_preparation import _prepare_training_data_from_mindbox_sources
 
