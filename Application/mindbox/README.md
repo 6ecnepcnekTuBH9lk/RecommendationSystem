@@ -1367,3 +1367,104 @@ while ($p = Get-Process -Id $inspectPid -ErrorAction SilentlyContinue) {
 
 The live several-GB target still needs this measurement; no new Customers export
 is needed. Seen/analytics/training/checkpoint/export semantics remain unchanged.
+
+## M02-16: full offline recommendation smoke
+
+`Application/model/mindbox_recommendation_smoke.py` and
+`scripts/mindbox_recommendation_smoke.py` implement acceptance using existing local
+artifacts. Run the CLI from the project root in a dedicated process: its scoped
+cwd/stdout changes are process-wide, so this entrypoint is not a GUI worker API.
+
+Pipeline:
+
+```text
+final Mindbox daily manifest -> prepare(diagnose=True) -> quality gate
+  PASS/WARN -> train_prepared_data_with_metrics
+  -> temporary production-format save -> reload
+  -> embedded SeenItemsIndex + InteractionAnalytics
+  + Customers snapshot -> streaming, model-aligned CustomerContactIndex
+  -> real mass recommendation export -> validate -> cleanup -> safe report
+  BLOCK -> no training, checkpoint or export
+```
+
+`complete=False` is not automatically BLOCK. Weights, split, LEGACY_DATE,
+features, evaluation, seasonal/stock filtering, conversion, loyalty and contact
+selection retain their existing behavior. Default smoke overrides: 2 epochs,
+CPU training, at most 100 export users. `--device cuda` optionally changes training
+device; recommendation export always uses CPU.
+
+All source paths are resolved before changing cwd. A `TemporaryDirectory` contains:
+
+```text
+<temp_root>/
+  ВходныеДанные/Номенклатура.csv   # only the catalog is copied
+  Настройки/                    # current settings copied if present
+  Модель/.staging/
+  Модель/runs/<generation>/mappings.json, bprmf.pt
+  Модель/current.json
+  recommendations.xlsx
+  format1.csv
+  Kanzler.ML.csv
+```
+
+`Config.data_dir` is an absolute temporary catalog directory. `Заказы.csv`,
+`Просмотры.csv`, and `Избранное.csv` are physically absent and checked before export.
+The new inference/export pathway does not require them when seen, analytics and
+contacts are supplied. Synthetic regression spies also forbid legacy sources,
+contact extraction, conversion, seen and activity CSV helpers.
+
+The orchestration calls the unchanged `BPRMF._save_artifacts` and `_load_artifacts`;
+there is no second checkpoint schema. Reload verifies embedded seen/analytics and
+their mapping dimensions. Contacts load only after serialization, align with the
+reloaded mappings, and never enter the checkpoint. Snapshot and training must
+reference the same merge export. Streaming Customers processing stays unchanged.
+
+Before/after snapshots compare existence, directory listings and SHA-256 file
+hashes of the real cwd's `Модель`. Its `current.json`, runs, staging and outputs
+must stay identical. cwd restoration runs in `finally` before temporary cleanup.
+Synthetic sentinel tests cover success, training/save/reload/contact/export/
+validation failures, and KeyboardInterrupt. Ctrl+C returns 130 after cleanup.
+Cleanup failures are reported as `CLEANUP_FAILED`, never as successful acceptance.
+
+Validation checks the real XLSX ZIP integrity, recommendation sheet header and
+row count; CSV existence, nonempty files, exact headers and logical record counts;
+cross-format counts and requested export limit. Headers-only files are valid when
+business filters exclude all products; the report then explicitly records zero
+rows. Validators do not log or extract contact values for diagnostics. All PII
+recommendation files and temporary model artifacts are deleted, including on
+exceptions. The CLI suppresses legacy free-text logs and prints only controlled
+stage messages, Customers progress counts, aggregates and safe error codes.
+
+The only persistent smoke artifact is:
+
+```text
+ВходныеДанные/MindboxReports/recommendation_smoke/<run_id>/report.json
+```
+
+Schema version 1 contains run/timestamp/batch/snapshot IDs, status/error code,
+quality level/permission/issue counts, dataset counts/completeness, training epochs
+and best metrics, artifact verification flags, aggregate contact coverage, export
+counts/flags, and cleanup confirmation. Later sections can be absent if an earlier
+stage fails. No mappings, customer/item identifiers, contacts, recommendation
+codes/scores, source paths, settings contents or raw exceptions are written.
+The shared shadow report writer uses same-directory temporary write, flush, fsync,
+`os.replace`, and `allow_nan=False`. A failed report write yields CLI exit 1 after
+temporary cleanup. Besides stage-specific failures, `QUALITY_BLOCK`, `CANCELLED`,
+`CLEANUP_FAILED` and `PRODUCTION_ISOLATION_FAILED` are safe machine-readable codes.
+
+Manual acceptance (not run automatically by Codex):
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_recommendation_smoke.py `
+  --training-manifest ".\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json" `
+  --profile-manifest ".\ВходныеДанные\MindboxRaw\customer_profile_snapshots\81d6d546865946d788c93e79be17de77\manifest.json" `
+  --catalog ".\ВходныеДанные\Номенклатура.csv" `
+  --epochs 2 --max-export-users 100 --device cpu
+```
+
+Send the final `Smoke`, `quality`, `dataset`, `training`, `artifact`, `contacts`,
+`export`, `cleanup`, and `Report` lines (or the safe report JSON). Expected successful
+flags: COMPLETED, embedded_seen/embedded_analytics=true,
+production_model_published=false, production_model_unchanged=true,
+interaction_csv_present_in_smoke_env=false, temporary_artifacts_removed=true.
+No API config, network export or production publication is involved.
