@@ -879,7 +879,11 @@ def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
 
 
 def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_items: SeenItemsIndex | None = None,
-                    analytics=None) -> None:
+                    analytics=None, model_dir="Модель", _before_commit=None, _publication_state=None) -> str:
+    # Internal hooks let production orchestration guard the final switch and
+    # observe an interrupted commit without duplicating serialization.
+    receipt = _publication_state if _publication_state is not None else {}
+    receipt.update(published=False, disk_validated=False, cleanup_failed=False)
 
     if seen_items is not None and (not isinstance(seen_items, SeenItemsIndex)
             or seen_items.num_users != len(maps.idx2user) or seen_items.num_items != len(maps.idx2item)):
@@ -887,7 +891,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
     if analytics is not None and (analytics.num_users != len(maps.idx2user) or analytics.num_items != len(maps.idx2item)):
         raise AnalyticsError("Analytics dimensions do not match mappings")
 
-    out_dir = os.path.join(os.getcwd(), "Модель")
+    out_dir = os.path.abspath(model_dir)
     _ensure_dir(out_dir)
     staging_root = os.path.join(out_dir, ".staging")
     runs_dir = os.path.join(out_dir, "runs")
@@ -895,6 +899,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
     _ensure_dir(runs_dir)
 
     generation = uuid.uuid4().hex
+    receipt["generation"] = generation
     staging_dir = os.path.join(staging_root, generation)
     generation_dir = os.path.join(runs_dir, generation)
     current_path = os.path.join(out_dir, "current.json")
@@ -904,7 +909,6 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
     )
 
     staging_created = False
-    generation_finalized = False
     manifest_temp_created = False
 
     try:
@@ -919,6 +923,8 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
                 f,
                 ensure_ascii=False,
             )
+            f.flush()
+            os.fsync(f.fileno())
 
         ckpt = {
             "model_type": "bprmf",
@@ -987,8 +993,21 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
         if not os.path.isfile(checkpoint_path) or os.path.getsize(checkpoint_path) <= 0:
             raise OSError("Failed to create a complete bprmf.pt checkpoint")
 
+        # Validate actual serialized bytes before a generation can become current.
+        with open(mappings_path, "r", encoding="utf-8") as f:
+            disk_mappings = json.load(f)
+        disk_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        _validate_model_artifacts(disk_mappings, disk_checkpoint)
+        if disk_mappings != saved_mappings:
+            raise ValueError("Serialized mappings differ from training mappings")
+        if seen_items is not None and seen_items_from_checkpoint(disk_checkpoint) is None:
+            raise ValueError("Serialized checkpoint lost embedded seen items")
+        if analytics is not None and analytics_from_checkpoint(disk_checkpoint) is None:
+            raise ValueError("Serialized checkpoint lost embedded analytics")
+        receipt["disk_validated"] = True
+        del disk_checkpoint
+
         os.rename(staging_dir, generation_dir)
-        generation_finalized = True
 
         with open(manifest_temp_path, "w", encoding="utf-8") as f:
             manifest_temp_created = True
@@ -996,26 +1015,37 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
             f.flush()
             os.fsync(f.fileno())
 
-        os.replace(manifest_temp_path, current_path)
+        if _before_commit is not None:
+            _before_commit()
+        os.replace(manifest_temp_path, current_path)  # The sole activation point.
+        receipt["published"] = True
         manifest_temp_created = False
-    except Exception:
-        if (
-            staging_created
-            and not generation_finalized
-            and os.path.isdir(staging_dir)
-        ):
-            try:
-                shutil.rmtree(staging_dir)
-            except OSError as cleanup_error:
-                _diagnose_artifact_cleanup_error(staging_dir, cleanup_error)
-
+        return generation
+    except BaseException:
+        # os.replace may have completed just before KeyboardInterrupt delivery.
+        # Never delete a generation that the current manifest references.
+        current_known = True
+        try:
+            with open(current_path, encoding="utf-8") as f:
+                receipt["published"] = receipt["published"] or json.load(f).get("generation") == generation
+        except FileNotFoundError:
+            pass
+        except (Exception, KeyboardInterrupt):
+            current_known = False
+            receipt["cleanup_failed"] = True
+        paths = []
+        if staging_created and os.path.isdir(staging_dir):
+            paths.append((staging_dir, shutil.rmtree))
+        if current_known and not receipt["published"] and os.path.isdir(generation_dir):
+            paths.append((generation_dir, shutil.rmtree))
         if manifest_temp_created and os.path.exists(manifest_temp_path):
+            paths.append((manifest_temp_path, os.remove))
+        for path, remove in paths:
             try:
-                os.remove(manifest_temp_path)
-            except OSError as cleanup_error:
-                _diagnose_artifact_cleanup_error(
-                    manifest_temp_path, cleanup_error
-                )
+                remove(path)
+            except (Exception, KeyboardInterrupt) as cleanup_error:
+                receipt["cleanup_failed"] = True
+                _diagnose_artifact_cleanup_error(path, cleanup_error)
         raise
 
 

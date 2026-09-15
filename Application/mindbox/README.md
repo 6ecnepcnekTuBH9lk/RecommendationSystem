@@ -1468,3 +1468,125 @@ flags: COMPLETED, embedded_seen/embedded_analytics=true,
 production_model_published=false, production_model_unchanged=true,
 interaction_csv_present_in_smoke_env=false, temporary_artifacts_removed=true.
 No API config, network export or production publication is involved.
+
+## M02-17: production Mindbox training and atomic publication
+
+`Application/model/mindbox_production_training.py` exposes
+`preflight_production_training(...)` and `train_and_publish_production_model(...)`.
+Both use a final daily manifest, raw root, catalog and ordinary `TrainConfig`.
+They have no argparse/PyQt dependency. Run in a dedicated process because legacy
+log suppression uses process-wide stdout/stderr redirection; cwd is not changed.
+
+Preflight validates and prepares with `diagnose=True`, evaluates the existing
+quality gate, and returns safe aggregates. It does not train, acquire a publication
+lock, write a report or touch `Модель`. PASS/WARN return CLI exit 0; BLOCK and
+preparation failures return 1. `complete=False` remains distinct from BLOCK.
+
+Publish holds a nonblocking OS lock throughout prepare, training and publication.
+The stable `.mindbox-production.lock` file sits beside the model directory (the
+project root for the CLI), contains one fixed byte, and has no PID/user metadata.
+Windows uses `msvcrt.locking`; POSIX uses `fcntl.flock`. File existence alone does
+not lock anything; process death releases ownership. A second writer gets LOCKED.
+
+PASS permits training; WARN requires `allow_warn=True` / CLI `--allow-warn`.
+Otherwise WARN_NOT_ACKNOWLEDGED stops before training. BLOCK always stops. This
+acknowledgement does not modify M02-11 thresholds or `training_allowed` semantics.
+Training uses the existing seed and `train_prepared_data_with_metrics` loop.
+Weights, sampling, holdout, LEGACY_DATE, features, evaluation and early stopping
+remain unchanged. The CLI has no epochs override: ordinary production defaults
+(currently 200 epochs) apply. Small epochs are only a direct core API test option.
+
+The artifact contains weights, mappings, features/item metadata, SeenItemsIndex
+and InteractionAnalytics. Both embedded indexes are mandatory for this pathway.
+Customers raw/snapshots and CustomerContactIndex are not loaded; contact email,
+phone and cards are not serialized. Training reads Mindbox raw and the catalog,
+never interaction CSV or `prepare_training_data_from_csv`. Recommendation export
+is a separate workflow and is not called after publication.
+
+Shared serializer hardening (also applies to existing callers):
+
+1. `_save_artifacts(..., model_dir="Модель")` accepts an explicit target, preserves
+   the relative default, and returns the generation UUID after commit. The CLI
+   always uses the absolute project model root and exposes no `--model-dir`.
+2. Write staging mappings/checkpoint and flush/fsync both files.
+3. Read mappings and checkpoint back from disk, run existing artifact validation,
+   compare mappings with training mappings, and verify supplied embedded indexes
+   survived serialization with valid dimensions.
+4. Rename staging into `runs/<generation>` only after readback passes.
+5. Write/fsync a temporary current manifest; check current again immediately
+   before replacing it. Internal guard/receipt arguments share this boundary
+   with orchestration; there is no duplicate checkpoint serializer.
+6. `os.replace(temp_current, current.json)` is the sole activation point. Schema
+   remains `{"generation": "..."}`. Old runs are retained.
+
+Production captures exact previous current bytes before preparation/training,
+checks again after training and immediately before commit, and aborts with
+CURRENT_MODEL_CHANGED if another publisher changed them. Current generation must
+be the 32-character lowercase UUID hex produced by the serializer; the previous
+checkpoint itself need not load. Missing current supports first publication.
+The lock coordinates this production entrypoint. The external-current checks
+also detect legacy writers, but are not an OS compare-and-swap: do not run an
+uncoordinated legacy publisher concurrently, including during rollback.
+
+Before-commit failures and KeyboardInterrupt clean this attempt's staging,
+temporary current and finalized unpublished run; previous runs/current remain
+untouched. A failed orphan cleanup sets `cleanup_failed`; it never activates the
+orphan. If current cannot be inspected reliably, cleanup conservatively retains
+the possible active generation. An interrupted atomic replace is reconciled by
+reading current, so cancellation after commit reports `published=True`. Ctrl+C
+returns 130; cancellation alone never rolls back a disk-validated committed model.
+
+After publication, orchestration checks current, reloads with the existing loader,
+validates dimensions and both embedded indexes, reconstructs the actual model,
+and checks current again. Verification failure restores previous manifest bytes
+atomically only if current still points to this attempt. For first publication it
+removes current. It then deletes only its unreferenced generation. An externally
+changed current is not rolled back. ROLLBACK_FAILED is explicit if restoration or
+cleanup fails; the returned published flag reflects whether this run remains current.
+
+`ProductionTrainingResult` is frozen, with immutable dataset/window snapshots,
+quality/training metrics, training/publication flags, previous/new generation,
+disk/post validation, rollback/cleanup/cancellation flags and a stable error code.
+Its repr excludes paths and source/quality details. Generation UUIDs are safe
+technical identities; user/product identities never enter result/report fields.
+
+Only publish writes an aggregate audit report:
+`ВходныеДанные/MindboxReports/production_training/<run_id>/report.json`.
+Schema v1 contains batch/window, quality issue counts/rates, dataset counts,
+the shadow config allowlist without paths, training metrics, publication flags/
+generations/error and embedded artifact flags/dimensions. It uses the shared atomic
+writer (same-directory temp, flush, fsync, replace, `allow_nan=False`). Raw errors,
+settings, contacts, mappings, paths, URLs and secrets are never logged or reported.
+Legacy free-text logs are suppressed; progress callbacks receive safe results.
+
+Audit publication is a separate commit. If report writing fails after a valid
+model commit, the model stays published. Result/CLI report `published=True`,
+`REPORT_FAILED`, `Audit report: FAILED`, exit 1. No automatic model rollback occurs.
+Other stable codes include QUALITY_BLOCK, WARN_NOT_ACKNOWLEDGED,
+PREPARATION_FAILED, TRAINING_FAILED, CURRENT_MODEL_CHANGED, ARTIFACT_FAILED,
+PUBLICATION_FAILED, POST_PUBLISH_VALIDATION_FAILED, ROLLBACK_FAILED, CANCELLED,
+and LOCKED.
+
+Safe manual preflight of the existing three-day acceptance batch (not run by Codex):
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_production_train.py preflight `
+  --manifest ".\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json" `
+  --catalog ".\ВходныеДанные\Номенклатура.csv"
+```
+
+Production command template, only after selecting a full production period:
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_production_train.py publish `
+  --manifest "<FINAL_PRODUCTION_BATCH_MANIFEST>" `
+  --catalog ".\ВходныеДанные\Номенклатура.csv" `
+  --device cpu --allow-warn
+```
+
+Do not publish the three-day `dfe6c68e1109410aa47aeb3342877629` acceptance batch.
+There is no default publish command, API request, real training/publication in
+automated acceptance, or retention/pruning of older generations. Synthetic tests
+use temporary model roots, actual one-epoch training/save/reload/reconstruction,
+corrupted disk writes, sentinel current bytes, failures around the exact commit,
+rollback/external-change/report failures, and a competing OS process lock.
