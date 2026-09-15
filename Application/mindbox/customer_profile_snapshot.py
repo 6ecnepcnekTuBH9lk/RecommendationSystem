@@ -9,7 +9,9 @@ from pathlib import Path
 import uuid
 
 from Application.customer_profiles import build_customer_contact_index
-from .adapters import adapt_customer, adapt_customer_merge
+from .adapters import adapt_customer_merge
+from .adapters.customer_contacts import adapt_customer_contact_candidate
+from .customers_stream import iter_customers_stream
 from .daily_training_batch import load_chunked_training_batch
 from .identity import CustomerIdResolver
 from .raw_reader import part_files, iter_export
@@ -142,7 +144,7 @@ def load_customer_profile_snapshot(manifest, *, raw_root):
         raise ProfileSnapshotError("Cannot load valid customer profile snapshot") from None
 
 
-def load_customer_contact_index(profile_manifest, model_mappings=None, *, raw_root):
+def load_customer_contact_index(profile_manifest, model_mappings=None, *, raw_root, progress=None, progress_every=100000):
     snapshot = load_customer_profile_snapshot(profile_manifest, raw_root=raw_root)
     root = Path(raw_root).resolve()
     resolver = CustomerIdResolver(adapt_customer_merge(raw) for raw in
@@ -153,5 +155,10 @@ def load_customer_contact_index(profile_manifest, model_mappings=None, *, raw_ro
         user_ids = model_mappings["idx2user"]
     else:
         user_ids = model_mappings.idx2user
-    records = (adapt_customer(raw, resolver) for raw in iter_export("customers", input_dir=root / snapshot.customers_directory))
-    return build_customer_contact_index(records, user_ids)
+    wanted = set(user_ids) if user_ids is not None else None
+    def records():
+        for raw in iter_customers_stream(input_dir=root / snapshot.customers_directory):
+            candidate = adapt_customer_contact_candidate(raw, resolver, wanted)
+            del raw
+            yield candidate
+    return build_customer_contact_index(records(), user_ids, progress=progress, progress_every=progress_every)

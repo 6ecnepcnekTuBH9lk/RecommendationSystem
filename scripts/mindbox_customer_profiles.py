@@ -29,6 +29,7 @@ def main(argv=None):
     for cmd in (validate, inspect):
         cmd.add_argument("--manifest", type=Path, required=True)
     inspect.add_argument("--model-dir", help="Optional model artifacts for aligned coverage")
+    inspect.add_argument("--progress-every", type=int, default=100000, help="Safe record progress interval; 0 disables")
     args = parser.parse_args(argv)
     try:
         if args.command == "export":
@@ -48,11 +49,17 @@ def main(argv=None):
             if args.model_dir is not None:
                 from Application.model.BPRMF import _load_artifacts
                 mappings, _ = _load_artifacts(args.model_dir)
-            index = load_customer_contact_index(args.manifest, mappings, raw_root=args.raw_root)
+            if args.progress_every < 0:
+                parser.error("--progress-every must be non-negative")
+            index = load_customer_contact_index(args.manifest, mappings, raw_root=args.raw_root,
+                progress=lambda count: print(f"Customers processed: {count}", flush=True), progress_every=args.progress_every)
             print("Coverage scope: model users" if mappings is not None else "Coverage scope: snapshot canonical profiles")
             for name, count in asdict(index.diagnostics).items():
                 print(f"{name}: {count}")
         return 0
+    except KeyboardInterrupt:
+        print("Customer profile operation cancelled", file=sys.stderr, flush=True)
+        return 130
     except Exception:
         print("Customer profile operation failed; invalid source, transport or metadata", file=sys.stderr)
         return 1

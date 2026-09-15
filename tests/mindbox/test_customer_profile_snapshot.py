@@ -70,7 +70,7 @@ def test_snapshot_export_validate_inspect_metadata_only(source, monkeypatch, cap
         return iterator(name, **kwargs)
     monkeypatch.setattr(api, "iter_export", read)
     index = api.load_customer_contact_index(manifest, {"idx2user": [SECRETS[0], "missing"]}, raw_root=root)
-    assert reads == ["customer_merges", "customers"]
+    assert reads == ["customer_merges"]  # Customers now use a dedicated incremental reader.
     assert index.diagnostics.matched_profiles == 1 and index.diagnostics.missing_profiles == 1
     assert index.contacts[0].discount_card == SECRETS[3]
     assert main(["inspect", "--manifest", str(manifest), "--raw-root", str(root)]) == 0
@@ -151,3 +151,21 @@ def test_export_failure_no_manifest(source):
     with pytest.raises(RuntimeError):
         api.create_customer_profile_snapshot(client, training_manifest=training, raw_root=root)
     assert not list(root.glob("customer_profile_snapshots/*/manifest.json"))
+
+
+def test_inspect_progress_and_cancellation(source, monkeypatch, capsys):
+    root, _, _ = source
+    _, manifest = create(source)
+    assert main(["inspect", "--manifest", str(manifest), "--raw-root", str(root), "--progress-every", "1"]) == 0
+    output = capsys.readouterr()
+    assert "Customers processed: 1" in output.out
+    assert all(s not in output.out + output.err for s in SECRETS)
+    before = {p: p.read_bytes() for p in root.rglob("*.json")}
+    def cancelled(**kwargs):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(api, "iter_customers_stream", cancelled)
+    assert main(["inspect", "--manifest", str(manifest), "--raw-root", str(root)]) == 130
+    output = capsys.readouterr()
+    assert "cancelled" in output.err
+    assert all(s not in output.out + output.err for s in SECRETS)
+    assert {p: p.read_bytes() for p in root.rglob("*.json")} == before

@@ -1289,3 +1289,81 @@ values. Tests mock transport and use temporary raw/model/output directories: can
 selection, card ambiguity, atomic write/failure, traversal/origin checks, safe CLI,
 no-contact checkpoint, full export with zero interaction CSV reads, contact-output
 parity and unchanged phone normalization/eligibility. No live API/training is run.
+
+### M02-15A: memory-safe Customers loading
+
+The former inspect was not truly streaming: generic iter_export called json.load
+and retained the complete Customers array for each part; adapt_customer deep-froze
+large nested fields; profile selection kept the full winning CustomerRecords until
+finalization. These overlapping object graphs explain the memory amplification.
+The observed 24+ GB peak is user-reported; no live RAM acceptance run is performed
+automatically. Exact attribution of bytes requires live profiling.
+
+Customers contact loading now uses dedicated customers_stream.py and pinned
+ijson==3.4.0.post0 (Requires-Python >=3.9; CPython 3.10 Windows wheel verified).
+The incremental parser consumes a 64-KiB buffer and builds one raw customer at a
+time, never the full root array. It preserves int/Decimal numbers, UTF-8 BOM,
+multipart order, strict root/record shape, duplicate-key and malformed JSON errors.
+It does not use bracket/string-search parsing. Raw memory is bounded by parser
+buffer plus the largest individual customer; unusually large single records remain
+a possible peak. Generic Actions/Orders/Merges readers are unchanged.
+
+The minimal contact adapter reuses identifier/text/timestamp/mapping/objects helpers
+and CustomerIdResolver, without calling adapt_customer or freeze_json. It ignores
+non-contact profile fields (and their semantic validation); JSON itself stays strict.
+Retained slotted candidates contain canonical identity, source priority, timestamp,
+three contact values and card diagnostic counts only. Card selection has ONE shared
+implementation for old typed records and the new projection. Whole-profile priority,
+timestamp/multipart tie-breaking, output index alignment and card rules are unchanged.
+
+Snapshot inspect retains one compact winner per canonical user, then constructs the
+same immutable contact index/diagnostics. No raw objects or CustomerRecord graphs are
+retained and no PII cache is written. Model alignment filters by resolved ID BEFORE
+contact projection, so only target-user candidates are retained. To preserve M02-15's
+EXACT global canonical_profiles diagnostic, a distinct-ID set is still retained in
+model mode; this is O(all canonical IDs), not strictly O(model users) total memory.
+Only profile/contact candidate memory is O(model users). Snapshot mode reuses winner
+keys for that count and does not keep a second ID set. This tradeoff preserves counts
+without probabilistic counting or a persisted PII cache.
+
+Inspect defaults to --progress-every 100000 (0 disables), printing flushed processed
+counts only. Ctrl+C propagates through reader/selection and CLI returns 130 with a
+safe cancellation message. It does not delete snapshot/raw files or create caches.
+The old code did not catch KeyboardInterrupt; prolonged full JSON decode and memory
+pressure are plausible causes of the reported sluggish cancellation, not confirmed
+OS-level measurements. Metadata-only validate remains unchanged.
+
+Tests prohibit Customers whole-file json.load, yield the first record before an
+invalid tail, validate multipart/error/empty/Decimal behavior, inspect retained
+candidate fields/counts, compare projection/selection/card/diagnostic parity, and
+exercise progress and cancellation. No RSS assertions or live API/training tests.
+
+Manual acceptance, reusing the EXISTING snapshot:
+
+```powershell
+.\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py inspect `
+  --manifest '.\ВходныеДанные\MindboxRaw\customer_profile_snapshots\81d6d546865946d788c93e79be17de77\manifest.json' `
+  --progress-every 100000
+```
+
+In a second PowerShell terminal, identify the inspect process and monitor RAM:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+  Where-Object { $_.CommandLine -like '*mindbox_customer_profiles.py inspect*' } |
+  Select-Object ProcessId, CommandLine
+
+$inspectPid = [int](Read-Host 'ProcessId процесса inspect')
+while ($p = Get-Process -Id $inspectPid -ErrorAction SilentlyContinue) {
+  [pscustomobject]@{
+    Time = Get-Date
+    WorkingSetGB = [math]::Round($p.WorkingSet64 / 1GB, 3)
+    PeakWorkingSetGB = [math]::Round($p.PeakWorkingSet64 / 1GB, 3)
+    PrivateGB = [math]::Round($p.PrivateMemorySize64 / 1GB, 3)
+  }
+  Start-Sleep -Seconds 2
+}
+```
+
+The live several-GB target still needs this measurement; no new Customers export
+is needed. Seen/analytics/training/checkpoint/export semantics remain unchanged.

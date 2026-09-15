@@ -95,58 +95,81 @@ def _card_number(card):
     return None, "invalid"
 
 
-def build_customer_contact_index(records, model_user_ids=None):
-    """Choose a whole profile: canonical source, latest timestamp, last export row.
+@dataclass(frozen=True, slots=True, repr=False)
+class ContactCandidate:
+    customer_id: str
+    is_canonical_source: bool
+    change_datetime_utc: datetime | None
+    email: str | None
+    mobile_phone: str | None
+    discount_card: str | None
+    card_counts: tuple[int, int, int, int, int]
 
-    Selection is streaming, retaining one winning record per relevant canonical user.
-    Without model mappings, inspect all canonical profiles in sorted-ID order.
-    """
+
+def contact_candidate_from_record(record):
+    activated = fallback = ambiguous = missing_numbers = invalid_numbers = 0
+    number, state = _card_number(record.last_activated_card)
+    cards = [_card_number(card) for card in record.discount_cards]
+    characterized = cards + ([(number, state)] if record.last_activated_card is not None else [])
+    missing_numbers += sum(status == "missing" for _, status in characterized)
+    invalid_numbers += sum(status == "invalid" for _, status in characterized)
+    if number is not None:
+        activated += 1
+    else:
+        numbers = {value for value, _ in cards if value is not None}
+        if len(numbers) == 1:
+            number = next(iter(numbers))
+            fallback += 1
+        elif len(numbers) > 1:
+            ambiguous += 1
+    return ContactCandidate(record.customer_id, record.source_customer_id == record.customer_id,
+        record.change_datetime_utc, record.email, record.mobile_phone, number,
+        (activated, fallback, ambiguous, missing_numbers, invalid_numbers))
+
+
+def build_customer_contact_index(records, model_user_ids=None, *, progress=None, progress_every=100000):
+    """Retain compact winners only; never retain raw mappings or CustomerRecords."""
+    if type(progress_every) is not int or progress_every < 0:
+        raise CustomerContactError("Invalid progress interval")
     if model_user_ids is not None:
         user_mapping_digest(model_user_ids)
         wanted = set(model_user_ids)
     else:
         wanted = None
     selected = {}
-    canonical_ids = set()
+    # Exact global canonical_profiles diagnostic needs distinct IDs, even with
+    # model alignment. No non-model profile/contact payloads are retained.
+    canonical_ids = set() if wanted is not None else None
     record_count = 0
     minimum = datetime.min.replace(tzinfo=timezone.utc)
     for order, record in enumerate(records):
         record_count += 1
-        canonical_ids.add(record.customer_id)
+        if progress is not None and progress_every and record_count % progress_every == 0:
+            progress(record_count)
+        if canonical_ids is not None:
+            canonical_ids.add(record.customer_id)
         if wanted is not None and record.customer_id not in wanted:
             continue
-        stamp = record.change_datetime_utc
+        candidate = record if isinstance(record, ContactCandidate) else contact_candidate_from_record(record)
+        stamp = candidate.change_datetime_utc
         if stamp is not None and (stamp.tzinfo is None or stamp.utcoffset() is None):
             raise CustomerContactError("Profile timestamps must be timezone aware")
-        priority = (record.source_customer_id == record.customer_id, stamp or minimum, order)
-        previous = selected.get(record.customer_id)
+        priority = (candidate.is_canonical_source, stamp or minimum, order)
+        previous = selected.get(candidate.customer_id)
         if previous is None or priority > previous[0]:
-            selected[record.customer_id] = (priority, record)
+            selected[candidate.customer_id] = (priority, candidate)
     user_ids = list(model_user_ids) if model_user_ids is not None else sorted(selected)
     contacts = []
-    activated = fallback = ambiguous = missing_numbers = invalid_numbers = 0
+    counts = [0] * 5
     for user in user_ids:
         if user not in selected:
             contacts.append(CustomerContact())
             continue
-        record = selected[user][1]
-        number, state = _card_number(record.last_activated_card)
-        cards = [_card_number(card) for card in record.discount_cards]
-        characterized = cards + ([(number, state)] if record.last_activated_card is not None else [])
-        missing_numbers += sum(status == "missing" for _, status in characterized)
-        invalid_numbers += sum(status == "invalid" for _, status in characterized)
-        if number is not None:
-            activated += 1
-        else:
-            numbers = {value for value, _ in cards if value is not None}
-            if len(numbers) == 1:
-                number = next(iter(numbers))
-                fallback += 1
-            elif len(numbers) > 1:
-                ambiguous += 1
-        contacts.append(CustomerContact(record.email, record.mobile_phone, number))
-    diagnostics = ContactDiagnostics(record_count, len(canonical_ids), len(user_ids), len(selected),
-        len(user_ids) - len(selected), sum(c.email is not None for c in contacts),
-        sum(c.mobile_phone is not None for c in contacts), sum(c.discount_card is not None for c in contacts),
-        activated, fallback, ambiguous, missing_numbers, invalid_numbers)
+        candidate = selected[user][1]
+        contacts.append(CustomerContact(candidate.email, candidate.mobile_phone, candidate.discount_card))
+        for i, value in enumerate(candidate.card_counts):
+            counts[i] += value
+    diagnostics = ContactDiagnostics(record_count, len(canonical_ids) if canonical_ids is not None else len(selected),
+        len(user_ids), len(selected), len(user_ids) - len(selected), sum(c.email is not None for c in contacts),
+        sum(c.mobile_phone is not None for c in contacts), sum(c.discount_card is not None for c in contacts), *counts)
     return CustomerContactIndex(tuple(contacts), user_mapping_digest(user_ids), diagnostics)
