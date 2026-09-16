@@ -212,7 +212,8 @@ def load_chunked_training_batch(path, *, raw_root, require_complete=False):
         raise TrainingBatchError("Cannot load valid daily state/manifest") from None
 
 
-def create_chunked_training_batch(client, *, raw_root, window, poll_interval=5.0, timeout=600.0):
+def create_chunked_training_batch(client, *, raw_root, window, poll_interval=5.0, timeout=600.0,
+                                  on_state_created=None):
     days = split_daily_windows(window.interaction_since, window.interaction_until)
     # Validate the full window and polling config before writing state or starting API calls.
     TrainingBatchWindow(**asdict(window))
@@ -230,6 +231,9 @@ def create_chunked_training_batch(client, *, raw_root, window, poll_interval=5.0
     state = directory / "state.json"
     try:
         _atomic_write(state, batch)
+        # Optional notification after the durable checkpoint, before any network request.
+        if on_state_created is not None:
+            on_state_created(state)
         return resume_chunked_training_batch(client, state_path=state, raw_root=raw_root,
                                              poll_interval=poll_interval, timeout=timeout)
     except (Exception, KeyboardInterrupt):

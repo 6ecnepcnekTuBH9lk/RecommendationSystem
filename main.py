@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QSizePolicy)
 
 from Application.tabs.data_processing_tab import create_input_data_widgets_tab
+from Application.tabs.data_loading_tab import create_data_loading_widgets_tab, apply_data_loading_theme
 from Application.tabs.train_model_tab import create_train_model_widgets_tab
 from Application.tabs.create_results_tab import create_result_widgets_tab
 from Application.settings.set_status import set_ready_status
@@ -87,7 +88,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
-        # Вкладка с загрузкой входных данных
+        # Получение согласованных наборов Mindbox
+        create_data_loading_widgets_tab(self)
+        # Legacy CSV: обработка входных данных
         create_input_data_widgets_tab(self)
         # Вкладка с обучением модели
         create_train_model_widgets_tab(self)
@@ -176,6 +179,8 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------ТОЧЕЧНЫЕ ПРАВКИ ВИДЖЕТОВ-----------------------------------------------
     def apply_local_widget_styles(self, is_dark: bool):
+
+        apply_data_loading_theme(self, is_dark)
 
         if is_dark:
 

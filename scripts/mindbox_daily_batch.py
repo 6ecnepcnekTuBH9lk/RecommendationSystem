@@ -83,7 +83,8 @@ def main(argv=None):
             with MindboxClient(config) as client:
                 if args.command == "export-daily":
                     batch = create_chunked_training_batch(client, raw_root=args.raw_root, window=window,
-                                                           timeout=args.timeout, poll_interval=args.poll_interval)
+                        timeout=args.timeout, poll_interval=args.poll_interval,
+                        on_state_created=lambda path: print(f"State: {path}", flush=True))
                 elif args.command == "resume":
                     batch = resume_chunked_training_batch(client, state_path=state, raw_root=args.raw_root,
                                                            timeout=args.timeout, poll_interval=args.poll_interval)

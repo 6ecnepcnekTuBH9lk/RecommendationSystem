@@ -57,6 +57,38 @@ def state_path(root):
     return path
 
 
+def test_state_created_callback_precedes_first_network_call(tmp_path, window):
+    client = Client()
+    notifications = []
+
+    def created(path):
+        assert not client.calls
+        batch = api.load_chunked_training_batch(path, raw_root=tmp_path)
+        assert all(c.status == "PENDING" for c in batch.components)
+        notifications.append(path)
+
+    api.create_chunked_training_batch(client, raw_root=tmp_path, window=window, on_state_created=created)
+    assert notifications == [state_path(tmp_path)]
+
+
+def test_cli_prints_durable_state_before_export(tmp_path, monkeypatch, capsys):
+    import Application.mindbox as mindbox
+    client = Client()
+    original = client.start_export
+
+    def start_export(operation, payload):
+        if not client.calls:
+            output = capsys.readouterr().out
+            assert f"State: {state_path(tmp_path)}" in output
+        return original(operation, payload)
+
+    client.start_export = start_export
+    monkeypatch.setattr(mindbox.MindboxConfig, "from_env", lambda *a: client.config)
+    monkeypatch.setattr(mindbox, "MindboxClient", lambda *a: client)
+    assert main(["export-daily", "--since", "2026-08-01", "--until", "2026-08-04",
+                 "--merge-since", "2025-01-01 00:00", "--raw-root", str(tmp_path)]) == 0
+
+
 class PrefixClient(Client):
     def download_export(self, name, urls, storage):
         assert name in ("customer_merges", "actions", "orders")  # Never CustomersAPI.
