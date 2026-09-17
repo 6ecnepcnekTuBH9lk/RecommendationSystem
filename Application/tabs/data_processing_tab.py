@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QComboBox, QListWidget, QFileDialog, QFrame,
     QAbstractItemView, QStackedWidget, QButtonGroup,
     QTableWidget, QHeaderView, QTableWidgetItem, QApplication,
-    QSpinBox)
+    QSpinBox, QSizePolicy, QGridLayout)
 
 from Application.settings.settings_and_filter import (save_order_filter_settings, order_filters_settings_path,
                                                       dataset_paths, update_filter_summary, get_selected_list_values,
@@ -40,6 +40,62 @@ def _refresh_filter_references_on_startup(aboba):
                 aboba,
                 f"Не удалось обновить справочник фильтров: {error}",
             )
+
+
+def create_csv_loading_section(aboba):
+    """Build the single legacy CSV section; handlers stay in this module."""
+    section = QWidget()
+    left_layout = QVBoxLayout(section)
+    left_layout.setContentsMargins(0, 0, 0, 0)
+    left_layout.setSpacing(12)
+    # Заголовок CSV-раздела
+    aboba.heading_load_data = QLabel("Загрузка CSV")
+    aboba.heading_load_data.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    aboba.heading_load_data.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    aboba.heading_load_data.setProperty("class", "sectionHeader")
+    left_layout.addWidget(aboba.heading_load_data, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+    # Выпадающий список с типом данных
+    aboba.combo_box_types = QComboBox()
+    aboba.combo_box_types.addItems(["Заказы клиентов из Mindbox",
+                                    "Просмотры товаров и категорий из Mindbox",
+                                    "Добавление товаров в избранное из Mindbox",
+                                    "Номенклатура из 1С", "Категории сайта из 1С", "Координаты городов и погода"
+                                    ])
+    aboba.combo_box_types.setStyleSheet("""QComboBox { margin: 0px 0px 5px 0px; }""")
+
+    # Выпадающий список с вариантом загрузки
+    aboba.combo_box_add_or_not = QComboBox()
+    aboba.combo_box_add_or_not.addItems(["Добавить новый / Обновить существующий",
+                                         "Добавить данные к существующему"])
+
+    fields = QGridLayout()
+    fields.setVerticalSpacing(10)
+    fields.setHorizontalSpacing(12)
+    fields.addWidget(aboba.combo_box_types, 0, 0)
+    fields.addWidget(aboba.combo_box_add_or_not, 1, 0)
+
+    # Кнопка "Загрузить файл"
+    aboba.btn_load = QPushButton(QIcon("Картинки/ЗагрузитьФайл.png"), " Загрузить файл")
+    aboba.btn_load.setIconSize(QSize(17, 17))
+    aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
+
+    fields.addWidget(aboba.btn_load, 0, 1, 2, 1, Qt.AlignmentFlag.AlignVCenter)
+    fields.setColumnStretch(0, 1)
+    left_layout.addLayout(fields)
+
+    # Статус загрузки файлов
+    aboba.status_files_layout = QHBoxLayout()
+    aboba.status_files_layout.setContentsMargins(0, 0, 0, 0)
+    aboba.status_files_layout.setSpacing(0)
+
+    aboba.status_files_container = QWidget()
+    aboba.status_files_container.setLayout(aboba.status_files_layout)
+
+    left_layout.addWidget(aboba.status_files_container)
+
+    update_file_status(aboba)
+    return section
 
 
 # -------------------------------------------ВКЛАДКА ОБРАБОТКА ДАТАСЕТА-------------------------------------------------
@@ -72,83 +128,12 @@ def create_input_data_widgets_tab(aboba):
     root.addWidget(separator)
     root.addWidget(right_wrap, 1)
 
-    row_layout = QHBoxLayout()
-
-    # ----- Левая часть -----
-    # Заголовок "Загрузка данных"
-    aboba.heading_load_data = QLabel("Загрузка данных")
-    aboba.heading_load_data.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                          aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
-    aboba.heading_load_data.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.heading_load_data.setStyleSheet("""
-        QLabel {
-                    background-color: #FAFAFA;
-                    padding: 7px 65px; 
-                    border-radius: 10px;
-                    border: 1px solid #C8C8C8;
-                    margin: 10px 0px;
-                }
-    """)
-    left_layout.addWidget(aboba.heading_load_data, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-    # Выпадающий список с типом данных
-    aboba.combo_box_types = QComboBox()
-    aboba.combo_box_types.addItems(["Заказы клиентов из Mindbox",
-                                    "Просмотры товаров и категорий из Mindbox",
-                                    "Добавление товаров в избранное из Mindbox",
-                                    "Номенклатура из 1С", "Категории сайта из 1С", "Координаты городов и погода"
-                                    ])
-    aboba.combo_box_types.setStyleSheet("""QComboBox { margin: 0px 0px 5px 0px; }""")
-
-    # Выпадающий список с вариантом загрузки
-    aboba.combo_box_add_or_not = QComboBox()
-    aboba.combo_box_add_or_not.addItems(["Добавить новый / Обновить существующий",
-                                         "Добавить данные к существующему"])
-
-    # Левая колонка: два выпадающих списка
-    left_col = QVBoxLayout()
-    left_col.addWidget(aboba.combo_box_types)
-    left_col.addWidget(aboba.combo_box_add_or_not)
-
-    # Кнопка "Загрузить файл"
-    aboba.btn_load = QPushButton(QIcon("Картинки/ЗагрузитьФайл.png"), " Загрузить файл")
-    aboba.btn_load.setIconSize(QSize(17, 17))
-    aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
-
-    # Правая колонка: кнопка
-    right_col = QVBoxLayout()
-    right_col.addWidget(aboba.btn_load)
-
-    # Собираем строку: слева списки, справа кнопка
-    row_layout.addLayout(left_col, stretch=5)
-    row_layout.addLayout(right_col, stretch=3)
-
-    left_layout.addLayout(row_layout)
-
-    # Статус загрузки файлов
-    aboba.status_files_layout = QHBoxLayout()
-    aboba.status_files_layout.setContentsMargins(0, 0, 0, 0)
-    aboba.status_files_layout.setSpacing(0)
-
-    aboba.status_files_container = QWidget()
-    aboba.status_files_container.setLayout(aboba.status_files_layout)
-
-    left_layout.addWidget(aboba.status_files_container)
-
     # Заголовок "Установка отбора"
     aboba.heading_filters = QLabel("Настройки и установка отбора")
-    aboba.heading_filters.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                        aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
+    aboba.heading_filters.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.heading_filters.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.heading_filters.setStyleSheet("""
-        QLabel {
-            background-color: #FAFAFA;
-            padding: 7px 65px;
-            border-radius: 10px;
-            border: 1px solid #C8C8C8;
-            margin: 0px 0px 5px 0px;
-        }
-    """)
+    aboba.heading_filters.setProperty("class", "sectionHeader")
+    aboba.heading_filters.setStyleSheet("QLabel { margin: 0px 0px 5px 0px; }")
     left_layout.addWidget(aboba.heading_filters, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # Панель фильтров
@@ -347,18 +332,9 @@ def create_input_data_widgets_tab(aboba):
     # ----- Правая часть -----
     # Заголовок "Статистика и анализ"
     aboba.heading_analysis = QLabel("Статистика и анализ")
-    aboba.heading_analysis.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                         aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
+    aboba.heading_analysis.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.heading_analysis.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.heading_analysis.setStyleSheet("""
-                QLabel {
-                    background-color: #FAFAFA;
-                    padding: 7px 65px; 
-                    border-radius: 10px;
-                    border: 1px solid #C8C8C8;
-                    margin: 10px 0px 10px 0px;
-                }
-            """)
+    aboba.heading_analysis.setProperty("class", "sectionHeader")
     right_layout.addWidget(aboba.heading_analysis, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # Переключатели (Заказы / Просмотры / Избранное)
@@ -460,9 +436,6 @@ def create_input_data_widgets_tab(aboba):
     aboba.btn_show_views.clicked.connect(lambda: aboba.stats_stack.setCurrentIndex(1))
     aboba.btn_show_favs.clicked.connect(lambda: aboba.stats_stack.setCurrentIndex(2))
 
-    # Обновляем статус загрузки
-    update_file_status(aboba)
-
     # Восстанавливаем настройки
     load_order_filter_settings(aboba)
 
@@ -541,6 +514,8 @@ def update_file_status(aboba):
     # Основная часть
     right_widget = QWidget()
     right_layout = QHBoxLayout()
+    right_layout.setContentsMargins(0, 0, 0, 0)
+    right_layout.setSpacing(3)
     right_widget.setLayout(right_layout)
 
     ok_path = "Картинки/Успех.png"
@@ -548,12 +523,13 @@ def update_file_status(aboba):
 
     items = list(files.items())
 
-    for i, (title, filename) in enumerate(items):
+    for title, filename in items:
         exists = os.path.exists(os.path.join(input_dir, filename))
 
         block = QWidget()
         block_l = QHBoxLayout()
-        block_l.setSpacing(4)  # расстояние между словом и иконкой
+        block_l.setContentsMargins(0, 0, 0, 0)
+        block_l.setSpacing(2)  # расстояние между словом и иконкой
         block.setLayout(block_l)
 
         text_lbl = QLabel(title)
@@ -573,9 +549,6 @@ def update_file_status(aboba):
         # Добавляем блок в правую часть
         right_layout.addWidget(block, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Stretch между блоками, чтобы растягивались по ширине
-        if i != len(items) - 1:
-            right_layout.addStretch(1)
 
     # добавляем правую часть с растягивающим коэффициентом
     aboba.status_files_layout.addWidget(right_widget, 1)

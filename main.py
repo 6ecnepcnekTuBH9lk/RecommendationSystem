@@ -1,19 +1,19 @@
 import sys
 from Application.theme.SwitchTheme import ThemeSwitch
 from collections import deque
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings, QByteArray
 from collections import defaultdict
 from PyQt6.QtNetwork import QNetworkAccessManager
 from PyQt6.QtGui import QIcon, QPixmap, QGuiApplication, QCursor
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget,
-                             QSizePolicy)
+                             QSizePolicy, QLayout)
 
 from Application.tabs.data_processing_tab import create_input_data_widgets_tab
-from Application.tabs.data_loading_tab import create_data_loading_widgets_tab, apply_data_loading_theme
+from Application.tabs.data_loading_tab import create_data_loading_widgets_tab
 from Application.tabs.train_model_tab import create_train_model_widgets_tab
 from Application.tabs.create_results_tab import create_result_widgets_tab
 from Application.settings.set_status import set_ready_status
-from Application.theme.apply_theme import build_palette, build_stylesheet
+from Application.theme.apply_theme import apply_app_theme
 
 
 class MainWindow(QMainWindow):
@@ -29,6 +29,9 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout()
+        # Long tab forms must not impose their full sizeHint on the window.
+        # Their deeper adaptation to small windows is a separate UI task.
+        main_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         central_widget.setLayout(main_layout)
 
         # Таймер для обновления статуса
@@ -125,11 +128,36 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(bottom_bar)
 
-        # Фиксированный размер окна FullHD
-        self.setFixedSize(1920, 1080)
+        self._window_settings = QSettings("RecommendationSystem", "RecommendationSystem")
+        self._restore_window_placement()
 
-        # Центрируем окно после построения интерфейса
-        QTimer.singleShot(0, self.center_on_cursor_screen)
+    def _restore_window_placement(self):
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        # Reserve room for native window decorations on small screens.
+        width = max(1, available.width() - 32) if available is not None else 1920
+        height = max(1, available.height() - 48) if available is not None else 1080
+        self.setMinimumSize(min(1280, width), min(900, height))
+        self.resize(max(self.minimumWidth(), min(1920, int(width * 0.9))),
+                    max(self.minimumHeight(), min(1080, int(height * 0.9))))
+
+        geometry = self._window_settings.value("window/geometry")
+        restored = isinstance(geometry, QByteArray) and self.restoreGeometry(geometry)
+        if restored:
+            state = self._window_settings.value("window/state")
+            if isinstance(state, QByteArray):
+                self.restoreState(state)
+        else:
+            QTimer.singleShot(0, self.center_on_cursor_screen)
+
+    def closeEvent(self, event):
+        # The loading controller consumes Close while its process stops;
+        # this handler runs only when the eventual close reaches MainWindow.
+        super().closeEvent(event)
+        if event.isAccepted():
+            self._window_settings.setValue("window/geometry", self.saveGeometry())
+            self._window_settings.setValue("window/state", self.saveState())
+            self._window_settings.sync()
 
     # ///////////////////////////////////////////ПОМОГАТОРЫ/////////////////////////////////////////////////////////////
     def my_set_ready_status(self):
@@ -165,166 +193,14 @@ class MainWindow(QMainWindow):
         if getattr(self, "_current_is_dark", None) == is_dark:
             return
 
-        self._current_is_dark = is_dark
-
         self.setUpdatesEnabled(False)
 
         try:
-            app.setPalette(build_palette(is_dark))
-            app.setStyleSheet(build_stylesheet(is_dark))
-            self.apply_local_widget_styles(is_dark)
+            apply_app_theme(app, is_dark)
+            self._current_is_dark = is_dark
         finally:
             self.setUpdatesEnabled(True)
             self.update()
-
-    # -------------------------------------------ТОЧЕЧНЫЕ ПРАВКИ ВИДЖЕТОВ-----------------------------------------------
-    def apply_local_widget_styles(self, is_dark: bool):
-
-        apply_data_loading_theme(self, is_dark)
-
-        if is_dark:
-
-            self.heading_load_data.setStyleSheet("""
-                                            QLabel {
-                                                        background-color: #464646;
-                                                        padding: 7px 65px; 
-                                                        border-radius: 10px;
-                                                        border: 1px solid #6E6E6E;
-                                                        margin: 10px 0px;
-                                                    }
-                                        """)
-
-            self.heading_filters.setStyleSheet("""
-                                                QLabel {
-                                                    background-color: #464646;
-                                                    padding: 7px 65px;
-                                                    border-radius: 10px;
-                                                    border: 1px solid #6E6E6E;
-                                                    margin: 0px 0px 5px 0px;
-                                                }
-                                            """)
-
-            self.heading_analysis.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #464646;
-                                                padding: 7px 65px; 
-                                                border-radius: 10px;
-                                                border: 1px solid #6E6E6E;
-                                                margin: 10px 0px 10px 0px;
-                                            }
-                                        """)
-
-            self.heading_enter_parameter.setStyleSheet("""
-                                            QLabel {
-                                                        background-color: #464646;
-                                                        padding: 7px 65px; 
-                                                        border-radius: 10px;
-                                                        border: 1px solid #6E6E6E;
-                                                        margin: 10px 0px;
-                                                    }
-                                        """)
-
-            self.label_69.setStyleSheet("""
-                                            QLabel {
-                                                        background-color: #464646;
-                                                        padding: 7px 65px; 
-                                                        border-radius: 10px;
-                                                        border: 1px solid #6E6E6E;
-                                                        margin: 10px 0px 10px 0px;
-                                                    }
-                                        """)
-
-            self.label_123.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #464646;
-                                                padding: 7px 65px;
-                                                border-radius: 10px;
-                                                border: 1px solid #6E6E6E;
-                                                margin: 10px 0px 10px 0px;
-                                            }
-                                        """)
-
-            self.label_recs.setStyleSheet("""
-                                                QLabel {
-                                                    background-color: #464646;
-                                                    padding: 7px 65px;
-                                                    border-radius: 10px;
-                                                    border: 1px solid #6E6E6E;
-                                                    margin: 10px 0px 10px 0px;
-                                                }
-                                          """)
-
-        else:
-
-            self.heading_load_data.setStyleSheet("""
-                                            QLabel {
-                                                        background-color: #FAFAFA;
-                                                        padding: 7px 65px; 
-                                                        border-radius: 10px;
-                                                        border: 1px solid #C8C8C8;
-                                                        margin: 10px 0px;
-                                                    }
-                                       """)
-
-            self.heading_filters.setStyleSheet("""
-                                                    QLabel {
-                                                        background-color: #FAFAFA;
-                                                        padding: 7px 65px;
-                                                        border-radius: 10px;
-                                                        border: 1px solid #C8C8C8;
-                                                        margin: 0px 0px 5px 0px;
-                                                    }
-                                             """)
-
-            self.heading_analysis.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #FAFAFA;
-                                                padding: 7px 65px; 
-                                                border-radius: 10px;
-                                                border: 1px solid #C8C8C8;
-                                                margin: 10px 0px 10px 0px;
-                                            }
-                                        """)
-
-            self.heading_enter_parameter.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #FAFAFA;
-                                                padding: 7px 65px;
-                                                border-radius: 10px;
-                                                border: 1px solid #C8C8C8;
-                                                margin: 10px 0px;
-                                            }
-                                        """)
-
-            self.label_69.setStyleSheet("""
-                                            QLabel {
-                                                background-color: #FAFAFA;
-                                                padding: 7px 65px;
-                                                border-radius: 10px;
-                                                border: 1px solid #C8C8C8;
-                                                margin: 10px 0px 10px 0px;
-                                            }
-                                        """)
-
-            self.label_123.setStyleSheet("""
-                                                QLabel {
-                                                    background-color: #FAFAFA;
-                                                    padding: 7px 65px;
-                                                    border-radius: 10px;
-                                                    border: 1px solid #C8C8C8;
-                                                    margin: 10px 0px 10px 0px;
-                                                }
-                                         """)
-
-            self.label_recs.setStyleSheet("""
-                                                QLabel {
-                                                    background-color: #FAFAFA;
-                                                    padding: 7px 65px;
-                                                    border-radius: 10px;
-                                                    border: 1px solid #C8C8C8;
-                                                    margin: 10px 0px 10px 0px;
-                                                }
-                                          """)
 
     # -------------------------------------------СТАТИЧЕСКИЕ ПРАВКИ РАЗМЕРОВ--------------------------------------------
     def apply_static_widget_styles(self):
@@ -351,6 +227,5 @@ if __name__ == "__main__":
     window.show()
 
     QTimer.singleShot(0, lambda: print(f"[WINDOW SIZE] {window.width()} x {window.height()}"))
-    QTimer.singleShot(0, window.center_on_cursor_screen)
 
     sys.exit(app.exec())

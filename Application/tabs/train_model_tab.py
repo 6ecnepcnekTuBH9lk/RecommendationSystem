@@ -51,18 +51,9 @@ def create_train_model_widgets_tab(aboba):
 
     # Заголовок
     aboba.heading_enter_parameter = QLabel("Входные параметры")
-    aboba.heading_enter_parameter.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                                aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
+    aboba.heading_enter_parameter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.heading_enter_parameter.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.heading_enter_parameter.setStyleSheet("""
-        QLabel {
-            background-color: #FAFAFA;
-            padding: 7px 65px;
-            border-radius: 10px;
-            border: 1px solid #C8C8C8;
-            margin: 10px 0px;
-        }
-    """)
+    aboba.heading_enter_parameter.setProperty("class", "sectionHeader")
     left_layout.addWidget(aboba.heading_enter_parameter, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # -------------------- ПАРАМЕТРЫ --------------------
@@ -73,8 +64,6 @@ def create_train_model_widgets_tab(aboba):
     form_layout.setContentsMargins(0, 0, 0, 0)
     form_layout.setSpacing(7)
 
-    LABEL_W = 400  # можно подобрать (чтобы все поля начинались по одной вертикали)
-
     def add_param(label_text: str, widget, stretch_after: bool = True):
         # строка: [Label][Widget]
         row_w = QWidget()
@@ -83,12 +72,13 @@ def create_train_model_widgets_tab(aboba):
         row_l.setSpacing(0)
 
         lbl = QLabel(label_text)
-        lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        lbl.setFixedWidth(LABEL_W)
+        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        lbl.setMinimumWidth(200)
+        lbl.setToolTip(label_text)
 
         widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        row_l.addWidget(lbl)
+        row_l.addWidget(lbl, 1)
         row_l.addWidget(widget, 1)
 
         form_layout.addWidget(row_w)
@@ -321,18 +311,9 @@ def create_train_model_widgets_tab(aboba):
     # -------------------- ПРАВАЯ ЧАСТЬ --------------------
     # Заголовок (новый текст)
     aboba.label_69 = QLabel("Процесс обучения")
-    aboba.label_69.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                 aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
+    aboba.label_69.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.label_69.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.label_69.setStyleSheet("""
-                QLabel {
-                    background-color: #FAFAFA;
-                    padding: 7px 65px;
-                    border-radius: 10px;
-                    border: 1px solid #C8C8C8;
-                    margin: 10px 0px 10px 0px;
-                }
-            """)
+    aboba.label_69.setProperty("class", "sectionHeader")
     right_layout.addWidget(aboba.label_69, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # Поле для логов обучения (пока просто вывод)

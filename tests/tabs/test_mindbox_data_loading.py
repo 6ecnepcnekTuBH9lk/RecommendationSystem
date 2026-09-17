@@ -11,9 +11,9 @@ from unittest.mock import Mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QByteArray, QObject, QProcess, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QObject, QProcess, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget, QCheckBox
 
 from Application.mindbox import MindboxConfig
 from Application.mindbox import daily_training_batch as backend
@@ -159,27 +159,23 @@ def finish_training(window, state):
     wait_until(lambda: not window.mb_controller.tasks)
 
 
-def test_initial_widgets_and_checkbox_group(window):
-    assert window.tabs.tabText(0) == "Загрузка данных"
-    assert window.tabs.tabText(1) == "Legacy"
+def test_initial_widgets_offer_only_full_download(window):
+    assert window.mb_progress_label.text() == "Прогресс: ожидание..."
+    assert window.mb_progress.isTextVisible()
+    assert window.mb_progress.text() == "0%"
+    assert window.tabs.tabText(0) == "Получение данных"
+    assert not window.tabs.widget(0).findChildren(QCheckBox)
+    assert window.mb_sources_info.property("class") == "infoLabel"
+    assert window.mb_sources_info.text() == "Из Mindbox будут получены данные о клиентах, их действий, заказов и объединений"
+    assert window.mb_sources_info.alignment() == Qt.AlignmentFlag.AlignCenter
+    texts = [label.text() for label in window.tabs.widget(0).findChildren(QLabel)]
+    assert "Источники данных:" not in texts
+    assert "Набор:" in texts and "Манифест:" in texts
+    assert not any(text.startswith(("Batch", "Manifest", "Progress")) for text in texts)
     assert window.mb_start_button.isEnabled()
     assert not window.mb_cancel_button.isEnabled()
-    assert not window.mb_load_customers_checkbox.isChecked()
-    for changed in window.mb_training_checkboxes:
-        changed.setChecked(False)
-        assert not any(c.isChecked() for c in window.mb_training_checkboxes)
-        changed.setChecked(True)
-        assert all(c.isChecked() for c in window.mb_training_checkboxes)
     assert window.mb_interaction_since.displayFormat() == "dd.MM.yyyy"
     assert window.mb_interaction_until.calendarPopup()
-
-
-def test_no_source_never_starts_process(window):
-    window.mb_load_orders_checkbox.setChecked(False)
-    assert not window.mb_start_button.isEnabled()
-    window.mb_controller.start()
-    assert not FakeProcess.instances
-    assert "Выберите хотя бы один" in window.status_label.text()
 
 
 @pytest.mark.parametrize("field", ["since", "merge"])
@@ -208,68 +204,10 @@ def test_training_command_and_only_loading_controls_locked(window):
     assert window.tabs.isEnabled()
     assert not window.mb_start_button.isEnabled()
     assert not window.mb_interaction_since.isEnabled()
-    assert not window.mb_load_customers_checkbox.isEnabled()
+    assert not window.mb_merge_since.isEnabled()
     assert window.mb_cancel_button.isEnabled()
     window.mb_controller.start()  # Repeated click cannot start a concurrent writer.
     assert len(FakeProcess.instances) == 1
-
-
-def test_customers_only_requires_explicit_manifest(window, tmp_path):
-    synthetic_batch(tmp_path)
-    window.mb_controller.refresh_manifests()
-    wait_until(lambda: not window.mb_controller.tasks)
-    window.mb_load_actions_checkbox.setChecked(False)
-    window.mb_load_customers_checkbox.setChecked(True)
-    assert window.mb_manifest_combo.count() == 2
-    assert window.mb_manifest_combo.currentData() is None
-    assert not window.mb_start_button.isEnabled()
-    window.mb_controller.start()
-    assert not FakeProcess.instances
-    assert "обучающий набор" in window.status_label.text()
-
-
-def test_customers_only_ignores_dates_and_revalidates_manifest(window, tmp_path):
-    state = synthetic_batch(tmp_path)
-    controller = window.mb_controller
-    controller.refresh_manifests()
-    wait_until(lambda: not controller.tasks)
-    window.mb_load_actions_checkbox.setChecked(False)
-    window.mb_load_customers_checkbox.setChecked(True)
-    window.mb_manifest_combo.setCurrentIndex(1)
-    window.mb_interaction_since.setDate(window.mb_interaction_until.date())
-    controller.start()
-    assert window.mb_process is None  # Background validation precedes process creation.
-    wait_until(lambda: window.mb_process is not None)
-    args = window.mb_process.arguments
-    assert args[4:] == ["export", "--training-manifest", str(state.with_name("manifest.json"))]
-    assert "--since" not in args and "--until" not in args and "--merge-since" not in args
-    assert window.mb_current_state_path is None
-
-
-def test_manifest_disappearing_after_selection_is_rejected(window, tmp_path):
-    state = synthetic_batch(tmp_path)
-    controller = window.mb_controller
-    controller.refresh_manifests()
-    wait_until(lambda: not controller.tasks)
-    window.mb_load_actions_checkbox.setChecked(False)
-    window.mb_load_customers_checkbox.setChecked(True)
-    window.mb_manifest_combo.setCurrentIndex(1)
-    state.with_name("manifest.json").unlink()
-    controller.start()
-    wait_until(lambda: controller.state == ui.LoadingState.FAILED)
-    assert not FakeProcess.instances
-
-
-def test_catalog_filters_invalid_and_incomplete_manifests(tmp_path):
-    state = synthetic_batch(tmp_path)
-    broken = tmp_path / "training_batches" / ("c" * 32) / "manifest.json"
-    broken.parent.mkdir()
-    broken.write_text("{invalid", encoding="utf-8")
-    result = ui._scan_manifests()
-    assert [m["path"] for m in result["manifests"]] == [str(state.with_name("manifest.json"))]
-    assert result["invalid"] == 1
-    state.with_name("manifest.json").write_bytes(state.read_bytes())
-    assert ui._scan_manifests()["manifests"] == []
 
 
 def test_state_ready_pending_failed_counts(window, tmp_path):
@@ -277,12 +215,14 @@ def test_state_ready_pending_failed_counts(window, tmp_path):
     window.mb_controller.start()
     window.mb_process.feed(f"State: {state}\n")
     wait_until(lambda: not window.mb_controller.tasks)
-    assert window.mb_merges_status_label.text() == "READY"
+    assert window.mb_merges_status_label.text() == "Готово"
     assert window.mb_actions_status_label.text() == "1 / 2 дней"
-    assert window.mb_orders_status_label.text() == "0 / 2 дней; FAILED: 1"
-    assert "PENDING: 1" in window.mb_orders_status_label.toolTip()
+    assert window.mb_orders_status_label.text() == "0 / 2 дней; Ошибок: 1"
+    assert not window.mb_orders_status_label.toolTip()
+    assert window.mb_batch_label.text() == "a" * 32
+    assert window.mb_progress_label.text() == "Готово: 2 / 6 компонентов"
     assert window.mb_progress.value() == 2
-    assert window.mb_progress.maximum() == 5
+    assert window.mb_progress.maximum() == 6
 
 
 @pytest.mark.parametrize("content", [None, "{incomplete"])
@@ -323,7 +263,7 @@ def test_process_failure_restores_ui(window, kind):
     assert controller.state == ui.LoadingState.FAILED
     assert window.mb_start_button.isEnabled()
     assert not window.mb_cancel_button.isEnabled()
-    assert window.mb_load_actions_checkbox.isEnabled()
+    assert window.mb_interaction_since.isEnabled()
     assert not window.mb_state_timer.isActive()
     process.finished.emit(1, QProcess.ExitStatus.CrashExit)  # Late duplicate signal is harmless.
     assert controller.state == ui.LoadingState.FAILED
@@ -333,11 +273,14 @@ def test_success_requires_verified_final_manifest(window, tmp_path):
     state = synthetic_batch(tmp_path)
     window.mb_controller.start()
     finish_training(window, state)
-    assert window.mb_controller.state == ui.LoadingState.SUCCESS
+    assert window.mb_controller.state == ui.LoadingState.RUNNING
     assert window.mb_manifest_label.text() == "Готов"
-    assert window.mb_manifest_label.toolTip() == str(state.with_name("manifest.json"))
+    assert not window.mb_manifest_label.toolTip()
     assert window.mb_progress.value() == 5
-    assert window.mb_start_button.isEnabled()
+    assert window.mb_progress.maximum() == 6
+    assert window.mb_progress.text() != "100%"
+    assert not window.mb_start_button.isEnabled()
+    assert window.mb_process.arguments == ui.customers_arguments(state.with_name("manifest.json"))
 
 
 def test_exit_zero_without_manifest_is_failure(window):
@@ -349,7 +292,6 @@ def test_exit_zero_without_manifest_is_failure(window):
 @pytest.mark.parametrize("failed", [True, False])
 def test_customers_never_start_after_failed_or_invalid_batch(window, tmp_path, failed):
     state = synthetic_batch(tmp_path, ["PENDING"] * 5, False)
-    window.mb_load_customers_checkbox.setChecked(True)
     window.mb_controller.start()
     window.mb_process.feed(f"State: {state}\nManifest: {state.with_name('manifest.json')}\n")
     window.mb_process.finish(1 if failed else 0)
@@ -360,7 +302,6 @@ def test_customers_never_start_after_failed_or_invalid_batch(window, tmp_path, f
 
 def test_customers_chained_only_after_validation_and_snapshot_required(window, tmp_path, monkeypatch):
     state = synthetic_batch(tmp_path)
-    window.mb_load_customers_checkbox.setChecked(True)
     controller = window.mb_controller
     controller.start()
     training_process = window.mb_process
@@ -370,6 +311,7 @@ def test_customers_chained_only_after_validation_and_snapshot_required(window, t
     assert len(FakeProcess.instances) == 1
     wait_until(lambda: len(FakeProcess.instances) == 2)
     assert controller.state == ui.LoadingState.RUNNING
+    assert window.mb_progress.text() != "100%"
     assert window.mb_process.arguments == ui.customers_arguments(state.with_name("manifest.json"))
     snapshot = tmp_path / "customer_profile_snapshots" / ("d" * 32) / "manifest.json"
     checked = []
@@ -378,15 +320,18 @@ def test_customers_chained_only_after_validation_and_snapshot_required(window, t
     window.mb_process.finish()
     wait_until(lambda: controller.state == ui.LoadingState.SUCCESS)
     assert checked == [(snapshot, state.with_name("manifest.json"))]
-    assert window.mb_customers_status_label.text() == "READY"
-    assert window.mb_manifest_label.toolTip() == str(state.with_name("manifest.json"))
+    assert window.mb_progress.text() == "100%"
+    assert window.mb_progress_label.text() == "Готово: 6 / 6 компонентов"
+    assert all(not getattr(window, f"mb_{name}_label").toolTip() for name in (
+        "status", "merges_status", "actions_status", "orders_status", "customers_status", "batch", "manifest"))
+    assert window.mb_customers_status_label.text() == "Готово"
+    assert not window.mb_manifest_label.toolTip()
 
 
 def test_cancel_preserves_state_and_parts_then_resume_uses_exact_path(window, tmp_path):
     state = synthetic_batch(tmp_path, ["READY", "PENDING", "PENDING", "PENDING", "PENDING"], False)
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     controller = window.mb_controller
-    window.mb_load_customers_checkbox.setChecked(True)
     controller.start()
     process = window.mb_process
     process.feed(f"State: {state}\n")
@@ -404,16 +349,18 @@ def test_cancel_preserves_state_and_parts_then_resume_uses_exact_path(window, tm
     assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
     controller.resume()
     assert window.mb_process.arguments == ui.resume_arguments(state)
-    assert controller.want_customers is True
     assert len(FakeProcess.instances) == 2
     # A late event from the old process must not finish the resumed job.
     controller._process_finished(process, 1, QProcess.ExitStatus.CrashExit)
     assert controller.state == ui.LoadingState.RUNNING
+    synthetic_batch(tmp_path)
+    finish_training(window, state)
+    assert controller.stage == "customers"
+    assert window.mb_process.arguments == ui.customers_arguments(state.with_name("manifest.json"))
 
 
 def test_cancel_during_validation_never_starts_customers(window, tmp_path):
     state = synthetic_batch(tmp_path)
-    window.mb_load_customers_checkbox.setChecked(True)
     window.mb_controller.start()
     window.mb_process.feed(f"State: {state}\nManifest: {state.with_name('manifest.json')}\n")
     window.mb_process.finish()
@@ -451,7 +398,7 @@ def test_all_four_tabs_themes_and_legacy_controls(app):
     QApplication.processEvents()
     wait_until(lambda: not window.mb_controller.tasks)
     assert [window.tabs.tabText(i) for i in range(4)] == [
-        "Загрузка данных", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+        "Получение данных", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
     assert window.btn_load is not None and window.start_train is not None
     window.mb_controller.start()
     for dark in (False, True, False):
@@ -472,6 +419,8 @@ def test_real_qprocess_with_harmless_local_script_keeps_event_loop_alive(window,
               f"print({('State: ' + str(state))!r}, flush=True); "
               "time.sleep(0.2); "
               f"print({('Manifest: ' + str(state.with_name('manifest.json')))!r}, flush=True)")
+    monkeypatch.setattr(ui, "customers_arguments", lambda manifest: ["-u", "-c", script])
+    monkeypatch.setattr(ui, "_validate_snapshot", lambda path, manifest: str(path))
     ticks = []
     timer = QTimer(window)
     timer.setInterval(10)
@@ -497,7 +446,6 @@ def test_snapshot_validation_checks_origin(tmp_path, monkeypatch):
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_customer_failure_preserves_completed_training_manifest(window, tmp_path, exit_code):
     state = synthetic_batch(tmp_path)
-    window.mb_load_customers_checkbox.setChecked(True)
     controller = window.mb_controller
     controller.start()
     finish_training(window, state)
@@ -507,7 +455,8 @@ def test_customer_failure_preserves_completed_training_manifest(window, tmp_path
     process.feed(f"Manifest: {tmp_path / 'missing-snapshot.json'}\n")
     process.finish(exit_code)
     wait_until(lambda: controller.state == ui.LoadingState.FAILED)
-    assert window.mb_customers_status_label.text() == "FAILED"
+    assert window.mb_customers_status_label.text() == "Ошибка"
+    assert window.mb_progress.text() != "100%"
     assert window.mb_manifest_label.text() == "Готов"
     assert window.mb_start_button.isEnabled()
     assert controller.resume_path is None
@@ -534,26 +483,8 @@ def test_metadata_work_is_off_gui_thread_and_state_recovers(window, tmp_path, mo
     state.write_bytes(valid_bytes)
     window.mb_state_timer.timeout.emit()
     wait_until(lambda: not controller.tasks)
-    assert window.mb_merges_status_label.text() == "PENDING"
+    assert window.mb_merges_status_label.text() == "Ожидание"
     assert threads == [False, False]
-
-
-@pytest.mark.parametrize("training,customers,selected,enabled", [
-    (True, False, False, True),
-    (False, True, True, True),
-    (False, True, False, False),
-    (False, False, False, False),
-    (False, False, True, False),
-])
-def test_start_button_source_matrix(window, tmp_path, training, customers, selected, enabled):
-    synthetic_batch(tmp_path)
-    controller = window.mb_controller
-    controller.refresh_manifests()
-    wait_until(lambda: not controller.tasks)
-    window.mb_load_actions_checkbox.setChecked(training)
-    window.mb_load_customers_checkbox.setChecked(customers)
-    window.mb_manifest_combo.setCurrentIndex(1 if selected else 0)
-    assert window.mb_start_button.isEnabled() is enabled
 
 
 @pytest.mark.parametrize("validation", [False, True], ids=["export", "validation"])
@@ -599,10 +530,11 @@ def test_new_job_resets_component_progress_format(window, tmp_path, resume):
     controller.start()
     window.mb_process.feed(f"State: {state}\n")
     wait_until(lambda: not controller.tasks)
-    assert window.mb_progress.format() == "%v / %m компонентов"
+    assert window.mb_progress.format() == "%p%"
     window.mb_process.finish(1)
     wait_until(lambda: not controller.tasks)
     (controller.resume if resume else controller.start)()
+    assert window.mb_progress_label.text() == "Прогресс: ожидание..."
     assert window.mb_progress.format() == "%p%"
     assert (window.mb_progress.minimum(), window.mb_progress.maximum(), window.mb_progress.value()) == (0, 100, 0)
 
@@ -621,6 +553,10 @@ def test_global_status_lifecycle_and_scheduled_reset(window, tmp_path, monkeypat
     assert window.status_label.text() == "Идёт получение данных из Mindbox..."
     if outcome == "success":
         finish_training(window, state)
+        monkeypatch.setattr(ui, "_validate_snapshot", lambda path, manifest: str(path))
+        window.mb_process.feed(f"Manifest: {tmp_path / 'snapshot.json'}\n")
+        window.mb_process.finish()
+        wait_until(lambda: controller.state == ui.LoadingState.SUCCESS)
         status_function, message = "set_status_ok", "Получение данных завершено."
     else:
         if outcome == "cancel":

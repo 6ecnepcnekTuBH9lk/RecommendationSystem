@@ -19,6 +19,18 @@ from Application.settings.set_status import (set_status_processing, schedule_sta
                                              set_status_error, set_status_ok)
 
 
+class _ResultTableHeader(QHeaderView):
+    """Include Material's uppercase rendering in ResizeToContents measurements."""
+
+    def sectionSizeFromContents(self, logical_index):
+        size = super().sectionSizeFromContents(logical_index)
+        text = str(self.model().headerData(logical_index, self.orientation(), Qt.ItemDataRole.DisplayRole) or "")
+        metrics = self.fontMetrics()
+        extra = max(0, metrics.horizontalAdvance(text.upper()) - metrics.horizontalAdvance(text))
+        size.setWidth(size.width() + extra + 8)
+        return size
+
+
 # -------------------------------------------ВКЛАДКА ВЫГРУЗКА РЕЗУЛЬТАТОВ-------------------------------------------
 def create_result_widgets_tab(aboba):
     tab = QWidget()
@@ -203,18 +215,11 @@ def create_result_widgets_tab(aboba):
     aboba.label_123 = QLabel("История взаимодействий клиента")
     aboba.label_123.setSizePolicy(aboba.label_123.sizePolicy().Policy.Fixed, aboba.label_123.sizePolicy().Policy.Fixed)
     aboba.label_123.setContentsMargins(0, 0, 0, 0)
-    aboba.label_123.setStyleSheet("""
-        QLabel {
-            background-color: #FAFAFA;
-            padding: 7px 65px;
-            border-radius: 10px;
-            border: 1px solid #C8C8C8;
-            margin: 10px 0px 10px 0px;
-        }
-    """)
+    aboba.label_123.setProperty("class", "sectionHeader")
     left_layout.addWidget(aboba.label_123, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     aboba.purchases_table = QTableWidget(0, 6)
+    aboba.purchases_table.setHorizontalHeader(_ResultTableHeader(Qt.Orientation.Horizontal, aboba.purchases_table))
     aboba.purchases_table.setHorizontalHeaderLabels([
         "Фото", "Код", "Название", "Коллекция", "Взаимодействие", "Дата"
     ])
@@ -237,18 +242,11 @@ def create_result_widgets_tab(aboba):
     aboba.label_recs.setSizePolicy(aboba.label_recs.sizePolicy().Policy.Fixed,
                                    aboba.label_recs.sizePolicy().Policy.Fixed)
     aboba.label_recs.setContentsMargins(0, 0, 0, 0)
-    aboba.label_recs.setStyleSheet("""
-        QLabel {
-            background-color: #FAFAFA;
-            padding: 7px 65px;
-            border-radius: 10px;
-            border: 1px solid #C8C8C8;
-            margin: 10px 0px 10px 0px;
-        }
-    """)
+    aboba.label_recs.setProperty("class", "sectionHeader")
     right_layout.addWidget(aboba.label_recs, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     aboba.recs_table = QTableWidget(0, 7)
+    aboba.recs_table.setHorizontalHeader(_ResultTableHeader(Qt.Orientation.Horizontal, aboba.recs_table))
     aboba.recs_table.setHorizontalHeaderLabels([
         "Фото", "Код", "Название", "Коллекция", "Коэффициент", "Конверсия", "Остаток"
     ])
