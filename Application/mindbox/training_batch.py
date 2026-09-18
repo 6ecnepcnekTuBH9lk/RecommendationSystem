@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 import json
 import math
+import re
 import os
 from pathlib import Path, PurePosixPath
 import uuid
@@ -45,10 +46,11 @@ class TrainingBatchWindow:
 @dataclass(frozen=True, repr=False)
 class TrainingBatchExport:
     name: str
-    export_id: str
+    export_id: str | None
     operation: str
     relative_directory: str
     parts_count: int
+    source_kind: str = "API"
 
 
 @dataclass(frozen=True, repr=False)
@@ -65,11 +67,15 @@ def _directory(root: Path, entry: TrainingBatchExport) -> Path:
     if not isinstance(value, str) or "\\" in value or ":" in value:
         raise TrainingBatchError("Invalid relative export path")
     relative = PurePosixPath(value)
-    if (relative.is_absolute() or len(relative.parts) != 2 or relative.parts[0] != entry.name
-            or not TIMESTAMP_PATTERN.fullmatch(relative.parts[1]) or relative.as_posix() != value):
+    manual = (entry.source_kind == "MANUAL" and len(relative.parts) == 3
+              and relative.parts[0] in ("training_batches", "customer_profile_snapshots")
+              and re.fullmatch("[0-9a-f]{32}", relative.parts[1]) and relative.parts[2] == entry.name)
+    api = (len(relative.parts) == 2 and relative.parts[0] == entry.name
+           and TIMESTAMP_PATTERN.fullmatch(relative.parts[1]))
+    if (relative.is_absolute() or not (manual or api) or relative.as_posix() != value):
         raise TrainingBatchError("Expected export-type/timestamp relative directory")
     directory = (root / value).resolve()
-    if not directory.is_relative_to(root) or not directory.is_relative_to((root / entry.name).resolve()):
+    if not directory.is_relative_to(root) or (not manual and not directory.is_relative_to((root / entry.name).resolve())):
         raise TrainingBatchError("Export path escapes raw root")
     return directory
 

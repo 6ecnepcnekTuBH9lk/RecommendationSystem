@@ -43,7 +43,7 @@ def data(tmp_path, monkeypatch):
     actions.append(copy.deepcopy(actions[0]))
     actions[-1]["actionTemplate"]["ids"]["systemName"] = "DobavlenieProduktaVSpisokVOperaciiDobavlenie"
     actions[-1]["products"][0]["ids"] = {"offline1C": "001235_FULL"}
-    orders = [{"ids": {"mindboxId": "SECRET_ORDER"}, "customer": {"ids": {"mindboxId": user}},
+    orders = [{"ids": {"mindboxId": "SECRET_ORDER_" + user}, "customer": {"ids": {"mindboxId": user}},
                "firstAction": {"dateTimeUtc": STAMP, "channel": {"ids": {"externalId": "SECRET_CHANNEL"}, "name": "Secret"}},
                "lines": [{"id": "SECRET_LINE", "number": 1, "quantity": 2.5,
                           "basePricePerItem": 10, "priceOfLine": 25,
@@ -78,10 +78,10 @@ def test_unmapped_payload_never_reaches_full_adapter_or_resolver(data, monkeypat
                                "products": payload, "productCategories": False}] * 2)
     adapt = pipeline.adapt_action
     calls = []
-    def checked(raw, resolver):
+    def checked(raw, resolver, **kwargs):
         assert raw["actionTemplate"]["ids"]["systemName"] != name
         calls.append(raw)
-        return adapt(raw, resolver)
+        return adapt(raw, resolver, **kwargs)
     monkeypatch.setattr(pipeline, "adapt_action", checked)
     result = run(data, diagnose=diagnose)
     d, b = result.diagnostics, baseline.diagnostics
@@ -114,7 +114,7 @@ def test_preparation_prefilter_uses_builder_custom_rules(data, monkeypatch, mapp
     name = "UstanovkaSpiskaProduktovV"
     rules = InteractionRules(view_action_system_names={name} if mapped else set(), favorite_action_system_names=set())
     builder = InteractionBuilder(rules)
-    monkeypatch.setattr(pipeline, "InteractionBuilder", lambda: builder)
+    monkeypatch.setattr(pipeline, "InteractionBuilder", lambda rules: builder)
     raw = data[0]["actions"][0]
     raw["actionTemplate"]["ids"]["systemName"] = name
     raw["products"] = [{"ids": {"website": "SECRET"}}]
@@ -228,8 +228,8 @@ def test_recoverable_cases_strict_vs_diagnostic(data, problem, error):
 def test_unsupported_typed_product_recoverable(data, monkeypatch):
     original = pipeline.adapt_action
 
-    def adapt(raw, resolver):
-        event = original(raw, resolver)
+    def adapt(raw, resolver, **kwargs):
+        event = original(raw, resolver, **kwargs)
         return replace(event, products=(ProductKey("SECRET_NAMESPACE", "001234_FULL"),))
 
     monkeypatch.setattr(pipeline, "adapt_action", adapt)
@@ -411,3 +411,92 @@ def test_daily_prepare_quality_exit_and_safe_output(data, monkeypatch, capsys, p
         assert "WARN MAPPED_ACTION_WITHOUT_PRODUCT: 1" in output.out
     for secret in ("SECRET", "001234", "999999_UNKNOWN", "secret@example.test", "+79999999999"):
         assert secret not in output.out + output.err
+
+
+@pytest.mark.parametrize("order_namespace", ["offline1C", "kanzlerKz"])
+def test_manifest_selection_controls_real_preparation(data, order_namespace):
+    from datetime import datetime, timedelta, timezone
+    from Application.mindbox import daily_training_batch as daily
+    from Application.mindbox.selection import MindboxSelectionConfig
+    from Application.mindbox.training_batch import TrainingBatchExport, TrainingBatchWindow
+
+    raw, dirs, catalog = data
+    selection = MindboxSelectionConfig(
+        view_action_system_names=("CustomView",), favorite_action_system_names=("CustomFavorite",),
+        purchase_line_statuses=("CustomPurchase",), action_product_namespaces=("kanzlerKz",),
+        order_product_namespaces=(order_namespace,),
+    )
+    for index, action in enumerate(raw["actions"]):
+        action["actionTemplate"]["ids"]["systemName"] = "CustomView" if index < 9 else "CustomFavorite"
+        ids = action["products"][0]["ids"]
+        # Both namespaces present: explicit selection must resolve the ambiguity.
+        ids["kanzlerKz"] = ids["offline1C"]
+        ids["offline1C"] = "999999_WRONG"
+    raw["actions"].append({"actionTemplate": {"ids": {"systemName": "ProsmotrProdukta"}}})
+    for order in raw["orders"]:
+        line = order["lines"][0]
+        item = line["product"]["ids"]["offline1C"]
+        line["product"]["ids"] = {"offline1C": "999999_WRONG", "kanzlerKz": "999999_WRONG"}
+        line["product"]["ids"][order_namespace] = item
+        line["status"]["ids"]["externalId"] = "CustomPurchase"
+        filtered = copy.deepcopy(line)
+        filtered["id"] = "filtered"
+        filtered["status"]["ids"]["externalId"] = "CP"
+        order["lines"].append(filtered)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    until = start + timedelta(days=1)
+    components = []
+    for name in ("customer_merges", "actions", "orders"):
+        write_export(dirs[name], name, raw[name])
+        entry = TrainingBatchExport(name, "synthetic", name, dirs[name].relative_to(catalog.parent).as_posix(), 1)
+        components.append(daily.BatchComponent(name, start, until, name, "READY", entry))
+    batch = daily.ChunkedTrainingBatch("c" * 32, start, TrainingBatchWindow(start, until, start),
+                                       "0" * 64, tuple(components), True, selection)
+    manifest = catalog.parent / "training_batches" / batch.batch_id / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    daily._atomic_write(manifest, batch)
+    loaded = daily.load_chunked_training_batch(manifest, raw_root=catalog.parent, require_complete=True)
+    result = daily.prepare_training_data_from_chunked_batch(
+        loaded, raw_root=catalog.parent, catalog_path=catalog, train_config=legacy.TrainConfig())
+    assert result.complete
+    d = result.diagnostics
+    assert (d.view_interactions, d.favorite_interactions, d.purchase_interactions) == (9, 1, 2)
+    assert d.unmapped_actions == 1
+    assert d.resolution.total.resolved == 12
+    assert d.bpr.total_train_weight > 0
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_order_duplicates_across_components_do_not_duplicate_purchases(data, conflict):
+    from Application.mindbox.order_dedup import OrderSnapshotConflict
+    from Application.model.training_quality import TrainingQualityDiagnostics, evaluate_training_quality
+    raw, dirs, catalog = data
+    baseline = run(data)
+    second = catalog.parent / "orders" / "20260102_000000"
+    repeated = copy.deepcopy(raw["orders"])
+    if conflict:
+        repeated[0]["lines"][0]["quantity"] = 99
+    write_export(second, "orders", repeated)
+    kwargs = dict(actions_export_dirs=(dirs["actions"],), orders_export_dirs=(dirs["orders"], second),
+                  customer_merges_export_dir=dirs["customer_merges"], catalog_path=catalog, train_config=legacy.TrainConfig())
+    if conflict:
+        with pytest.raises(OrderSnapshotConflict, match="Conflicting order snapshots"):
+            pipeline._prepare_training_data_from_mindbox_sources(**kwargs)
+    result = pipeline._prepare_training_data_from_mindbox_sources(**kwargs, diagnose=conflict)
+    d = result.diagnostics
+    assert d.purchase_interactions == baseline.diagnostics.purchase_interactions
+    assert (d.orders_raw, d.orders_unique, d.orders_duplicate_identical, d.orders_duplicate_conflicting) == (4, 2, 1 if conflict else 2, int(conflict))
+    assert result.complete is not conflict
+    report = evaluate_training_quality(result.prepared_data, TrainingQualityDiagnostics(orders_duplicate_conflicting=d.orders_duplicate_conflicting))
+    assert report.training_allowed is not conflict
+    assert result.prepared_data.splits.train_weights.tolist() == baseline.prepared_data.splits.train_weights.tolist()
+
+
+def test_order_fingerprint_key_order_and_decimal_stability():
+    from decimal import Decimal
+    from Application.mindbox.order_dedup import semantic_fingerprint
+    left = {"a": [1, Decimal("2.000"), {"x": -0.0}], "b": "secret"}
+    right = {"b": "secret", "a": [Decimal("1.0"), 2, {"x": 0}]}
+    assert semantic_fingerprint(left) == semantic_fingerprint(right)
+    assert semantic_fingerprint({"x": "1"}) != semantic_fingerprint({"x": 1})
+    assert semantic_fingerprint({"x": True}) != semantic_fingerprint({"x": 1})

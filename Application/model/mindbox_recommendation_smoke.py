@@ -149,7 +149,8 @@ def run_recommendation_smoke(training_manifest, profile_manifest, *, raw_root, c
                 actions_view=d.actions_view, actions_favorite=d.actions_favorite,
                 malformed_mapped_actions=d.malformed_actions, unresolved_products=d.resolution.total.unresolved,
                 unsupported_products=d.resolution.total.unsupported_namespace, bpr_events=d.bpr.events_total,
-                unmapped_actions=d.unmapped_actions, malformed_action_system_names=d.malformed_action_system_names))
+                unmapped_actions=d.unmapped_actions, malformed_action_system_names=d.malformed_action_system_names,
+                orders_duplicate_conflicting=d.orders_duplicate_conflicting))
             report["quality"] = {"level": quality.level.value, "training_allowed": quality.training_allowed,
                                  "issues": [{"code": i.code, "count": i.count} for i in quality.issues]}
             report["dataset"] = {**dict(quality.metrics), "complete": prepared.complete}

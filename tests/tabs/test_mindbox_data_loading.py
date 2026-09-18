@@ -160,13 +160,13 @@ def finish_training(window, state):
 
 
 def test_initial_widgets_offer_only_full_download(window):
-    assert window.mb_progress_label.text() == "Прогресс: ожидание..."
+    assert window.mb_progress_label.text() == "Прогресс: —"
     assert window.mb_progress.isTextVisible()
     assert window.mb_progress.text() == "0%"
     assert window.tabs.tabText(0) == "Получение данных"
     assert not window.tabs.widget(0).findChildren(QCheckBox)
     assert window.mb_sources_info.property("class") == "infoLabel"
-    assert window.mb_sources_info.text() == "Из Mindbox будут получены данные о клиентах, их действий, заказов и объединений"
+    assert window.mb_sources_info.text() == "Из Mindbox будут получены данные о клиентах, их действия, заказы и объединения"
     assert window.mb_sources_info.alignment() == Qt.AlignmentFlag.AlignCenter
     texts = [label.text() for label in window.tabs.widget(0).findChildren(QLabel)]
     assert "Источники данных:" not in texts
@@ -319,6 +319,7 @@ def test_customers_chained_only_after_validation_and_snapshot_required(window, t
     window.mb_process.feed(f"Manifest: {snapshot}\n")
     window.mb_process.finish()
     wait_until(lambda: controller.state == ui.LoadingState.SUCCESS)
+    assert all(w.isEnabled() for w in window.mb_selection_fields.values())
     assert checked == [(snapshot, state.with_name("manifest.json"))]
     assert window.mb_progress.text() == "100%"
     assert window.mb_progress_label.text() == "Готово: 6 / 6 компонентов"
@@ -589,3 +590,130 @@ def test_old_status_reset_does_not_clear_new_running_job(window, tmp_path, resum
     QTest.qWait(60)
     assert controller.state == ui.LoadingState.RUNNING
     assert window.status_label.text() == "Идёт получение данных из Mindbox..."
+
+
+def test_selection_cli_and_controls(window):
+    fields = window.mb_selection_fields
+    fields["view_action_system_names"].setText(" ViewOne ; ViewTwo; ViewOne; ")
+    fields["favorite_action_system_names"].setText("FavoriteOne")
+    fields["purchase_line_statuses"].setText("CustomStatus")
+    fields["action_product_namespaces"].setText("kanzlerKz")
+    fields["order_product_namespaces"].setText("offline1C")
+    window.mb_controller.start()
+    args = window.mb_process.arguments
+    for option, expected in (("--view-action", ["ViewOne", "ViewTwo"]),
+                             ("--favorite-action", ["FavoriteOne"]),
+                             ("--purchase-status", ["CustomStatus"]),
+                             ("--action-product-namespace", ["kanzlerKz"]),
+                             ("--order-product-namespace", ["offline1C"])):
+        assert [args[i + 1] for i, value in enumerate(args) if value == option] == expected
+    assert all(not widget.isEnabled() for widget in fields.values())
+    window.mb_process.finish(1)
+    assert all(widget.isEnabled() for widget in fields.values())
+
+
+@pytest.mark.parametrize("problem", ["empty", "overlap", "namespace"])
+def test_invalid_selection_prevents_process(window, problem):
+    fields = window.mb_selection_fields
+    if problem == "empty":
+        fields["view_action_system_names"].setText(" ; ; ")
+    elif problem == "overlap":
+        fields["view_action_system_names"].setText("same")
+        fields["favorite_action_system_names"].setText("same")
+    else:
+        fields["order_product_namespaces"].setText("unknown-secret")
+    window.mb_controller.start()
+    assert FakeProcess.instances == []
+    assert window.mb_controller.state == ui.LoadingState.IDLE
+    assert window.mb_log.toPlainText()
+    assert "unknown-secret" not in window.mb_log.toPlainText()
+
+
+def test_resume_ignores_edited_selection_and_cancel_unlocks(window, tmp_path):
+    state = synthetic_batch(tmp_path, ["READY", "READY", "FAILED", "PENDING", "PENDING"], complete=False)
+    window.mb_controller.resume_path = state
+    window.mb_selection_fields["view_action_system_names"].setText("")
+    window.mb_controller.resume()
+    wait_until(lambda: window.mb_process is not None)
+    assert window.mb_process.arguments == ui.resume_arguments(state)
+    assert all(not w.isEnabled() for w in window.mb_selection_fields.values())
+    window.mb_controller.cancel()
+    window.mb_process.finish(1, True)
+    wait_until(lambda: window.mb_process is None)
+    assert all(w.isEnabled() for w in window.mb_selection_fields.values())
+
+
+@pytest.mark.parametrize("kind", ["interactions", "customers"])
+def test_manual_gui_shared_selection_independent_customers_and_validation(window, tmp_path, monkeypatch, kind):
+    for name, editor in window.mb_manual_files.items():
+        path = tmp_path / (name + ".json")
+        path.write_text("{}", encoding="utf-8")
+        editor.setText(str(path))
+    fields = window.mb_selection_fields
+    fields["view_action_system_names"].setText("CustomView")
+    if kind == "customers":
+        # Customers does not consume interaction dates or selection.
+        fields["view_action_system_names"].setText("")
+        window.mb_interaction_until.setDate(window.mb_interaction_since.date())
+    checked = Mock(return_value="valid")
+    monkeypatch.setattr(ui, "_validate_manual_result", checked)
+    window.mb_controller.start_manual(kind)
+    process = window.mb_process
+    assert "mindbox_manual_import.py" in process.arguments[3]
+    assert process.arguments[4] == kind
+    assert ("--view-action" in process.arguments) is (kind == "interactions")
+    assert ("--since" in process.arguments) is (kind == "interactions")
+    if kind == "interactions":
+        assert process.arguments[process.arguments.index("--view-action") + 1] == "CustomView"
+    assert all(not widget.isEnabled() for widget in window.mb_manual_controls)
+    manifest = tmp_path / "manifest.json"
+    process.feed(f"Manifest: {manifest}\n")
+    process.finish()
+    wait_until(lambda: window.mb_controller.state == ui.LoadingState.SUCCESS)
+    checked.assert_called_once_with(manifest, "manual_" + kind)
+    assert len(FakeProcess.instances) == 1  # No Customers export after manual interactions.
+    assert all(widget.isEnabled() for widget in window.mb_manual_controls)
+
+
+def test_reference_options_and_background_process(window, monkeypatch, tmp_path):
+    from Application.tabs import data_processing_tab as csv_ui
+    assert [window.combo_box_types.itemText(i) for i in range(window.combo_box_types.count())] == [
+        "Номенклатура из 1С", "Категории сайта из 1С", "Координаты городов и погода"]
+    assert getattr(window, "combo_box_add_or_not", None) is None
+    applied = Mock()
+    monkeypatch.setattr(csv_ui, "apply_reference_result", applied)
+    window.mb_controller.start_reference(tmp_path / "input.csv", "Номенклатура из 1С")
+    process = window.mb_process
+    assert "import_reference_csv.py" in process.arguments[3]
+    assert not window.btn_load.isEnabled()
+    process.feed('Reference: {"kind": "synthetic"}\n')
+    process.finish()
+    assert window.mb_controller.state == ui.LoadingState.SUCCESS
+    applied.assert_called_once_with(window, {"kind": "synthetic"})
+    assert window.btn_load.isEnabled()
+
+
+def test_manual_cancel_no_api_resume(window, tmp_path):
+    path = tmp_path / "customers.json"
+    path.write_text('{"customers": []}', encoding="utf-8")
+    window.mb_manual_files["customers"].setText(str(path))
+    window.mb_controller.start_manual("customers")
+    window.mb_controller.cancel()
+    window.mb_process.finish(1, True)
+    assert window.mb_controller.state == ui.LoadingState.CANCELLED
+    assert window.mb_controller.resume_path is None
+    assert all(widget.isEnabled() for widget in window.mb_manual_controls)
+
+
+
+def test_independent_manual_import_preserves_pending_api_resume(window, tmp_path):
+    state = synthetic_batch(tmp_path, ["READY", "READY", "FAILED", "PENDING", "PENDING"], complete=False)
+    window.mb_controller.resume_path = state
+    path = tmp_path / "customers.json"
+    path.write_text('{"customers": []}', encoding="utf-8")
+    window.mb_manual_files["customers"].setText(str(path))
+    window.mb_controller.start_manual("customers")
+    window.mb_process.finish(1)
+    assert window.mb_controller.resume_path == state
+    window.mb_controller.resume()
+    assert window.mb_process.arguments == ui.resume_arguments(state)

@@ -649,6 +649,12 @@ def process_favorites_file(aboba, df):
 
 
 # -------------------------------------------ОБРАБОТКА НОМНЕКЛАТУРЫ-----------------------------------------------------
+def _reference_message(aboba, **kwargs):
+    if aboba is None:
+        raise ValueError(kwargs["text"])
+    show_custom_message(aboba, **kwargs)
+
+
 def process_nomenclature_file(aboba, df):
     # Список нужных колонок
     required_columns = [
@@ -661,14 +667,15 @@ def process_nomenclature_file(aboba, df):
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(
+        _reference_message(
             aboba,
             title="Ошибка",
             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
             image_path="Картинки/Неудача.png"
         )
-        set_status_error(aboba, "Отсутствуют необходимые колонки")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Отсутствуют необходимые колонки")
+            schedule_status_reset(aboba, 5)
 
         return None
 
@@ -718,8 +725,9 @@ def process_nomenclature_file(aboba, df):
 
     df = df.sort_values(by="КодНоменклатуры", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    if aboba is not None:
+        set_status_ok(aboba, "Обработка завершена")
+        schedule_status_reset(aboba, 5)
 
     # возвращаем обработанный DataFrame
     return df
@@ -735,11 +743,12 @@ def process_categories_file(aboba, df):
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(aboba, title="Ошибка",
+        _reference_message(aboba, title="Ошибка",
                             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
                             image_path="Картинки/Неудача.png")
-        set_status_error(aboba, "Отсутствуют необходимые колонки")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Отсутствуют необходимые колонки")
+            schedule_status_reset(aboba, 5)
 
         return None
 
@@ -766,8 +775,9 @@ def process_categories_file(aboba, df):
 
     df = df.sort_values(by="КодКатегории", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    if aboba is not None:
+        set_status_ok(aboba, "Обработка завершена")
+        schedule_status_reset(aboba, 5)
 
     # возвращаем обработанный DataFrame
     return df
@@ -784,18 +794,20 @@ def process_coordinates_file(aboba, df):
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(
+        _reference_message(
             aboba,
             title="Ошибка",
             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
             image_path="Картинки/Неудача.png"
         )
-        set_status_error(aboba, "Отсутствуют необходимые колонки")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Отсутствуют необходимые колонки")
+            schedule_status_reset(aboba, 5)
 
         return None
 
-    set_status_processing(aboba, "Обработка координат городов...")
+    if aboba is not None:
+        set_status_processing(aboba, "Обработка координат городов...")
 
     # 3) Очистка / нормализация
     df = df.copy()
@@ -823,6 +835,12 @@ def process_coordinates_file(aboba, df):
     df["Широта"] = pd.to_numeric(df["Широта"], errors="coerce")
     df["Долгота"] = pd.to_numeric(df["Долгота"], errors="coerce")
 
+    invalid = ((df["Широта"].notna() & ~df["Широта"].between(-90, 90))
+               | (df["Долгота"].notna() & ~df["Долгота"].between(-180, 180)))
+    if invalid.any():
+        _reference_message(aboba, title="Ошибка", text="Координаты вне диапазона: широта [-90, 90], долгота [-180, 180].")
+        return None
+
     # Удаляем строки без города/координат
     df = df[df["Город"].notna() & df["Широта"].notna() & df["Долгота"].notna()].copy()
     df["Город"] = df["Город"].astype(str).str.strip()
@@ -832,14 +850,15 @@ def process_coordinates_file(aboba, df):
     df = df.drop_duplicates(subset=["Город", "Широта", "Долгота"], keep="first")
 
     if df.empty:
-        show_custom_message(
+        _reference_message(
             aboba,
             title="Ошибка",
             text="После очистки файла не осталось строк с корректными городами и координатами",
             image_path="Картинки/Неудача.png"
         )
-        set_status_error(aboba, "Нет корректных координат")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Нет корректных координат")
+            schedule_status_reset(aboba, 5)
         return None
 
     # Упорядочиваем колонки
@@ -849,8 +868,9 @@ def process_coordinates_file(aboba, df):
     # Сортировка
     df = df.sort_values(by="Город", ascending=True).reset_index(drop=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    if aboba is not None:
+        set_status_ok(aboba, "Обработка завершена")
+        schedule_status_reset(aboba, 5)
 
     return df
 

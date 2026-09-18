@@ -1,7 +1,5 @@
 import os
 import json
-import sys
-import tempfile
 import chardet
 import pandas as pd
 from PyQt6.QtCore import Qt, QSize
@@ -20,9 +18,8 @@ from Application.settings.settings_and_filter import (save_order_filter_settings
 from Application.settings.set_status import (set_status_processing, schedule_status_reset, show_custom_message,
                                              set_status_error, set_status_ok)
 
-from Application.files.files_processing import (process_orders_file, process_views_file, process_favorites_file,
-                                                process_categories_file, process_nomenclature_file,
-                                                process_coordinates_file, generate_weather_for_saved_coordinates)
+from Application.files.files_processing import generate_weather_for_saved_coordinates
+from Application.files.reference_import import REFERENCE_TYPES
 
 
 def _refresh_filter_references_on_startup(aboba):
@@ -43,13 +40,13 @@ def _refresh_filter_references_on_startup(aboba):
 
 
 def create_csv_loading_section(aboba):
-    """Build the single legacy CSV section; handlers stay in this module."""
+    """Only reference snapshots are selectable; processing runs in a subprocess."""
     section = QWidget()
     left_layout = QVBoxLayout(section)
     left_layout.setContentsMargins(0, 0, 0, 0)
     left_layout.setSpacing(12)
     # Заголовок CSV-раздела
-    aboba.heading_load_data = QLabel("Загрузка CSV")
+    aboba.heading_load_data = QLabel("Загрузка справочников")
     aboba.heading_load_data.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.heading_load_data.setAlignment(Qt.AlignmentFlag.AlignCenter)
     aboba.heading_load_data.setProperty("class", "sectionHeader")
@@ -57,23 +54,13 @@ def create_csv_loading_section(aboba):
 
     # Выпадающий список с типом данных
     aboba.combo_box_types = QComboBox()
-    aboba.combo_box_types.addItems(["Заказы клиентов из Mindbox",
-                                    "Просмотры товаров и категорий из Mindbox",
-                                    "Добавление товаров в избранное из Mindbox",
-                                    "Номенклатура из 1С", "Категории сайта из 1С", "Координаты городов и погода"
-                                    ])
-    aboba.combo_box_types.setStyleSheet("""QComboBox { margin: 0px 0px 5px 0px; }""")
-
-    # Выпадающий список с вариантом загрузки
-    aboba.combo_box_add_or_not = QComboBox()
-    aboba.combo_box_add_or_not.addItems(["Добавить новый / Обновить существующий",
-                                         "Добавить данные к существующему"])
+    aboba.combo_box_types.addItems(list(REFERENCE_TYPES))
 
     fields = QGridLayout()
     fields.setVerticalSpacing(10)
     fields.setHorizontalSpacing(12)
     fields.addWidget(aboba.combo_box_types, 0, 0)
-    fields.addWidget(aboba.combo_box_add_or_not, 1, 0)
+    fields.addWidget(QLabel("Полная замена справочника"), 1, 0)
 
     # Кнопка "Загрузить файл"
     aboba.btn_load = QPushButton(QIcon("Картинки/ЗагрузитьФайл.png"), " Загрузить файл")
@@ -491,9 +478,6 @@ def update_file_status(aboba):
     input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
 
     files = {
-        "Заказы": "Заказы.csv",
-        "Просмотры": "Просмотры.csv",
-        "Избранное": "Избранное.csv",
         "Номенклатура": "Номенклатура.csv",
         "Категории": "КатегорииСайта.csv",
         "Координаты": "КоординатыГородов.csv"
@@ -1914,258 +1898,44 @@ def analyze_favorites_full_dataset(aboba) -> bool:
 
 # ///////////////////////////////////////////ЗАГРУЗКА ФАЙЛОВ////////////////////////////////////////////////////////////
 def load_csv_file(aboba):
-    # Статус бар
-    set_status_processing(aboba, "Обработка данных...")
-
     selected_type = aboba.combo_box_types.currentText()
-    mode = aboba.combo_box_add_or_not.currentText()
-
-    file_path, _ = QFileDialog.getOpenFileName(
-        aboba,
-        "Выберите CSV файл",
-        "",
-        "CSV files (*.csv);;All files (*)",
-    )
-
-    if not file_path:
-        set_status_ok(aboba, "Не хочешь, как хочешь...")
-        schedule_status_reset(aboba, 5)
+    if selected_type not in REFERENCE_TYPES:
+        set_status_error(aboba, "Допустимы только справочники CSV")
         return
+    file_path, _ = QFileDialog.getOpenFileName(aboba, "Выберите CSV справочник", "", "CSV (*.csv)")
+    if file_path:
+        aboba.mb_controller.start_reference(file_path, selected_type)
 
-    try:
-        input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
-        os.makedirs(input_dir, exist_ok=True)
 
-        # --- helpers (локально, чтобы не засорять класс лишними методами) ---
-        def _sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
-            df = df.copy()
-
-            if "Дата" in df.columns:
-                df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce").dt.normalize()
-
-            if "ДатаРождения" in df.columns:
-                df["ДатаРождения"] = pd.to_datetime(df["ДатаРождения"], errors="coerce")
-
-            for col in ("Телефон", "ДисконтнаяКарта", "Возраст", "MindboxID"):
-                if col in df.columns:
-                    df[col] = (
-                        df[col]
-                        .astype("string")
-                        .str.replace(r"\.0$", "", regex=True)
-                        .str.strip()
-                    )
-
-            return df
-
-        def _save(df: pd.DataFrame, save_path: str) -> None:
-            save_dir = os.path.dirname(os.path.abspath(save_path))
-            temp_fd = None
-            temp_path = None
-
-            try:
-                temp_fd, temp_path = tempfile.mkstemp(
-                    dir=save_dir,
-                    prefix=f".{os.path.basename(save_path)}.",
-                    suffix=".tmp",
-                )
-                try:
-                    os.close(temp_fd)
-                finally:
-                    # Не закрываем дескриптор повторно, если os.close() вызвал исключение.
-                    temp_fd = None
-
-                df.to_csv(temp_path, index=False, sep="|", encoding="utf-8-sig")
-                os.replace(temp_path, save_path)
-                temp_path = None
-            except BaseException:
-                cleanup_errors = []
-
-                if temp_fd is not None:
-                    try:
-                        os.close(temp_fd)
-                    except OSError as cleanup_error:
-                        cleanup_errors.append(("close", cleanup_error))
-
-                if temp_path is not None:
-                    try:
-                        os.remove(temp_path)
-                    except FileNotFoundError:
-                        pass
-                    except OSError as cleanup_error:
-                        cleanup_errors.append(("remove", cleanup_error))
-
-                for cleanup_action, cleanup_error in cleanup_errors:
-                    try:
-                        print(
-                            "Temporary CSV cleanup failed "
-                            f"({cleanup_action}, path={temp_path!a}): "
-                            f"{cleanup_error!a}",
-                            file=sys.stderr,
-                        )
-                    except Exception:
-                        # Диагностика cleanup не должна скрывать исходную ошибку.
-                        pass
-
-                raise
-
-        def _append_or_overwrite(df: pd.DataFrame, save_path: str) -> pd.DataFrame:
-
-            if mode == "Добавить новый / Обновить существующий":
-                _save(df, save_path)
-                return df
-
-            # mode == "Добавить данные к существующему"
-            if os.path.exists(save_path):
-                df_old = pd.read_csv(save_path, sep="|", encoding="utf-8-sig", dtype=str)
-                df_old = _sanitize_df(df_old)
-                df = pd.concat([df_old, df], ignore_index=True)
-
-            _save(df, save_path)
-            return df
-
-        def _process_pair(reader_sep: str, processor_fn, filename: str) -> tuple[pd.DataFrame | None, str]:
-            df_src = read_csv_auto_encoding(aboba, file_path=file_path, sep=reader_sep)
-            if df_src is None:
-                return None, ""
-
-            df = processor_fn(aboba, df_src)
-            if df is None:
-                return None, ""
-
-            save_path = os.path.join(input_dir, filename)
-            df_final = _append_or_overwrite(df, save_path)
-            return df_final, save_path
-
-        def _process_single(reader_sep: str, processor_fn, filename: str) -> bool:
-            df_src = read_csv_auto_encoding(aboba, file_path=file_path, sep=reader_sep)
-            if df_src is None:
-                return False
-
-            df_res = processor_fn(aboba, df_src)
-            if df_res is None:
-                return False
-
-            save_path_full = os.path.join(input_dir, filename)
-            _save(df_res, save_path_full)
-
-            return True
-
-        def _save_store_list(df_orders: pd.DataFrame, save_dir: str) -> None:
-            if "Магазин" not in df_orders.columns:
-                stores_df = pd.DataFrame({"Магазин": []})
-            else:
-                s = (
-                    df_orders["Магазин"]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                )
-                s = s[s != ""]
-                stores = sorted(pd.unique(s))  # можно убрать sorted(), если хочешь сохранить исходный порядок
-                stores_df = pd.DataFrame({"Магазин": stores})
-
-            stores_path = os.path.join(save_dir, "СписокМагазинов.csv")
-            _save(stores_df, stores_path)
-
-        # --- routing по типу ---
-        if selected_type == "Заказы клиентов из Mindbox":
-            df_final, _ = _process_pair(
-                reader_sep=";",
-                processor_fn=process_orders_file,
-                filename="Заказы.csv",
-            )
-            if df_final is None:
-                return
-
-            _save_store_list(df_final, input_dir)
-
-        elif selected_type == "Просмотры товаров и категорий из Mindbox":
-            df_final, _ = _process_pair(
-                reader_sep=";",
-                processor_fn=process_views_file,
-                filename="Просмотры.csv",
-            )
-            if df_final is None:
-                return
-
-        elif selected_type == "Добавление товаров в избранное из Mindbox":
-            df_final, _ = _process_pair(
-                reader_sep=";",
-                processor_fn=process_favorites_file,
-                filename="Избранное.csv",
-            )
-            if df_final is None:
-                return
-
-        elif selected_type == "Номенклатура из 1С":
-            ok = _process_single(
-                reader_sep="|",
-                processor_fn=process_nomenclature_file,
-                filename="Номенклатура.csv",
-            )
-
-            if not ok:
-                return
-
-            aboba._name_by_code = None
-            aboba._collection_by_code = None
-            aboba._stock_by_code = None
-
-        elif selected_type == "Категории сайта из 1С":
-            ok = _process_single(
-                reader_sep="|",
-                processor_fn=process_categories_file,
-                filename="КатегорииСайта.csv",
-            )
-
-            if not ok:
-                return
-
-        elif selected_type == "Координаты городов и погода":
-            ok = _process_single(
-                reader_sep=",",
-                processor_fn=process_coordinates_file,
-                filename="КоординатыГородов.csv",
-            )
-
-            if not ok:
-                return
-
-            load_cities_from_coordinates_file(aboba)
-            refresh_store_city_table(aboba)
-
-        else:
-            show_custom_message(aboba,
-                                title="Ошибка",
-                                text="Неизвестный тип данных",
-                                image_path="Картинки/Неудача.png",
-                                )
-            set_status_error(aboba, "Неизвестный тип данных")
-            schedule_status_reset(aboba, 5)
-            return
-
-        # Обновляем статус + вкладки статистики
-        update_file_status(aboba)
-
-        update_filter_controls_availability(aboba)
-        refresh_kind_values_from_loaded_files(aboba)
-        refresh_season_values_from_nomenclature_file(aboba)
-        refresh_export_kind_values_from_nomenclature_file(aboba)
+def apply_reference_result(aboba, result):
+    """Apply small ready lists on the GUI thread; never reread interaction files."""
+    if result["kind"] == "Номенклатура из 1С":
+        for name in ("_name_by_code", "_collection_by_code", "_stock_by_code", "_photo_by_code"):
+            setattr(aboba, name, None)
+        for attr, key, pending_attr in (("export_kind_filter", "kinds", "_pending_export_kind_selection"),
+                                        ("filter_season", "seasons", "_pending_season_selection")):
+            widget = getattr(aboba, attr, None)
+            if widget is not None:
+                pending = getattr(aboba, pending_attr, None)
+                selected = pending if pending is not None else get_selected_list_values(widget)
+                set_list_widget_items(aboba, widget, result[key], selected)
+                setattr(aboba, pending_attr, None)
+    elif result["kind"] == "Координаты городов и погода":
+        aboba._cities = result["cities"]
+        table = getattr(aboba, "store_city_table", None)
+        if table is not None:
+            for row in range(table.rowCount()):
+                combo = table.cellWidget(row, 1)
+                if combo is not None:
+                    current = combo.currentText()
+                    combo.clear()
+                    combo.addItems(["", *aboba._cities])
+                    combo.setCurrentText(current if current in aboba._cities else "")
+                    combo.setEnabled(bool(aboba._cities))
+    update_file_status(aboba)
+    update_filter_controls_availability(aboba)
+    if hasattr(aboba, "filter_summary"):
         update_filter_summary(aboba)
-
-        # Пересчитываем статистику
-        analyze_orders_full_dataset(aboba)
-        analyze_views_full_dataset(aboba)
-        analyze_favorites_full_dataset(aboba)
-
-    except Exception as e:
-        show_custom_message(aboba,
-                            title="Ошибка",
-                            text=f"Не удалось загрузить файл:\n{str(e)}",
-                            image_path="Картинки/Неудача.png",
-                            )
-        set_status_error(aboba, "Ошибка обработки")
-        schedule_status_reset(aboba, 5)
 
 
 # -------------------------------------------АВТОМАТИЧЕСКАЯ КОДИРОВКА-----------------------------------------------

@@ -455,3 +455,73 @@ def test_state_flush_fsync_before_replace(tmp_path, window, monkeypatch):
     monkeypatch.setattr(api.os, "replace", publish)
     api._atomic_write(state, batch)
     assert calls == ["fsync", "replace"]
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_selection_persistence_resume_and_v2_defaults(tmp_path, window, custom):
+    from Application.mindbox.selection import DEFAULT_SELECTION
+    selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",)) if custom else DEFAULT_SELECTION
+    with pytest.raises(api.ChunkedBatchError):
+        api.create_chunked_training_batch(Client(4), raw_root=tmp_path, window=window, selection=selection)
+    state = state_path(tmp_path)
+    document = json.loads(state.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 4
+    assert document["selection"]["view_action_system_names"] == list(selection.view_action_system_names)
+    assert api.load_chunked_training_batch(state, raw_root=tmp_path).selection == selection
+    final = api.resume_chunked_training_batch(Client(), state_path=state, raw_root=tmp_path)
+    manifest = state.with_name("manifest.json")
+    assert final.selection == selection
+    assert api.load_chunked_training_batch(manifest, raw_root=tmp_path, require_complete=True).selection == selection
+    for path in (state, manifest):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["schema_version"] = 2
+        del data["selection"], data["source_kind"], data["merge_source_training_batch_id"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+    assert api.load_chunked_training_batch(manifest, raw_root=tmp_path, require_complete=True).selection == DEFAULT_SELECTION
+    assert api.resume_chunked_training_batch(Client(), state_path=state, raw_root=tmp_path).selection == DEFAULT_SELECTION
+
+
+def test_prefix_carries_selection(tmp_path):
+    from Application.mindbox.selection import DEFAULT_SELECTION
+    state = prefix_source(tmp_path, ready_days=1)
+    selection = replace(DEFAULT_SELECTION, purchase_line_statuses=("CustomStatus",))
+    source = replace(api.load_chunked_training_batch(state, raw_root=tmp_path), selection=selection)
+    api._atomic_write(state, source)
+    before = state.read_bytes()
+    final = api.finalize_chunked_training_batch_prefix(PrefixClient(), state_path=state, raw_root=tmp_path)
+    manifest = tmp_path / "training_batches" / final.batch_id / "manifest.json"
+    assert api.load_chunked_training_batch(manifest, raw_root=tmp_path, require_complete=True).selection == selection
+    assert state.read_bytes() == before
+
+
+def test_cli_custom_selection_and_unchanged_payload(tmp_path, monkeypatch):
+    import Application.mindbox as mindbox
+    client = Client()
+    monkeypatch.setattr(mindbox.MindboxConfig, "from_env", lambda *a: client.config)
+    monkeypatch.setattr(mindbox, "MindboxClient", lambda *a: client)
+    args = ["export-daily", "--since", "2026-08-01", "--until", "2026-08-02",
+            "--merge-since", "2025-01-01 00:00", "--raw-root", str(tmp_path)]
+    assert main(args + ["--view-action", "CustomView", "--view-action", "OtherView",
+                        "--favorite-action", "CustomFavorite", "--purchase-status", "CustomStatus",
+                        "--action-product-namespace", "kanzlerKz", "--order-product-namespace", "offline1C"]) == 0
+    selection = api.load_chunked_training_batch(state_path(tmp_path), raw_root=tmp_path).selection
+    assert selection.view_action_system_names == ("CustomView", "OtherView")
+    assert selection.favorite_action_system_names == ("CustomFavorite",)
+    assert selection.purchase_line_statuses == ("CustomStatus",)
+    assert selection.action_product_namespaces == ("kanzlerKz",)
+    assert selection.order_product_namespaces == ("offline1C",)
+    assert all(set(payload) == {"sinceDateTimeUtc", "tillDateTimeUtc"} for _, payload in client.calls)
+    client.calls.clear()
+    assert main(args + ["--view-action", "same", "--favorite-action", "same"]) == 1
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("damage", [None, {}, {"view_action_system_names": []}])
+def test_v3_requires_complete_valid_selection(tmp_path, window, damage):
+    api.create_chunked_training_batch(Client(), raw_root=tmp_path, window=window)
+    state = state_path(tmp_path)
+    data = json.loads(state.read_text(encoding="utf-8"))
+    data["selection"] = damage
+    state.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(TrainingBatchError):
+        api.load_chunked_training_batch(state, raw_root=tmp_path)

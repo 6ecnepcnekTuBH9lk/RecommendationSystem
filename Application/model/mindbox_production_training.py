@@ -115,9 +115,11 @@ def _prepare(manifest, raw_root, catalog, cfg):
         actions_view=d.actions_view, actions_favorite=d.actions_favorite, malformed_mapped_actions=d.malformed_actions,
         unresolved_products=d.resolution.total.unresolved, unsupported_products=d.resolution.total.unsupported_namespace,
         bpr_events=d.bpr.events_total, unmapped_actions=d.unmapped_actions,
-        malformed_action_system_names=d.malformed_action_system_names))
+        malformed_action_system_names=d.malformed_action_system_names,
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting))
     result = ProductionTrainingResult(batch_id=batch.batch_id, quality_report=quality,
-        dataset={**dict(quality.metrics), "complete": prepared.complete}, interaction_window={
+        dataset={**dict(quality.metrics), "complete": prepared.complete, "orders_raw": d.orders_raw,
+                 "orders_unique": d.orders_unique, "orders_duplicate_identical": d.orders_duplicate_identical}, interaction_window={
             "since": batch.window.interaction_since.isoformat(), "until": batch.window.interaction_until.isoformat()})
     return prepared.prepared_data, result
 

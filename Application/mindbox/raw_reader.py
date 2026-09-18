@@ -126,5 +126,7 @@ def iter_export(
 ) -> Iterator[dict[str, Any]]:
     """Yield объектов по порядку частей; дробные JSON numbers читаются точно как Decimal."""
     directory = select_export_directory(export_name, raw_root=raw_root, input_dir=input_dir)
-    for number, path in enumerate(part_files(directory, export_name), start=1):
-        yield from load_export_part(path, export_name, number)
+    from .customers_stream import iter_json_records
+
+    for path in part_files(directory, export_name):
+        yield from iter_json_records(path, EXPORT_ROOTS[export_name])

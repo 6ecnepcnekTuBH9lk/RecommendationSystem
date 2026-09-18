@@ -10,10 +10,10 @@ from types import MappingProxyType
 
 from Application.interactions import InteractionRecord, InteractionType
 from Application.mindbox.records import ProductKey
+from Application.mindbox.selection import SUPPORTED_NAMESPACES
 
 
 DEFAULT_CATALOG_PATH = Path(__file__).resolve().parents[1] / "ВходныеДанные" / "Номенклатура.csv"
-SUPPORTED_NAMESPACES = frozenset({"offline1C", "kanzlerKz"})
 
 
 class CatalogError(Exception):

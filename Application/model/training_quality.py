@@ -35,10 +35,11 @@ class TrainingQualityDiagnostics:
     bpr_events: int = 0
     unmapped_actions: int = 0
     malformed_action_system_names: Mapping[str, int] = field(default_factory=dict)
+    orders_duplicate_conflicting: int = 0
 
     def __post_init__(self):
         counts = (self.actions_view, self.actions_favorite, self.malformed_mapped_actions,
-                  self.unresolved_products, self.unsupported_products, self.bpr_events, self.unmapped_actions)
+                  self.unresolved_products, self.unsupported_products, self.bpr_events, self.unmapped_actions, self.orders_duplicate_conflicting)
         if any(type(value) is not int or value < 0 for value in counts):
             raise ValueError("Quality counters must be non-negative integers")
         if self.malformed_mapped_actions > self.actions_view + self.actions_favorite:
@@ -109,6 +110,7 @@ def evaluate_training_quality(
             diagnostics.malformed_mapped_actions, "Mapped actions without products were excluded", rate,
             diagnostics.malformed_action_system_names))
     for code, count, message in (
+        ("CONFLICTING_ORDER_SNAPSHOTS", diagnostics.orders_duplicate_conflicting, "Conflicting order snapshots"),
         ("UNRESOLVED_PRODUCT", diagnostics.unresolved_products, "Product identity could not be resolved"),
         ("UNSUPPORTED_PRODUCT_NAMESPACE", diagnostics.unsupported_products, "Unsupported product namespace"),
     ):
@@ -119,5 +121,6 @@ def evaluate_training_quality(
     metrics = {"mapped_actions": mapped, "malformed_mapped_actions": diagnostics.malformed_mapped_actions,
                "malformed_rate": rate, "unresolved_products": diagnostics.unresolved_products,
                "unsupported_products": diagnostics.unsupported_products, "bpr_events": diagnostics.bpr_events,
-               "unmapped_actions": diagnostics.unmapped_actions, **sizes}
+               "unmapped_actions": diagnostics.unmapped_actions,
+               "orders_duplicate_conflicting": diagnostics.orders_duplicate_conflicting, **sizes}
     return TrainingQualityReport(level, tuple(issues), metrics)

@@ -84,7 +84,7 @@ def test_snapshot_export_validate_inspect_metadata_only(source, monkeypatch, cap
 @pytest.mark.parametrize("field,value", [("customers_directory", "../customers/20260101_000000"),
     ("customers_directory", "customers/../../outside"), ("customers_directory", "C:/secret"),
     ("customers_parts", 2), ("customer_merges_parts", 0), ("originating_training_batch_id", "c" * 32),
-    ("transport_complete", False), ("schema_version", 2), ("created_at", "invalid-secret")])
+    ("transport_complete", False), ("schema_version", 99), ("created_at", "invalid-secret")])
 def test_corrupt_snapshot_rejected_safely(source, field, value, capsys):
     root, _, _ = source
     snapshot, manifest = create(source)
@@ -169,3 +169,13 @@ def test_inspect_progress_and_cancellation(source, monkeypatch, capsys):
     assert "cancelled" in output.err
     assert all(s not in output.out + output.err for s in SECRETS)
     assert {p: p.read_bytes() for p in root.rglob("*.json")} == before
+
+
+
+def test_original_v1_snapshot_without_transport_fields_loads(source):
+    root, _, _ = source
+    snapshot, path = create(source)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["source_kind"], data["merge_source_training_batch_id"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert api.load_customer_profile_snapshot(path, raw_root=root) == snapshot

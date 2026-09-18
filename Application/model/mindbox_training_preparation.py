@@ -10,7 +10,9 @@ from .interaction_analytics import AnalyticsCollector, load_catalog_kinds
 from Application.interactions import InteractionBuilder, InteractionBuildError, classify_action_system_name
 from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
 from Application.mindbox.identity import CustomerIdResolver
+from Application.mindbox.selection import DEFAULT_SELECTION, MindboxSelectionConfig
 from Application.mindbox.raw_reader import iter_export
+from Application.mindbox.order_dedup import OrderSnapshots
 from Application.product_resolution import ProductResolver, ProductResolutionDiagnostics, load_catalog
 from Application.model.bpr_preparation import (
     BprDiagnostics, BprPreparationConfig, BprWeightConfig, DateMode, prepare_bpr, to_bpr_event,
@@ -42,6 +44,10 @@ class MindboxPreparationDiagnostics:
     actions_view: int = 0
     actions_favorite: int = 0
     unmapped_action_system_names: Mapping[str, int] = field(default_factory=dict)
+    orders_raw: int = 0
+    orders_unique: int = 0
+    orders_duplicate_identical: int = 0
+    orders_duplicate_conflicting: int = 0
 
     def __post_init__(self):
         object.__setattr__(self, "malformed_action_system_names",
@@ -66,16 +72,17 @@ def prepare_training_data_from_mindbox(
     *, actions_export_dir: str | Path, orders_export_dir: str | Path,
     customer_merges_export_dir: str | Path, catalog_path: str | Path,
     train_config: PreparationTrainConfig, diagnose: bool = False,
+    selection: MindboxSelectionConfig = DEFAULT_SELECTION,
 ) -> MindboxPreparationResult:
     return _prepare_training_data_from_mindbox_sources(
         actions_export_dirs=(actions_export_dir,), orders_export_dirs=(orders_export_dir,),
         customer_merges_export_dir=customer_merges_export_dir, catalog_path=catalog_path,
-        train_config=train_config, diagnose=diagnose)
+        train_config=train_config, diagnose=diagnose, selection=selection)
 
 
 def _prepare_training_data_from_mindbox_sources(
     *, actions_export_dirs, orders_export_dirs, customer_merges_export_dir,
-    catalog_path, train_config, diagnose=False,
+    catalog_path, train_config, diagnose=False, selection: MindboxSelectionConfig = DEFAULT_SELECTION,
 ) -> MindboxPreparationResult:
     if not actions_export_dirs or not orders_export_dirs:
         raise ValueError("Explicit export directory sequences required")
@@ -96,6 +103,7 @@ def _prepare_training_data_from_mindbox_sources(
     products = ProductResolver(load_catalog(Path(catalog_path)))
     merge_count = 0
     order_count = 0
+    snapshots = OrderSnapshots()
 
     def merges():
         nonlocal merge_count
@@ -104,7 +112,7 @@ def _prepare_training_data_from_mindbox_sources(
             yield adapt_customer_merge(raw)
 
     customers = CustomerIdResolver(merges())
-    builder = InteractionBuilder()
+    builder = InteractionBuilder(selection.interaction_rules())
     analytics = AnalyticsCollector()
 
     def collect(resolved):
@@ -124,7 +132,7 @@ def _prepare_training_data_from_mindbox_sources(
             if classify_action_system_name(system_name, builder.rules) is None:
                 builder.record_unmapped_action(system_name)
                 continue
-            action = adapt_action(raw, customers)
+            action = adapt_action(raw, customers, product_namespaces=selection.action_product_namespaces)
             try:
                 interactions = builder.from_action(action)
             except InteractionBuildError:
@@ -136,8 +144,10 @@ def _prepare_training_data_from_mindbox_sources(
                 if resolved is not None:
                     yield collect(resolved)
         for raw in sources("orders", orders_export_dirs):
+            if not snapshots.accept(raw, diagnose=diagnose):
+                continue
             order_count += 1
-            for line in adapt_order(raw, customers):
+            for line in adapt_order(raw, customers, product_namespaces=selection.order_product_namespaces):
                 interaction = builder.from_order_line(line)
                 if interaction is not None:
                     resolved = products.resolve_interaction(interaction, strict=not diagnose)
@@ -154,10 +164,11 @@ def _prepare_training_data_from_mindbox_sources(
         interactions.view_interactions, interactions.favorite_interactions, interactions.purchase_interactions,
         resolution, prepared.diagnostics,
         malformed_action_system_names=interactions.malformed_action_system_names,
-        orders=order_count,
+        orders=order_count, orders_raw=snapshots.raw, orders_unique=len(snapshots.fingerprints),
+        orders_duplicate_identical=snapshots.identical, orders_duplicate_conflicting=snapshots.conflicting,
         actions_view=interactions.actions_view,
         actions_favorite=interactions.actions_favorite,
         unmapped_action_system_names=interactions.unmapped_action_system_names,
     )
     return MindboxPreparationResult(prepared, diagnostics,
-                                    not (interactions.actions_malformed or resolution.total.unresolved))
+                                    not (interactions.actions_malformed or resolution.total.unresolved or snapshots.conflicting))

@@ -12,6 +12,7 @@ import tempfile
 import uuid
 
 from .raw_reader import part_files
+from .selection import DEFAULT_SELECTION, MindboxSelectionConfig
 from .storage import RawExportStorage
 from .training_batch import TrainingBatchError, TrainingBatchExport, TrainingBatchWindow, _directory, _utc
 
@@ -49,6 +50,9 @@ class ChunkedTrainingBatch:
     config_fingerprint: str
     components: tuple[BatchComponent, ...]
     transport_complete: bool = False
+    selection: MindboxSelectionConfig = DEFAULT_SELECTION
+    source_kind: str = "API"
+    merge_source_training_batch_id: str | None = None
 
     @property
     def diagnostics(self):
@@ -84,7 +88,8 @@ def _batch_directory(root, batch_id):
 
 
 def _document(batch):
-    return {"schema_version": 2, "batch_id": batch.batch_id,
+    return {"schema_version": 4, "source_kind": batch.source_kind,
+            "merge_source_training_batch_id": batch.merge_source_training_batch_id, "selection": asdict(batch.selection), "batch_id": batch.batch_id,
             "created_at_utc": batch.created_at_utc.isoformat(),
             "window": {k: v.isoformat() for k, v in asdict(batch.window).items()},
             "config_fingerprint": batch.config_fingerprint, "transport_complete": batch.transport_complete,
@@ -135,13 +140,30 @@ def _writer_lock(directory):
 
 
 def validate_chunked_training_batch(batch, *, raw_root, require_complete=False):
+    if not isinstance(batch.selection, MindboxSelectionConfig):
+        raise TrainingBatchError("Invalid batch selection")
     root = Path(raw_root).resolve()
     _batch_directory(root, batch.batch_id)
     _utc(batch.created_at_utc)
-    days = split_daily_windows(batch.window.interaction_since, batch.window.interaction_until)
+    if batch.source_kind not in ("API", "MANUAL"):
+        raise TrainingBatchError("Invalid batch source kind")
+    days = split_daily_windows(batch.window.interaction_since, batch.window.interaction_until) if batch.source_kind == "API" else ()
     TrainingBatchWindow(**asdict(batch.window))
     expected = [("customer_merges", batch.window.merge_since, batch.window.interaction_until)]
     expected += [(name, day.since, day.until) for day in days for name in ("actions", "orders")]
+    if batch.source_kind == "MANUAL":
+        if not batch.transport_complete or not batch.components or batch.merge_source_training_batch_id == batch.batch_id:
+            raise TrainingBatchError("Manual batch must be complete with an API merges source")
+        source_path = _batch_directory(root, batch.merge_source_training_batch_id) / "manifest.json"
+        source = load_chunked_training_batch(source_path, raw_root=root, require_complete=True, api_only=True)
+        if (source.window.merge_since > batch.window.merge_since
+                or source.window.interaction_until < batch.window.interaction_until
+                or batch.components[0] != source.components[0]):
+            raise TrainingBatchError("Incompatible saved CustomerMerges coverage")
+        expected = [("customer_merges", source.components[0].since, source.components[0].until)]
+        expected += [(name, batch.window.interaction_since, batch.window.interaction_until) for name in ("actions", "orders")]
+    elif batch.merge_source_training_batch_id is not None:
+        raise TrainingBatchError("API batch cannot borrow a merges source")
     if (len(batch.components) != len(expected) or type(batch.transport_complete) is not bool
             or not isinstance(batch.config_fingerprint, str) or len(batch.config_fingerprint) != 64
             or any(c not in "0123456789abcdef" for c in batch.config_fingerprint)):
@@ -162,9 +184,14 @@ def validate_chunked_training_batch(batch, *, raw_root, require_complete=False):
             raise TrainingBatchError("READY components must form a sequential prefix")
         entry = component.export
         if (not isinstance(entry, TrainingBatchExport) or entry.name != component.name or entry.operation != component.operation
-                or not isinstance(entry.export_id, str) or not entry.export_id.strip()
+                or entry.source_kind not in ("API", "MANUAL")
+                or (entry.source_kind == "API" and (not isinstance(entry.export_id, str) or not entry.export_id.strip()))
+                or (entry.source_kind == "MANUAL" and (entry.export_id is not None or entry.operation != "MANUAL"))
+                or entry.source_kind != ("MANUAL" if batch.source_kind == "MANUAL" and component.name != "customer_merges" else "API")
                 or type(entry.parts_count) is not int or entry.parts_count < 1):
             raise TrainingBatchError("Invalid READY export metadata")
+        if entry.source_kind == "MANUAL" and entry.relative_directory != f"training_batches/{batch.batch_id}/{entry.name}":
+            raise TrainingBatchError("Manual raw must belong to its batch")
         directory = _directory(root, entry)
         if directory in paths or len(part_files(directory, entry.name)) != entry.parts_count:
             raise TrainingBatchError("Duplicate/missing export parts")
@@ -175,7 +202,7 @@ def validate_chunked_training_batch(batch, *, raw_root, require_complete=False):
         raise TrainingBatchError("Final manifest required")
 
 
-def load_chunked_training_batch(path, *, raw_root, require_complete=False):
+def load_chunked_training_batch(path, *, raw_root, require_complete=False, api_only=False):
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -187,10 +214,22 @@ def load_chunked_training_batch(path, *, raw_root, require_complete=False):
     try:
         with Path(path).open(encoding="utf-8") as stream:
             data = json.load(stream, object_pairs_hook=unique)
-        if (set(data) != {"schema_version", "batch_id", "created_at_utc", "window", "config_fingerprint",
-                          "components", "transport_complete"} or type(data["schema_version"]) is not int
-                or data["schema_version"] != 2):
+        version = data.get("schema_version")
+        expected = {"schema_version", "batch_id", "created_at_utc", "window", "config_fingerprint",
+                    "components", "transport_complete"}
+        if version in (3, 4):
+            expected.add("selection")
+        if version == 4:
+            expected.update(("source_kind", "merge_source_training_batch_id"))
+        if api_only and data.get("source_kind", "API") != "API":
+            raise TrainingBatchError("API batch required")
+        if type(version) is not int or version not in (2, 3, 4) or set(data) != expected:
             raise TrainingBatchError("Invalid daily state schema")
+        selection = DEFAULT_SELECTION
+        if version in (3, 4):
+            if not isinstance(data["selection"], dict) or set(data["selection"]) != set(asdict(DEFAULT_SELECTION)):
+                raise TrainingBatchError("Invalid selection fields")
+            selection = MindboxSelectionConfig(**data["selection"])
         components = []
         for c in data["components"]:
             if set(c) != {"name", "since", "until", "operation", "status", "export"}:
@@ -200,7 +239,8 @@ def load_chunked_training_batch(path, *, raw_root, require_complete=False):
                 TrainingBatchExport(**c["export"]) if c["export"] is not None else None))
         batch = ChunkedTrainingBatch(data["batch_id"], datetime.fromisoformat(data["created_at_utc"]),
             TrainingBatchWindow(**{k: datetime.fromisoformat(v) for k, v in data["window"].items()}),
-            data["config_fingerprint"], tuple(components), data["transport_complete"])
+            data["config_fingerprint"], tuple(components), data["transport_complete"], selection,
+            data.get("source_kind", "API"), data.get("merge_source_training_batch_id"))
         directory = _batch_directory(Path(raw_root).resolve(), batch.batch_id)
         if Path(path).resolve() not in (directory / "state.json", directory / "manifest.json"):
             raise TrainingBatchError("State path does not match batch identity")
@@ -213,7 +253,7 @@ def load_chunked_training_batch(path, *, raw_root, require_complete=False):
 
 
 def create_chunked_training_batch(client, *, raw_root, window, poll_interval=5.0, timeout=600.0,
-                                  on_state_created=None):
+                                  on_state_created=None, selection: MindboxSelectionConfig = DEFAULT_SELECTION):
     days = split_daily_windows(window.interaction_since, window.interaction_until)
     # Validate the full window and polling config before writing state or starting API calls.
     TrainingBatchWindow(**asdict(window))
@@ -223,7 +263,7 @@ def create_chunked_training_batch(client, *, raw_root, window, poll_interval=5.0
     components += [BatchComponent(name, day.since, day.until, client.config.operations[name])
                    for day in days for name in ("actions", "orders")]
     batch = ChunkedTrainingBatch(uuid.uuid4().hex, datetime.now(timezone.utc), window,
-                                _fingerprint(client.config), tuple(components))
+                                _fingerprint(client.config), tuple(components), selection=selection)
     validate_chunked_training_batch(batch, raw_root=raw_root)
     directory = _batch_directory(Path(raw_root).resolve(), batch.batch_id)
     directory.parent.mkdir(parents=True, exist_ok=True)
@@ -248,7 +288,7 @@ def _poll_settings(poll_interval, timeout):
 def resume_chunked_training_batch(client, *, state_path, raw_root, poll_interval=5.0, timeout=600.0):
     state = Path(state_path).resolve()
     _poll_settings(poll_interval, timeout)
-    batch = load_chunked_training_batch(state, raw_root=raw_root)
+    batch = load_chunked_training_batch(state, raw_root=raw_root, api_only=True)
     if state.name != "state.json":
         raise TrainingBatchError("Resume requires state.json")
     with _writer_lock(state.parent):
@@ -310,7 +350,7 @@ def finalize_chunked_training_batch_prefix(client, *, state_path, raw_root, poll
     if state.name != "state.json":
         raise TrainingBatchError("Prefix finalization requires state.json")
     with _writer_lock(state.parent):
-        source = load_chunked_training_batch(state, raw_root=root)
+        source = load_chunked_training_batch(state, raw_root=root, api_only=True)
         if (_fingerprint(client.config) != source.config_fingerprint or any(
                 c.operation != client.config.operations[c.name] for c in source.components)):
             raise TrainingBatchError("Endpoint/operation config differs from saved batch")
@@ -339,7 +379,7 @@ def finalize_chunked_training_batch_prefix(client, *, state_path, raw_root, poll
             merges = BatchComponent("customer_merges", window.merge_since, window.interaction_until,
                                     operation, "READY", entry)
             final = ChunkedTrainingBatch(uuid.uuid4().hex, datetime.now(timezone.utc), window,
-                                         source.config_fingerprint, (merges, *ready), True)
+                                         source.config_fingerprint, (merges, *ready), True, source.selection)
             validate_chunked_training_batch(final, raw_root=root, require_complete=True)
             directory = _batch_directory(root, final.batch_id)
             directory.mkdir()
@@ -362,4 +402,4 @@ def prepare_training_data_from_chunked_batch(batch, *, raw_root, catalog_path, t
         return tuple(_directory(root, c.export) for c in batch.components if c.name == name)
     return _prepare_training_data_from_mindbox_sources(actions_export_dirs=directories("actions"),
         orders_export_dirs=directories("orders"), customer_merges_export_dir=directories("customer_merges")[0],
-        catalog_path=catalog_path, train_config=train_config, diagnose=diagnose)
+        catalog_path=catalog_path, train_config=train_config, diagnose=diagnose, selection=batch.selection)

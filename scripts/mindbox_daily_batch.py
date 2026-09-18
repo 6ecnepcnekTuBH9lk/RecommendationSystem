@@ -41,6 +41,7 @@ def main(argv=None):
         load_chunked_training_batch, prepare_training_data_from_chunked_batch,
         finalize_chunked_training_batch_prefix,
     )
+    from Application.mindbox.selection import MindboxSelectionConfig, SELECTION_OPTIONS
     from Application.mindbox.training_batch import TrainingBatchWindow
     from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT, RawExportError
     from Application.mindbox.adapters import AdapterError
@@ -64,6 +65,8 @@ def main(argv=None):
         command.add_argument("--poll-interval", type=float, default=5)
     for name in ("since", "until", "merge-since"):
         export.add_argument("--" + name, required=True)
+    for field, option in SELECTION_OPTIONS.items():
+        export.add_argument(option, dest=field, action="append")
     for command in (resume, prefix, status):
         command.add_argument("--state", type=Path, required=True)
     for command in (validate, prepare):
@@ -75,6 +78,9 @@ def main(argv=None):
     try:
         if args.command in ("export-daily", "resume", "finalize-prefix"):
             if args.command == "export-daily":
+                selection = MindboxSelectionConfig(**{
+                    field: getattr(args, field) for field in SELECTION_OPTIONS if getattr(args, field) is not None
+                })
                 def date(value, format):
                     return datetime.strptime(value, format).replace(tzinfo=timezone.utc)
                 window = TrainingBatchWindow(date(args.since, "%Y-%m-%d"), date(args.until, "%Y-%m-%d"),
@@ -83,7 +89,7 @@ def main(argv=None):
             with MindboxClient(config) as client:
                 if args.command == "export-daily":
                     batch = create_chunked_training_batch(client, raw_root=args.raw_root, window=window,
-                        timeout=args.timeout, poll_interval=args.poll_interval,
+                        timeout=args.timeout, poll_interval=args.poll_interval, selection=selection,
                         on_state_created=lambda path: print(f"State: {path}", flush=True))
                 elif args.command == "resume":
                     batch = resume_chunked_training_batch(client, state_path=state, raw_root=args.raw_root,
@@ -121,6 +127,9 @@ def main(argv=None):
                     catalog_path=args.catalog, train_config=TrainConfig(), diagnose=args.diagnose)
         d = result.diagnostics
         for label, count in (("Actions", d.actions), ("Orders", d.orders), ("Order lines", d.order_lines),
+                            ("Orders raw", d.orders_raw), ("Orders unique", d.orders_unique),
+                            ("Orders duplicate identical", d.orders_duplicate_identical),
+                            ("Orders duplicate conflicting", d.orders_duplicate_conflicting),
                             ("VIEW", d.view_interactions), ("FAVORITE", d.favorite_interactions),
                             ("PURCHASE", d.purchase_interactions), ("Malformed", d.malformed_actions),
                             ("Unmapped", d.unmapped_actions), ("Resolved", d.resolution.total.resolved),
@@ -137,7 +146,8 @@ def main(argv=None):
             actions_view=d.actions_view, actions_favorite=d.actions_favorite,
             malformed_mapped_actions=d.malformed_actions, unresolved_products=d.resolution.total.unresolved,
             unsupported_products=d.resolution.total.unsupported_namespace, bpr_events=d.bpr.events_total,
-            unmapped_actions=d.unmapped_actions, malformed_action_system_names=d.malformed_action_system_names))
+            unmapped_actions=d.unmapped_actions, malformed_action_system_names=d.malformed_action_system_names,
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting))
         print(f"Training quality: {quality.level.value}")
         print(f"Training allowed: {quality.training_allowed}")
         print(f"Mapped actions: {quality.metrics['mapped_actions']}")

@@ -9,6 +9,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from Application.mindbox.records import ActionRecord, OrderLineRecord, ProductKey
+from Application.mindbox.selection import DEFAULT_VIEW_ACTIONS, DEFAULT_FAVORITE_ACTIONS, DEFAULT_PURCHASE_STATUSES
 
 
 class InteractionType(str, Enum):
@@ -42,12 +43,9 @@ class InteractionBuildError(Exception):
     """Malformed business event; сообщение не содержит ID и значений данных."""
 
 
-VIEW_ACTION_SYSTEM_NAMES = frozenset({"ProsmotrProdukta", "ProsmotrProduktaVApiMethod"})
-FAVORITE_ACTION_SYSTEM_NAMES = frozenset({
-    "DobavlenieProduktaVSpisokVOperaciiDobavlenie",
-    "DobavlenieProduktaVSpisokVOperaciiDobavlenieTovara",
-})
-PURCHASE_LINE_STATUSES = frozenset({"CP", "delivering", "F"})
+VIEW_ACTION_SYSTEM_NAMES = frozenset(DEFAULT_VIEW_ACTIONS)
+FAVORITE_ACTION_SYSTEM_NAMES = frozenset(DEFAULT_FAVORITE_ACTIONS)
+PURCHASE_LINE_STATUSES = frozenset(DEFAULT_PURCHASE_STATUSES)
 
 
 @dataclass(frozen=True)

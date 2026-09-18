@@ -34,6 +34,8 @@ class CustomerProfileSnapshot:
     originating_training_batch_id: str | None = None
     transport_complete: bool = True
     schema_version: int = 1
+    source_kind: str = "API"
+    merge_source_training_batch_id: str | None = None
 
 
 def _uuid(value):
@@ -45,10 +47,10 @@ def _uuid(value):
         raise ProfileSnapshotError("Invalid snapshot/batch identity")
 
 
-def _export_directory(root, name, directory, count):
+def _export_directory(root, name, directory, count, source_kind="API"):
     if type(count) is not int or count < 1:
         raise ProfileSnapshotError("Invalid snapshot parts count")
-    result = _directory(root, TrainingBatchExport(name, "metadata", "metadata", directory, count))
+    result = _directory(root, TrainingBatchExport(name, None, "metadata", directory, count, source_kind))
     if len(part_files(result, name)) != count:
         raise ProfileSnapshotError("Snapshot parts mismatch")
     return result
@@ -67,19 +69,29 @@ def validate_customer_profile_snapshot(snapshot, *, raw_root):
     """Read directory listings and manifests only, never Customers raw contents."""
     try:
         if (not isinstance(snapshot, CustomerProfileSnapshot) or type(snapshot.schema_version) is not int
-                or snapshot.schema_version != 1 or snapshot.transport_complete is not True):
+                or snapshot.schema_version not in (1, 2) or snapshot.transport_complete is not True):
             raise ProfileSnapshotError("Invalid snapshot schema/completeness")
         _uuid(snapshot.snapshot_id)
         stamp = datetime.fromisoformat(snapshot.created_at)
         if stamp.tzinfo is None or stamp.utcoffset() is None:
             raise ProfileSnapshotError("Snapshot timestamp requires timezone")
         root = Path(raw_root).resolve()
-        _export_directory(root, "customers", snapshot.customers_directory, snapshot.customers_parts)
+        _export_directory(root, "customers", snapshot.customers_directory, snapshot.customers_parts, snapshot.source_kind)
         _export_directory(root, "customer_merges", snapshot.customer_merges_directory, snapshot.customer_merges_parts)
-        if snapshot.originating_training_batch_id is not None:
-            _uuid(snapshot.originating_training_batch_id)
-            batch = load_chunked_training_batch(root / "training_batches" / snapshot.originating_training_batch_id / "manifest.json",
-                                               raw_root=root, require_complete=True)
+        if snapshot.source_kind not in ("API", "MANUAL"):
+            raise ProfileSnapshotError("Invalid source kind")
+        if snapshot.source_kind == "MANUAL" and (snapshot.schema_version != 2
+                or snapshot.originating_training_batch_id is not None or snapshot.merge_source_training_batch_id is None):
+            raise ProfileSnapshotError("Manual snapshot requires an explicit API merges source")
+        if snapshot.source_kind == "MANUAL" and snapshot.customers_directory != f"customer_profile_snapshots/{snapshot.snapshot_id}/customers":
+            raise ProfileSnapshotError("Manual raw must belong to its snapshot")
+        if snapshot.source_kind == "API" and snapshot.merge_source_training_batch_id is not None:
+            raise ProfileSnapshotError("Invalid API snapshot merges source")
+        source_id = snapshot.merge_source_training_batch_id or snapshot.originating_training_batch_id
+        if source_id is not None:
+            _uuid(source_id)
+            batch = load_chunked_training_batch(root / "training_batches" / source_id / "manifest.json",
+                                               raw_root=root, require_complete=True, api_only=snapshot.source_kind == "MANUAL")
             merges = next(c.export for c in batch.components if c.name == "customer_merges")
             if (merges.relative_directory, merges.parts_count) != (snapshot.customer_merges_directory, snapshot.customer_merges_parts):
                 raise ProfileSnapshotError("Snapshot merge source differs from originating batch")
@@ -133,7 +145,10 @@ def load_customer_profile_snapshot(manifest, *, raw_root):
     try:
         with Path(manifest).open(encoding="utf-8") as stream:
             data = json.load(stream, object_pairs_hook=unique)
-        if not isinstance(data, dict) or set(data) != set(CustomerProfileSnapshot.__dataclass_fields__):
+        expected = set(CustomerProfileSnapshot.__dataclass_fields__)
+        if isinstance(data, dict) and data.get("schema_version") == 1:
+            expected -= {"source_kind", "merge_source_training_batch_id"} - set(data)
+        if not isinstance(data, dict) or set(data) != expected:
             raise ProfileSnapshotError("Invalid snapshot fields")
         snapshot = CustomerProfileSnapshot(**data)
         if Path(manifest).resolve() != snapshot_manifest_path(raw_root, snapshot.snapshot_id):

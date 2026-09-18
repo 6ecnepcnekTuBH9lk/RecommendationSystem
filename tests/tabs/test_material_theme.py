@@ -57,7 +57,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         csv_fields = window.btn_load.parentWidget().layout().itemAt(1).layout()
         assert isinstance(csv_fields, QGridLayout)
         assert csv_fields.itemAtPosition(0, 0).widget() is window.combo_box_types
-        assert csv_fields.itemAtPosition(1, 0).widget() is window.combo_box_add_or_not
+        assert csv_fields.itemAtPosition(1, 0).widget().text() == "Полная замена справочника"
         assert csv_fields.itemAtPosition(0, 1).widget() is window.btn_load
         assert csv_fields.itemAtPosition(1, 1).widget() is window.btn_load
         assert isinstance(window.status_files_layout, QHBoxLayout)
@@ -65,10 +65,10 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         acquisition, processing = window.tabs.widget(0), window.tabs.widget(1)
         headings = [label.text() for label in acquisition.findChildren(QLabel)
                     if label.property("class") == "sectionHeader"]
-        assert set(headings) == {"Загрузка через API Mindbox", "Загрузка CSV",
-                                 "Статус", "Журнал операции"}
-        assert len(headings) == 4
-        for widget in (window.heading_load_data, window.combo_box_types, window.combo_box_add_or_not,
+        assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка Mindbox",
+                                 "Состояние операции", "Журнал операции"}
+        assert len(headings) == 5
+        for widget in (window.heading_load_data, window.combo_box_types,
                        window.btn_load, window.status_files_container, window.prefix):
             assert acquisition.isAncestorOf(widget)
             assert not processing.isAncestorOf(widget)

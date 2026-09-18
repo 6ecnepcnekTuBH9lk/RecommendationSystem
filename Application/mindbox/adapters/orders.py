@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..identity import CustomerIdResolver
+from ..selection import DEFAULT_ORDER_NAMESPACES
 from ..records import OrderLineRecord
 from ._common import AdapterError, get, identifier, integer, number, objects, product_key, text, timestamp
 
@@ -15,7 +16,8 @@ def _product_name(line: Mapping[str, Any]) -> str | None:
     return value
 
 
-def adapt_order(raw: Mapping[str, Any], resolver: CustomerIdResolver) -> tuple[OrderLineRecord, ...]:
+def adapt_order(raw: Mapping[str, Any], resolver: CustomerIdResolver, *,
+                 product_namespaces: tuple[str, ...] = DEFAULT_ORDER_NAMESPACES) -> tuple[OrderLineRecord, ...]:
     source = identifier(raw, "customer.ids.mindboxId")
     common = dict(
         order_id=identifier(raw, "ids.mindboxId"),
@@ -30,7 +32,7 @@ def adapt_order(raw: Mapping[str, Any], resolver: CustomerIdResolver) -> tuple[O
     # Проверяем весь заказ перед выдачей: ошибка последней позиции не выдаёт половину заказа.
     return tuple(OrderLineRecord(
         **common, line_id=identifier(line, "id"), line_number=integer(line, "number"),
-        product=product_key(get(line, "product", required=True), ("offline1C", "kanzlerKz")),
+        product=product_key(get(line, "product", required=True), product_namespaces),
         product_name=_product_name(line), quantity=number(line, "quantity"),
         base_price_per_item=number(line, "basePricePerItem"), price_of_line=number(line, "priceOfLine"),
         line_status=identifier(line, "status.ids.externalId"),
