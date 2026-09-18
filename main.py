@@ -1,7 +1,7 @@
 import sys
 from Application.theme.SwitchTheme import ThemeSwitch
 from collections import deque
-from PyQt6.QtCore import Qt, QTimer, QSettings, QByteArray
+from PyQt6.QtCore import Qt, QTimer
 from collections import defaultdict
 from PyQt6.QtNetwork import QNetworkAccessManager
 from PyQt6.QtGui import QIcon, QPixmap, QGuiApplication, QCursor
@@ -128,36 +128,52 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(bottom_bar)
 
-        self._window_settings = QSettings("RecommendationSystem", "RecommendationSystem")
         self._restore_window_placement()
 
     def _restore_window_placement(self):
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
-        available = screen.availableGeometry() if screen is not None else None
+        screen = (
+                QGuiApplication.screenAt(QCursor.pos())
+                or QGuiApplication.primaryScreen()
+        )
+
+        available = (
+            screen.availableGeometry()
+            if screen is not None
+            else None
+        )
+
         # Reserve room for native window decorations on small screens.
-        width = max(1, available.width() - 32) if available is not None else 1920
-        height = max(1, available.height() - 48) if available is not None else 1080
-        self.setMinimumSize(min(1280, width), min(900, height))
-        self.resize(max(self.minimumWidth(), min(1920, int(width * 0.9))),
-                    max(self.minimumHeight(), min(1080, int(height * 0.9))))
+        width = (
+            max(1, available.width() - 32)
+            if available is not None
+            else 1920
+        )
+        height = (
+            max(1, available.height() - 48)
+            if available is not None
+            else 1080
+        )
 
-        geometry = self._window_settings.value("window/geometry")
-        restored = isinstance(geometry, QByteArray) and self.restoreGeometry(geometry)
-        if restored:
-            state = self._window_settings.value("window/state")
-            if isinstance(state, QByteArray):
-                self.restoreState(state)
-        else:
-            QTimer.singleShot(0, self.center_on_cursor_screen)
+        self.setMinimumSize(
+            min(1280, width),
+            min(900, height),
+        )
 
-    def closeEvent(self, event):
-        # The loading controller consumes Close while its process stops;
-        # this handler runs only when the eventual close reaches MainWindow.
-        super().closeEvent(event)
-        if event.isAccepted():
-            self._window_settings.setValue("window/geometry", self.saveGeometry())
-            self._window_settings.setValue("window/state", self.saveState())
-            self._window_settings.sync()
+        self.resize(
+            max(
+                self.minimumWidth(),
+                min(1920, int(width * 0.9)),
+            ),
+            max(
+                self.minimumHeight(),
+                min(1080, int(height * 0.9)),
+            ),
+        )
+
+        QTimer.singleShot(
+            0,
+            self.center_on_cursor_screen,
+        )
 
     # ///////////////////////////////////////////ПОМОГАТОРЫ/////////////////////////////////////////////////////////////
     def my_set_ready_status(self):

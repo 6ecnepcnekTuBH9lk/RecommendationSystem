@@ -1,5 +1,12 @@
 # Ручной JSON fallback
 
+Обновление 18.09.2026: ручной Customers через GUI/CLI теперь атомарно заменяет
+`canonical/customers.sqlite`, используя тот же store, что monthly API update.
+История Customers snapshots больше не создаётся этим маршрутом. Подробности:
+[canonical storage](CANONICAL_STORAGE.md). Описание profile schema v2 ниже относится
+к legacy manifests, которые остаются читаемыми. По уточнению пользователя ручной
+Actions/Orders пока сохраняет прежнюю модель; его перенос в daily storage отложен.
+
 Основной путь — API. Ручной импорт использует сохранённую историю CustomerMerges
 из завершённого API batch, поэтому полностью автономным режимом не является.
 

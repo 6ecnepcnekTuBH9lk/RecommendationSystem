@@ -1,5 +1,10 @@
 # Mindbox → raw JSON
 
+Актуальные GUI/CLI операции с 18.09.2026 используют
+[canonical storage](CANONICAL_STORAGE.md): дневные Actions/Orders, один CustomerMerges
+и независимый monthly Customers upsert в SQLite. Описания M02 ниже также содержат
+исторические контракты legacy manifests; новые jobs не создают historical snapshots.
+
 Изолированный синхронный транспорт. Пакет не импортирует PyQt, pandas и модули
 обработки файлов приложения. Импорт не читает `.env`, не создаёт HTTP-сессии,
 не запускает запросы и не создаёт каталоги выгрузок.
@@ -1269,12 +1274,13 @@ contacts = load_customer_contact_index(profile_manifest, maps, raw_root=raw_root
 BPRMF.export_recommendations_excel(model_dir=model_dir, customer_contacts=contacts)
 ```
 
-First LIVE snapshot is user-run only, from project root in PowerShell:
+Independent LIVE monthly Customers update, from project root in PowerShell
+(set the required customer period explicitly):
 
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py export `
-  --training-manifest '.\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json' `
-  --timeout 3600
+  --since '2026-01-01' --until '2026-09-01' `
+  --timeout 14400
 
 $profileManifest = Read-Host 'Введите путь Manifest из вывода export'
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py validate --manifest $profileManifest

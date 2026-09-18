@@ -52,7 +52,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.purchases_table.columnCount() == 6
         assert window.recs_table.columnCount() == 7
         assert window.mb_progress.isTextVisible()
-        assert window.mb_progress.text() == "0%"
+        assert window.mb_progress.text() == "Не запущено"
         assert window.btn_load.font().weight() >= QFont.Weight.DemiBold
         csv_fields = window.btn_load.parentWidget().layout().itemAt(1).layout()
         assert isinstance(csv_fields, QGridLayout)
@@ -65,15 +65,14 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         acquisition, processing = window.tabs.widget(0), window.tabs.widget(1)
         headings = [label.text() for label in acquisition.findChildren(QLabel)
                     if label.property("class") == "sectionHeader"]
-        assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка Mindbox",
-                                 "Состояние операции", "Журнал операции"}
-        assert len(headings) == 5
+        assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка из Mindbox"}
+        assert len(headings) == 3
         for widget in (window.heading_load_data, window.combo_box_types,
                        window.btn_load, window.status_files_container, window.prefix):
             assert acquisition.isAncestorOf(widget)
             assert not processing.isAncestorOf(widget)
         assert [b for b in window.findChildren(QPushButton) if b.text().strip() == "Загрузить файл"] == [window.btn_load]
-        assert window.mb_log.parentWidget() is window.mb_progress.parentWidget()
+        assert acquisition.isAncestorOf(window.mb_log) and acquisition.isAncestorOf(window.mb_progress)
         assert window.mb_log.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Expanding
         assert window.mb_log.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
         assert {label.text() for label in processing.findChildren(QLabel)

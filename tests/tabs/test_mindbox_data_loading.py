@@ -11,9 +11,9 @@ from unittest.mock import Mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QByteArray, QObject, QProcess, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QByteArray, QObject, QProcess, QThread, QTimer, pyqtSignal
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget, QCheckBox
+from PyQt6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget
 
 from Application.mindbox import MindboxConfig
 from Application.mindbox import daily_training_batch as backend
@@ -160,22 +160,84 @@ def finish_training(window, state):
 
 
 def test_initial_widgets_offer_only_full_download(window):
-    assert window.mb_progress_label.text() == "Прогресс: —"
+    assert window.mb_progress.text() == "Не запущено"
     assert window.mb_progress.isTextVisible()
-    assert window.mb_progress.text() == "0%"
-    assert window.tabs.tabText(0) == "Получение данных"
-    assert not window.tabs.widget(0).findChildren(QCheckBox)
-    assert window.mb_sources_info.property("class") == "infoLabel"
-    assert window.mb_sources_info.text() == "Из Mindbox будут получены данные о клиентах, их действия, заказы и объединения"
-    assert window.mb_sources_info.alignment() == Qt.AlignmentFlag.AlignCenter
+    assert window.mb_customers_button.isEnabled()
     texts = [label.text() for label in window.tabs.widget(0).findChildren(QLabel)]
-    assert "Источники данных:" not in texts
-    assert "Набор:" in texts and "Манифест:" in texts
-    assert not any(text.startswith(("Batch", "Manifest", "Progress")) for text in texts)
-    assert window.mb_start_button.isEnabled()
+    assert not {"Статус:", "Набор:", "Манифест:", "Прогресс:", "Состояние операции"} & set(texts)
+    for name in ("actions", "orders", "merges", "customers"):
+        field = getattr(window, f"mb_{name}_status_label")
+        assert field.isReadOnly() and field.text() == "Файлов не найдено"
     assert not window.mb_cancel_button.isEnabled()
     assert window.mb_interaction_since.displayFormat() == "dd.MM.yyyy"
-    assert window.mb_interaction_until.calendarPopup()
+
+
+@pytest.mark.parametrize("job", ["training", "customers"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+def test_persisted_summary_restored_after_each_outcome(window, tmp_path, monkeypatch, job, outcome):
+    baseline = {"since": "2026-01-01T00:00:00+00:00", "until": "2026-02-01T00:00:00+00:00",
+                "updated": "2026-02-02T12:00:00+00:00"}
+    saved = {name: baseline.copy() for name in ("actions", "orders", "customer_merges")}
+    saved["customers"] = dict(updated=baseline["updated"], intervals=[[baseline["since"], baseline["until"]]], count=42)
+    monkeypatch.setattr(ui, "_persisted_summary", lambda: saved)
+    controller = window.mb_controller
+    controller.refresh_persisted()
+    wait_until(lambda: not controller.tasks)
+    unchanged = window.mb_customers_status_label.text() if job == "training" else window.mb_orders_status_label.text()
+    (controller.start if job == "training" else controller.start_customers)()
+    assert (window.mb_customers_status_label.text() if job == "training" else window.mb_orders_status_label.text()) == unchanged
+    process = window.mb_process
+    if outcome == "success":
+        monkeypatch.setattr(ui, "_load_training_summary", lambda *a: {})
+        monkeypatch.setattr(ui, "_validate_manual_result", lambda *a: None)
+        process.feed(f"Manifest: {tmp_path / 'synthetic-result'}\n")
+        process.finish()
+    else:
+        if outcome == "cancel":
+            controller.cancel()
+        process.finish(1)
+    wait_until(lambda: not controller.tasks)
+    for source, data in saved.items():
+        field = "merges" if source == "customer_merges" else source
+        assert getattr(window, f"mb_{field}_status_label").text() == ui._summary_text(data)
+    assert window.mb_progress.text() == "Не запущено"
+
+
+def test_customer_cancel_resume_preserves_independent_job(window, tmp_path):
+    controller = window.mb_controller
+    controller.start_customers()
+    state = tmp_path / "canonical/jobs" / ("a" * 32) / "state.json"
+    window.mb_process.feed(f"State: {state}\n")
+    process = window.mb_process
+    controller.cancel()
+    assert process.terminated
+    process.finish(1)
+    controller.resume()
+    assert controller.stage == "customers"
+    assert window.mb_process.arguments == ui.resume_arguments(state)
+
+
+def test_customer_success_keeps_previous_interaction_resume(window, tmp_path, monkeypatch):
+    controller = window.mb_controller
+    previous = tmp_path / "canonical/jobs" / ("a" * 32) / "state.json"
+    controller.resume_path = previous
+    controller.resume_stage = "training"
+    monkeypatch.setattr(ui, "_validate_manual_result", lambda *a: None)
+    controller.start_customers()
+    window.mb_process.feed(f"Manifest: {tmp_path / 'canonical/customers.sqlite'}\n")
+    window.mb_process.finish()
+    wait_until(lambda: not controller.tasks)
+    assert controller.resume_path == previous
+    assert controller.resume_stage == "training"
+
+
+def test_journal_excludes_technical_output_and_formats_timeout(window):
+    window.mb_controller.start_customers()
+    window.mb_process.feed('State: C:/private/state.json\nBatch: secret-id\nTraceback secret\nhttps://signed.invalid/?token=secret\n')
+    window.mb_process.feed('Error: {"category":"timeout","source":"customers","since":"2026-03-01"}\n')
+    text = window.mb_log.toPlainText()
+    assert "Превышено время ожидания выгрузки клиентов за 03.2026" in text
+    assert not any(value in text for value in ("C:/", "secret", "Traceback", "https://"))
 
 
 @pytest.mark.parametrize("field", ["since", "merge"])
@@ -211,18 +273,14 @@ def test_training_command_and_only_loading_controls_locked(window):
 
 
 def test_state_ready_pending_failed_counts(window, tmp_path):
-    state = synthetic_batch(tmp_path, ["READY", "READY", "FAILED", "PENDING", "PENDING"], False)
     window.mb_controller.start()
-    window.mb_process.feed(f"State: {state}\n")
-    wait_until(lambda: not window.mb_controller.tasks)
-    assert window.mb_merges_status_label.text() == "Готово"
-    assert window.mb_actions_status_label.text() == "1 / 2 дней"
-    assert window.mb_orders_status_label.text() == "0 / 2 дней; Ошибок: 1"
-    assert not window.mb_orders_status_label.toolTip()
-    assert window.mb_batch_label.text() == "a" * 32
-    assert window.mb_progress_label.text() == "Готово: 2 / 6 компонентов"
-    assert window.mb_progress.value() == 2
-    assert window.mb_progress.maximum() == 6
+    window.mb_process.feed('Event: {"source":"actions","ready":3,"total":14}\n')
+    window.mb_process.feed('Event: {"source":"orders","ready":2,"total":14}\n')
+    assert window.mb_actions_status_label.text() == "Загружено дней: 3 из 14"
+    assert window.mb_orders_status_label.text() == "Загружено дней: 2 из 14"
+    assert window.mb_customers_status_label.text() == "Файлов не найдено"
+    assert window.mb_progress.maximum() == 0
+    assert window.mb_progress.text() == "Идёт загрузка"
 
 
 @pytest.mark.parametrize("content", [None, "{incomplete"])
@@ -242,12 +300,13 @@ def test_state_missing_or_being_replaced_is_retried(window, tmp_path, content):
 def test_utf8_split_output_html_and_unterminated_last_line(window, tmp_path):
     window.mb_controller.start()
     state = tmp_path / "кириллица" / "state.json"
-    output = f"<b>обычный текст</b>\nBatch: id; State: {state}".encode("utf-8")
+    output = f"<b>обычный текст</b>\nState: {state}".encode("utf-8")
     for byte in output:
         window.mb_process.feed(bytes([byte]))
     window.mb_process.finish(1)
     assert window.mb_current_state_path == state
-    assert "<b>обычный текст</b>" in window.mb_log.toPlainText()
+    assert "<b>обычный текст</b>" not in window.mb_log.toPlainText()
+    assert str(state) not in window.mb_log.toPlainText()
     assert "�" not in window.mb_log.toPlainText()
 
 
@@ -273,14 +332,11 @@ def test_success_requires_verified_final_manifest(window, tmp_path):
     state = synthetic_batch(tmp_path)
     window.mb_controller.start()
     finish_training(window, state)
-    assert window.mb_controller.state == ui.LoadingState.RUNNING
-    assert window.mb_manifest_label.text() == "Готов"
-    assert not window.mb_manifest_label.toolTip()
-    assert window.mb_progress.value() == 5
-    assert window.mb_progress.maximum() == 6
-    assert window.mb_progress.text() != "100%"
-    assert not window.mb_start_button.isEnabled()
-    assert window.mb_process.arguments == ui.customers_arguments(state.with_name("manifest.json"))
+    assert window.mb_controller.state == ui.LoadingState.SUCCESS
+    assert len(FakeProcess.instances) == 1
+    assert window.mb_process is None
+    assert window.mb_progress.text() == "Не запущено"
+    assert window.mb_start_button.isEnabled()
 
 
 def test_exit_zero_without_manifest_is_failure(window):
@@ -300,33 +356,28 @@ def test_customers_never_start_after_failed_or_invalid_batch(window, tmp_path, f
     assert window.mb_controller.state == ui.LoadingState.FAILED
 
 
-def test_customers_chained_only_after_validation_and_snapshot_required(window, tmp_path, monkeypatch):
-    state = synthetic_batch(tmp_path)
-    controller = window.mb_controller
-    controller.start()
-    training_process = window.mb_process
-    training_process.feed(f"State: {state}\nManifest: {state.with_name('manifest.json')}\n")
+def test_customers_run_independently_and_snapshot_required(window, tmp_path, monkeypatch):
+    saved = "Обновлено: сохранённые взаимодействия"
+    for name in ("actions", "orders", "merges"):
+        getattr(window, f"mb_{name}_status_label").setText(saved)
+    window.mb_controller.start_customers()
+    process = window.mb_process
+    assert process.arguments == ui.customers_arguments(
+        window.mb_customers_since.date().toString("yyyy-MM-dd"), window.mb_customers_until.date().toString("yyyy-MM-dd"))
+    assert not window.mb_start_button.isEnabled()
+    window.mb_controller.start()
     assert len(FakeProcess.instances) == 1
-    training_process.finish()
-    assert len(FakeProcess.instances) == 1
-    wait_until(lambda: len(FakeProcess.instances) == 2)
-    assert controller.state == ui.LoadingState.RUNNING
-    assert window.mb_progress.text() != "100%"
-    assert window.mb_process.arguments == ui.customers_arguments(state.with_name("manifest.json"))
-    snapshot = tmp_path / "customer_profile_snapshots" / ("d" * 32) / "manifest.json"
+    for name in ("actions", "orders", "merges"):
+        assert getattr(window, f"mb_{name}_status_label").text() == saved
     checked = []
-    monkeypatch.setattr(ui, "_validate_snapshot", lambda path, manifest: checked.append((path, manifest)) or str(path))
-    window.mb_process.feed(f"Manifest: {snapshot}\n")
-    window.mb_process.finish()
-    wait_until(lambda: controller.state == ui.LoadingState.SUCCESS)
-    assert all(w.isEnabled() for w in window.mb_selection_fields.values())
-    assert checked == [(snapshot, state.with_name("manifest.json"))]
-    assert window.mb_progress.text() == "100%"
-    assert window.mb_progress_label.text() == "Готово: 6 / 6 компонентов"
-    assert all(not getattr(window, f"mb_{name}_label").toolTip() for name in (
-        "status", "merges_status", "actions_status", "orders_status", "customers_status", "batch", "manifest"))
-    assert window.mb_customers_status_label.text() == "Готово"
-    assert not window.mb_manifest_label.toolTip()
+    monkeypatch.setattr(ui, "_validate_manual_result", lambda path, stage: checked.append(path))
+    path = tmp_path / "canonical/customers.sqlite"
+    process.feed(f"Manifest: {path}\n")
+    process.finish()
+    wait_until(lambda: not window.mb_controller.tasks)
+    assert checked == [path]
+    assert window.mb_controller.state == ui.LoadingState.SUCCESS
+    assert window.mb_progress.text() == "Не запущено"
 
 
 def test_cancel_preserves_state_and_parts_then_resume_uses_exact_path(window, tmp_path):
@@ -356,8 +407,8 @@ def test_cancel_preserves_state_and_parts_then_resume_uses_exact_path(window, tm
     assert controller.state == ui.LoadingState.RUNNING
     synthetic_batch(tmp_path)
     finish_training(window, state)
-    assert controller.stage == "customers"
-    assert window.mb_process.arguments == ui.customers_arguments(state.with_name("manifest.json"))
+    assert controller.state == ui.LoadingState.SUCCESS
+    assert window.mb_process is None
 
 
 def test_cancel_during_validation_never_starts_customers(window, tmp_path):
@@ -378,7 +429,7 @@ def test_late_metadata_from_old_job_cannot_change_current_job(window, tmp_path):
     controller._on_metadata((999, controller.generation - 1, "training_manifest",
                              ui._load_training_summary(state.with_name("manifest.json"), True), None))
     assert controller.state == ui.LoadingState.RUNNING
-    assert window.mb_manifest_label.text() == "—"
+    assert len(FakeProcess.instances) == 1
 
 
 def test_close_waits_asynchronously_for_process(window):
@@ -447,21 +498,17 @@ def test_snapshot_validation_checks_origin(tmp_path, monkeypatch):
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_customer_failure_preserves_completed_training_manifest(window, tmp_path, exit_code):
     state = synthetic_batch(tmp_path)
+    original = state.with_name("manifest.json").read_bytes()
     controller = window.mb_controller
-    controller.start()
-    finish_training(window, state)
+    controller.start_customers()
     process = window.mb_process
-    assert controller.stage == "customers"
-    # Even a successful exit with a missing snapshot must not report success.
     process.feed(f"Manifest: {tmp_path / 'missing-snapshot.json'}\n")
     process.finish(exit_code)
-    wait_until(lambda: controller.state == ui.LoadingState.FAILED)
-    assert window.mb_customers_status_label.text() == "Ошибка"
-    assert window.mb_progress.text() != "100%"
-    assert window.mb_manifest_label.text() == "Готов"
-    assert window.mb_start_button.isEnabled()
-    assert controller.resume_path is None
-    assert state.with_name("manifest.json").exists()
+    wait_until(lambda: not controller.tasks)
+    assert controller.state == ui.LoadingState.FAILED
+    assert window.mb_customers_status_label.text() == "Файлов не найдено"
+    assert window.mb_progress.text() == "Не запущено"
+    assert state.with_name("manifest.json").read_bytes() == original
 
 
 def test_metadata_work_is_off_gui_thread_and_state_recovers(window, tmp_path, monkeypatch):
@@ -479,12 +526,13 @@ def test_metadata_work_is_off_gui_thread_and_state_recovers(window, tmp_path, mo
     controller = window.mb_controller
     controller.start()
     window.mb_process.feed(f"State: {state}\n")
+    controller._poll_state()
     wait_until(lambda: not controller.tasks)
-    assert window.mb_merges_status_label.text() == "—"
+    assert window.mb_merges_status_label.text() == "Выполняется..."
     state.write_bytes(valid_bytes)
     window.mb_state_timer.timeout.emit()
     wait_until(lambda: not controller.tasks)
-    assert window.mb_merges_status_label.text() == "Ожидание"
+    assert window.mb_actions_status_label.text() == "Загружено дней: 0 из 2"
     assert threads == [False, False]
 
 
@@ -521,7 +569,7 @@ def test_resume_only_for_interrupted_transport(window, tmp_path, validation, can
         controller.resume()
         assert len(FakeProcess.instances) == count
         if not cancelled:
-            assert "Завершённый обучающий набор не прошёл проверку" in window.status_label.text()
+            assert "Ошибка получения данных" in window.status_label.text()
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new_export", "resume"])
@@ -531,13 +579,13 @@ def test_new_job_resets_component_progress_format(window, tmp_path, resume):
     controller.start()
     window.mb_process.feed(f"State: {state}\n")
     wait_until(lambda: not controller.tasks)
-    assert window.mb_progress.format() == "%p%"
+    assert window.mb_progress.format() == "Идёт загрузка"
     window.mb_process.finish(1)
     wait_until(lambda: not controller.tasks)
     (controller.resume if resume else controller.start)()
-    assert window.mb_progress_label.text() == "Прогресс: ожидание..."
-    assert window.mb_progress.format() == "%p%"
-    assert (window.mb_progress.minimum(), window.mb_progress.maximum(), window.mb_progress.value()) == (0, 100, 0)
+    assert window.mb_progress.text() == "Идёт загрузка"
+    assert window.mb_progress.format() == "Идёт загрузка"
+    assert (window.mb_progress.minimum(), window.mb_progress.maximum(), window.mb_progress.value()) == (0, 0, 0)
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
@@ -554,9 +602,6 @@ def test_global_status_lifecycle_and_scheduled_reset(window, tmp_path, monkeypat
     assert window.status_label.text() == "Идёт получение данных из Mindbox..."
     if outcome == "success":
         finish_training(window, state)
-        monkeypatch.setattr(ui, "_validate_snapshot", lambda path, manifest: str(path))
-        window.mb_process.feed(f"Manifest: {tmp_path / 'snapshot.json'}\n")
-        window.mb_process.finish()
         wait_until(lambda: controller.state == ui.LoadingState.SUCCESS)
         status_function, message = "set_status_ok", "Получение данных завершено."
     else:

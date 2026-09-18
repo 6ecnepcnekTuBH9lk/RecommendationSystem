@@ -8,5 +8,6 @@ def window_settings(monkeypatch, tmp_path):
     import main
 
     settings = QSettings(str(tmp_path / "window.ini"), QSettings.Format.IniFormat)
-    monkeypatch.setattr(main, "QSettings", lambda *args: settings)
+    # Also isolate legacy settings if window persistence is accidentally restored.
+    monkeypatch.setattr(main, "QSettings", lambda *args: settings, raising=False)
     return settings

@@ -11,16 +11,15 @@ from PyQt6.QtCore import (
     QDate, QEvent, QObject, QProcess, QRunnable, QSize,
     QThreadPool, QTimer, Qt, pyqtSignal, pyqtSlot
 )
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QPainter
 from PyQt6.QtWidgets import (QDateEdit, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QScrollArea,
-                            QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSizePolicy)
+                             QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSizePolicy)
 
 from Application.tabs.data_processing_tab import create_csv_loading_section
 from Application.mindbox.selection import DEFAULT_SELECTION, MindboxSelectionConfig, SELECTION_OPTIONS
 
 from Application.settings.set_status import (set_status_error, set_status_ok,
                                              set_status_processing, schedule_status_reset)
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_ROOT = PROJECT_ROOT / "ВходныеДанные" / "MindboxRaw"
@@ -32,6 +31,18 @@ class LoadingState(Enum):
     SUCCESS = "Завершено"
     FAILED = "Ошибка"
     CANCELLED = "Отменено"
+
+
+class _BusyProgressBar(QProgressBar):
+    def text(self):
+        return "Идёт загрузка..." if self.maximum() == 0 else super().text()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.maximum() == 0:
+            painter = QPainter(self)
+            painter.setPen(self.palette().text().color())
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
 
 
 def _heading(text, layout):
@@ -59,7 +70,7 @@ def training_arguments(since, until, merge_since, selection=DEFAULT_SELECTION):
         raise ValueError("Дата начала взаимодействий должна быть раньше даты окончания.")
     if merge_since > since:
         raise ValueError("История объединений должна начинаться не позже периода взаимодействий.")
-    args = ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_daily_batch.py"),
+    args = ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_canonical.py"),
             "export-daily", "--since", since, "--until", until, "--merge-since", merge_since + " 00:00"]
     for field, option in SELECTION_OPTIONS.items():
         for value in getattr(selection, field):
@@ -68,18 +79,48 @@ def training_arguments(since, until, merge_since, selection=DEFAULT_SELECTION):
 
 
 def resume_arguments(state_path):
-    return ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_daily_batch.py"),
-            "resume", "--state", str(state_path)]
+    script = "mindbox_canonical.py" if "canonical" in Path(state_path).parts else "mindbox_daily_batch.py"
+    return ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts" / script), "resume", "--state", str(state_path)]
 
 
-def customers_arguments(manifest):
-    return ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_customer_profiles.py"),
-            "export", "--training-manifest", str(manifest)]
+def customers_arguments(since, until):
+    if since >= until:
+        raise ValueError("Дата начала периода клиентов должна быть раньше окончания.")
+    return ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_canonical.py"),
+            "customers", "--since", since, "--until", until]
+
+
+def _persisted_summary():
+    from Application.mindbox.canonical_storage import summary
+    from Application.mindbox.canonical_customers import customer_summary
+    result = summary(RAW_ROOT)
+    result["customers"] = customer_summary(RAW_ROOT)
+    return result
+
+
+def _summary_text(value):
+    if value is None:
+        return "Файлов не найдено"
+    def date(text):
+        return datetime.fromisoformat(text).strftime("%d.%m.%Y")
+    updated = datetime.fromisoformat(value["updated"]).astimezone().strftime("%d.%m.%Y %H:%M")
+    intervals = value.get("intervals")
+    period = ("; ".join(f"{date(a)} — {date(b)}" for a, b in intervals) if intervals
+              else "полный ручной снимок, период не задан") if intervals is not None else f"{date(value['since'])} — {date(value['until'])}"
+    count = f" | Клиентов: {value['count']:,}".replace(",", " ") if "count" in value else ""
+    return f"Обновлено: {updated} | Период: {period}{count}"
 
 
 def _load_training_summary(path, complete=False):
     # Backend performs schema, completeness, identity and raw-part validation.
     # This can touch many directories, so callers must use a metadata worker.
+    if "canonical" in Path(path).parts and Path(path).name == "state.json":
+        from Application.mindbox.canonical_jobs import load_job
+        job = load_job(path, RAW_ROOT)
+        items = job["components"]
+        return {"days_total": sum(c["name"] == "actions" for c in items),
+                "sources": {name: {"ready": sum(c["done"] for c in items if c["name"] == name)}
+                            for name in ("actions", "orders")}}
     from Application.mindbox.daily_training_batch import load_chunked_training_batch
     batch = load_chunked_training_batch(path, raw_root=RAW_ROOT, require_complete=complete)
     counts = batch.diagnostics
@@ -111,6 +152,12 @@ def _manual_merges_info(dates):
     messages = []
     for mode in ("Взаимодействия", "Customers"):
         try:
+            if mode == "Customers":
+                from Application.mindbox.canonical_storage import catalog
+                entry = catalog(RAW_ROOT)["customer_merges"]
+                if entry:
+                    messages.append(mode + ": API — " + _summary_text(entry))
+                    continue
             window = TrainingBatchWindow(*(datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
                                            for value in dates)) if mode == "Взаимодействия" else None
             messages.append(mode + ": " + merges_description(select_merges_source(RAW_ROOT, window)))
@@ -133,6 +180,7 @@ class _MetadataSignals(QObject):
 
 class _MetadataTask(QRunnable):
     """Bounded offline work; only immutable results cross back to the GUI."""
+
     def __init__(self, task_id, generation, kind, function, args):
         super().__init__()
         self.signals = _MetadataSignals()
@@ -150,6 +198,7 @@ class _MetadataTask(QRunnable):
 
 class _SelectionEventsEdit(QTextEdit):
     """Wrap long technical names and keep all lines visible without scrolling."""
+
     def __init__(self, values):
         super().__init__()
         self.setAcceptRichText(False)
@@ -172,33 +221,60 @@ class _SelectionEventsEdit(QTextEdit):
 def create_data_loading_widgets_tab(aboba):
     tab = QWidget()
 
-    root = QHBoxLayout(tab)
+    # Корень вкладки:
+    # сверху две равные колонки,
+    # снизу журнал операции на всю ширину.
+    root = QVBoxLayout(tab)
     root.setContentsMargins(0, 0, 0, 0)
     root.setSpacing(0)
 
-    left_wrap, right_wrap = QWidget(), QWidget()
-    left, right = QVBoxLayout(left_wrap), QVBoxLayout(right_wrap)
+    # ==================================================================
+    # ВЕРХНЯЯ ЧАСТЬ: ДВЕ КОЛОНКИ
+    # ==================================================================
+    top = QHBoxLayout()
+    top.setContentsMargins(0, 0, 0, 0)
+    top.setSpacing(0)
 
-    left.setSpacing(12)
+    left_wrap = QWidget()
+    right_wrap = QWidget()
+
+    left = QVBoxLayout(left_wrap)
+    right = QVBoxLayout(right_wrap)
+
+    left.setSpacing(10)
     right.setSpacing(10)
 
+    # Вертикальный разделитель между колонками
     separator = QFrame()
     separator.setObjectName("vSeparator")
     separator.setFixedWidth(1)
     separator.setFrameShape(QFrame.Shape.NoFrame)
 
+    # Левая колонка остаётся прокручиваемой как страховка
     left_scroll = QScrollArea()
     left_scroll.setWidgetResizable(True)
     left_scroll.setFrameShape(QFrame.Shape.NoFrame)
     left_scroll.setWidget(left_wrap)
-    root.addWidget(left_scroll, 1)
-    root.addWidget(separator)
-    root.addWidget(right_wrap, 1)
+
+    left_panel = QWidget()
+    left_panel_layout = QVBoxLayout(left_panel)
+    left_panel_layout.setContentsMargins(0, 0, 0, 0)
+    left_panel_layout.addWidget(left_scroll, 1)
+    top.addWidget(left_panel, 1)
+    top.addWidget(separator)
+    top.addWidget(right_wrap, 1)
+
+    # Верхняя часть занимает большую часть высоты
+    root.addLayout(top, 2)
 
     aboba.mb_headings = [
         _heading("Загрузка через API Mindbox", left),
-        _heading("Состояние операции", right),
     ]
+
+    # ==================================================================
+    # ЛЕВАЯ КОЛОНКА
+    # Загрузка через API Mindbox
+    # ==================================================================
 
     # ---------------- Период взаимодействий ----------------
     period_row = QHBoxLayout()
@@ -233,6 +309,15 @@ def create_data_loading_widgets_tab(aboba):
 
     left.addLayout(period_row)
 
+    customers_period = QHBoxLayout()
+    aboba.mb_customers_since = _date_widget(today.addMonths(-1))
+    aboba.mb_customers_until = _date_widget(today)
+    customers_period.addWidget(QLabel("Период клиентов: С"))
+    customers_period.addWidget(aboba.mb_customers_since, 1)
+    customers_period.addWidget(QLabel("По"))
+    customers_period.addWidget(aboba.mb_customers_until, 1)
+    left.addLayout(customers_period)
+
     # ---------------- История объединений клиентов ----------------
     merge_row = QHBoxLayout()
     merge_row.setContentsMargins(0, 0, 0, 0)
@@ -255,8 +340,10 @@ def create_data_loading_widgets_tab(aboba):
 
     left.addLayout(merge_row)
 
+    # ---------------- Selection ----------------
     selection_grid = QGridLayout()
-    selection_grid.setVerticalSpacing(12)
+    selection_grid.setVerticalSpacing(8)
+
     aboba.mb_selection_fields = {}
 
     for row, (field, label_text) in enumerate((
@@ -272,7 +359,9 @@ def create_data_loading_widgets_tab(aboba):
             QSizePolicy.Policy.Preferred,
         )
 
-        editor = QLineEdit("; ".join(getattr(DEFAULT_SELECTION, field)))
+        editor = QLineEdit(
+            "; ".join(getattr(DEFAULT_SELECTION, field))
+        )
         editor.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
@@ -287,150 +376,343 @@ def create_data_loading_widgets_tab(aboba):
 
     # ---------------- Информационная подпись ----------------
     aboba.mb_sources_info = QLabel(
-        "Из Mindbox будут получены данные о клиентах, их действия, заказы и объединения"
+        "Действия, заказы и объединения загружаются вместе. "
+        "Клиенты обновляются отдельно. Верхняя граница периодов не включается."
     )
     aboba.mb_sources_info.setWordWrap(True)
-    aboba.mb_sources_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.mb_sources_info.setProperty("class", "infoLabel")
+    aboba.mb_sources_info.setAlignment(
+        Qt.AlignmentFlag.AlignCenter
+    )
+    aboba.mb_sources_info.setProperty(
+        "class",
+        "infoLabel",
+    )
 
     left.addWidget(aboba.mb_sources_info)
 
-    # ---------------- Кнопки ----------------
+    # ---------------- Кнопки API ----------------
     buttons = QHBoxLayout()
 
-    aboba.mb_start_button = QPushButton(" Получить данные")
+    aboba.mb_start_button = QPushButton(
+        " Получить данные"
+    )
     aboba.mb_start_button.setIcon(
-        QIcon(str(PROJECT_ROOT / "Картинки" / "ПровестиАнализ.png"))
+        QIcon(
+            str(
+                PROJECT_ROOT
+                / "Картинки"
+                / "ПолучитьДанные.png"
+            )
+        )
     )
-    aboba.mb_start_button.setIconSize(QSize(17, 17))
+    aboba.mb_start_button.setIconSize(
+        QSize(17, 17)
+    )
 
-    aboba.mb_cancel_button = QPushButton(" Отменить")
+    aboba.mb_cancel_button = QPushButton(
+        " Отменить"
+    )
     aboba.mb_cancel_button.setIcon(
-        QIcon(str(PROJECT_ROOT / "Картинки" / "Неудача.png"))
+        QIcon(
+            str(
+                PROJECT_ROOT
+                / "Картинки"
+                / "Неудача.png"
+            )
+        )
     )
-    aboba.mb_cancel_button.setIconSize(QSize(17, 17))
+    aboba.mb_cancel_button.setIconSize(
+        QSize(17, 17)
+    )
 
-    buttons.addWidget(aboba.mb_start_button)
+    buttons.addWidget(
+        aboba.mb_start_button
+    )
+    aboba.mb_customers_button = QPushButton(" Обновить клиентов")
+    aboba.mb_customers_button.setIcon(
+        QIcon(
+            str(
+                PROJECT_ROOT
+                / "Картинки"
+                / "Обновить.png"
+            )
+        )
+    )
+    aboba.mb_customers_button.setIconSize(
+        QSize(17, 17)
+    )
+    buttons.addWidget(aboba.mb_customers_button)
     buttons.addWidget(aboba.mb_cancel_button)
 
     left.addLayout(buttons)
 
-    _heading("Ручная загрузка Mindbox", left)
-    manual = QGridLayout()
-    aboba.mb_manual_files = {}
-    aboba.mb_manual_controls = []
-    for row, name in enumerate(("Actions", "Orders", "Customers")):
-        editor = QLineEdit()
-        editor.setReadOnly(True)
-        editor.setPlaceholderText(name + ".json")
-        button = QPushButton("Выбрать " + name)
-        def choose(_checked=False, target=editor):
-            path, _ = QFileDialog.getOpenFileName(aboba, "Выберите Mindbox JSON", "", "JSON (*.json)")
-            if path:
-                target.setText(path)
-        button.clicked.connect(choose)
-        manual.addWidget(editor, row, 0)
-        manual.addWidget(button, row, 1)
-        aboba.mb_manual_files[name.lower()] = editor
-        aboba.mb_manual_controls.extend((editor, button))
-    left.addLayout(manual)
-    hint = QLabel("Actions и Orders: один период из полей выше (UTC). В Mindbox UTC+03 укажите +3 часа: "
-                  "00:00 UTC = 03:00. Actions выгружайте широко: VIEW/FAVORITE отбирает приложение. "
-                  "Customers — полный snapshot, даты не используются.")
-    hint.setWordWrap(True)
-    left.addWidget(hint)
-    aboba.mb_manual_merges = QLabel("Проверка сохранённых объединений клиентов…")
-    aboba.mb_manual_merges.setWordWrap(True)
-    left.addWidget(aboba.mb_manual_merges)
-    manual_buttons = QHBoxLayout()
-    aboba.mb_manual_interactions_button = QPushButton("Импорт Actions + Orders")
-    aboba.mb_manual_customers_button = QPushButton("Импорт Customers")
-    for button in (aboba.mb_manual_interactions_button, aboba.mb_manual_customers_button):
-        manual_buttons.addWidget(button)
-        aboba.mb_manual_controls.append(button)
-    left.addLayout(manual_buttons)
+    # ==================================================================
+    # ЛЕВАЯ КОЛОНКА
+    # Состояние операции
+    # ==================================================================
+    state_grid = QGridLayout()
+    state_grid.setColumnStretch(1, 1)
+    for row, (name, title) in enumerate((
+        ("orders", "Заказы"), ("actions", "Действия"),
+        ("merges", "Объединения клиентов"), ("customers", "Клиенты"),
+    )):
+        value = QLineEdit("Файлов не найдено")
+        value.setReadOnly(True)
+        setattr(aboba, f"mb_{name}_status_label", value)
+        state_grid.addWidget(QLabel(title + ":"), row, 0)
+        state_grid.addWidget(value, row, 1)
+    left.addLayout(state_grid)
 
-    # ---------------- CSV ----------------
-    left.addWidget(create_csv_loading_section(aboba))
-    left.addStretch(1)
-
-    # ---------------- Состояние операции ----------------
-    for name, text in (
-        ("status", "Статус"),
-        ("merges_status", "Объединения клиентов"),
-        ("actions_status", "Действия"),
-        ("orders_status", "Заказы"),
-        ("customers_status", "Клиенты"),
-        ("batch", "Набор"),
-        ("manifest", "Манифест"),
-    ):
-        row = QHBoxLayout()
-
-        row.addWidget(QLabel(text + ":"))
-
-        label = QLabel("—")
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-
-        setattr(aboba, f"mb_{name}_label", label)
-
-        row.addWidget(label, 1)
-        right.addLayout(row)
-
-    # ---------------- Прогресс ----------------
-    aboba.mb_progress_label = QLabel("Прогресс: —")
-    right.addWidget(aboba.mb_progress_label)
-
-    aboba.mb_progress = QProgressBar()
+    aboba.mb_progress = _BusyProgressBar()
     aboba.mb_progress.setTextVisible(True)
-    aboba.mb_progress.setFormat("%p%")
+    aboba.mb_progress.setRange(0, 1)
     aboba.mb_progress.setValue(0)
-
-    right.addWidget(aboba.mb_progress)
+    aboba.mb_progress.setFormat("Прогресс загрузки")
+    left.addWidget(aboba.mb_progress)
 
     # ---------------- Resume block ----------------
     aboba.mb_resume_block = QWidget()
 
-    resume = QVBoxLayout(aboba.mb_resume_block)
+    resume = QVBoxLayout(
+        aboba.mb_resume_block
+    )
+    resume.setContentsMargins(0, 0, 0, 0)
+    resume.setSpacing(6)
 
-    resume.addWidget(QLabel("Незавершённая загрузка"))
+    resume_title = QLabel("Загрузка не завершена")
+    resume_title.setAlignment(
+        Qt.AlignmentFlag.AlignCenter
+    )
+
+    resume.addWidget(
+        resume_title
+    )
 
     aboba.mb_resume_summary = QLabel()
     aboba.mb_resume_summary.setWordWrap(True)
-
-    resume.addWidget(aboba.mb_resume_summary)
-
-    aboba.mb_resume_button = QPushButton("Продолжить")
-    resume.addWidget(aboba.mb_resume_button)
-
-    right.addWidget(aboba.mb_resume_block)
-
-    # ---------------- Журнал операции ----------------
-    aboba.mb_headings.append(
-        _heading("Журнал операции", right)
+    aboba.mb_resume_summary.setAlignment(
+        Qt.AlignmentFlag.AlignCenter
     )
+
+    resume.addWidget(
+        aboba.mb_resume_summary
+    )
+
+    aboba.mb_resume_button = QPushButton(
+        " Продолжить"
+    )
+
+    aboba.mb_resume_button.setIcon(
+        QIcon(
+            str(
+                PROJECT_ROOT
+                / "Картинки"
+                / "Продолжить.png"
+            )
+        )
+    )
+    aboba.mb_resume_button.setIconSize(
+        QSize(17, 17)
+    )
+
+    resume.addWidget(
+        aboba.mb_resume_button
+    )
+
+    left.addWidget(
+        aboba.mb_resume_block
+    )
+
+    left.addStretch(1)
+
+    # ==================================================================
+    # ПРАВАЯ КОЛОНКА
+    # Ручная загрузка Mindbox
+    # ==================================================================
+    _heading(
+        "Ручная загрузка из Mindbox",
+        right,
+    )
+
+    manual = QGridLayout()
+
+    aboba.mb_manual_files = {}
+    aboba.mb_manual_controls = []
+
+    for row, (name, icon_name) in enumerate((
+            ("Actions", "Действия.png"),
+            ("Orders", "Заказ.png"),
+            ("Customers", "Клиенты.png"),
+    )):
+        editor = QLineEdit()
+        editor.setReadOnly(True)
+        editor.setPlaceholderText(
+            name + ".json"
+        )
+
+        button = QPushButton(
+            " Выбрать " + name
+        )
+
+        button.setIcon(
+            QIcon(
+                str(
+                    PROJECT_ROOT
+                    / "Картинки"
+                    / icon_name
+                )
+            )
+        )
+        button.setIconSize(
+            QSize(17, 17)
+        )
+
+        def choose(
+                _checked=False,
+                target=editor,
+        ):
+            path, _ = QFileDialog.getOpenFileName(
+                aboba,
+                "Выберите Mindbox JSON",
+                "",
+                "JSON (*.json)",
+            )
+
+            if path:
+                target.setText(path)
+
+        button.clicked.connect(choose)
+
+        manual.addWidget(
+            editor,
+            row,
+            0,
+        )
+        manual.addWidget(
+            button,
+            row,
+            1,
+        )
+
+        aboba.mb_manual_files[
+            name.lower()
+        ] = editor
+
+        aboba.mb_manual_controls.extend(
+            (editor, button)
+        )
+
+    right.addLayout(manual)
+
+    # ---------------- CustomerMerges source ----------------
+    aboba.mb_manual_merges = QLabel(
+        "Проверка сохранённых объединений клиентов…"
+    )
+    aboba.mb_manual_merges.setWordWrap(True)
+
+    right.addWidget(
+        aboba.mb_manual_merges
+    )
+
+    # ---------------- Кнопки manual import ----------------
+    manual_buttons = QHBoxLayout()
+
+    aboba.mb_manual_interactions_button = QPushButton(
+        "Импорт Actions + Orders"
+    )
+    aboba.mb_manual_customers_button = QPushButton(
+        "Импорт Customers"
+    )
+
+    for button in (
+            aboba.mb_manual_interactions_button,
+            aboba.mb_manual_customers_button,
+    ):
+        manual_buttons.addWidget(button)
+        aboba.mb_manual_controls.append(
+            button
+        )
+
+    right.addLayout(
+        manual_buttons
+    )
+
+    # ==================================================================
+    # ПРАВАЯ КОЛОНКА
+    # Загрузка справочников
+    # ==================================================================
+    right.addWidget(
+        create_csv_loading_section(aboba)
+    )
+
+    right.addStretch(1)
+
+    # ==================================================================
+    # ГОРИЗОНТАЛЬНЫЙ РАЗДЕЛИТЕЛЬ
+    # ==================================================================
+    horizontal_separator = QFrame()
+    horizontal_separator.setObjectName(
+        "hSeparator"
+    )
+    horizontal_separator.setFixedHeight(1)
+    horizontal_separator.setFrameShape(
+        QFrame.Shape.NoFrame
+    )
+
+    root.addWidget(
+        horizontal_separator
+    )
+
+    # ==================================================================
+    # НИЖНЯЯ ЧАСТЬ
+    # Журнал операции на всю ширину
+    # ==================================================================
+    log_wrap = QWidget()
+
+    log_layout = QVBoxLayout(
+        log_wrap
+    )
+    log_layout.setContentsMargins(8, 8, 8, 0)
+    log_layout.setSpacing(0)
 
     aboba.mb_log = QTextEdit()
     aboba.mb_log.setReadOnly(True)
     aboba.mb_log.setAcceptRichText(False)
     aboba.mb_log.setPlaceholderText(
-        "Логи загрузки будут отображаться здесь..."
+        "Это журнал операций, логи загрузки будут отображаться здесь..."
     )
-    aboba.mb_log.document().setMaximumBlockCount(3000)
+
+    aboba.mb_log.document().setMaximumBlockCount(
+        3000
+    )
 
     aboba.mb_log.setSizePolicy(
         QSizePolicy.Policy.Expanding,
         QSizePolicy.Policy.Expanding,
     )
 
-    right.addWidget(aboba.mb_log, 1)
+    log_layout.addWidget(
+        aboba.mb_log,
+        1,
+    )
 
-    # ---------------- Добавление вкладки ----------------
-    aboba.tabs.insertTab(0, tab, "Получение данных")
+    root.addWidget(
+        log_wrap,
+        1,
+    )
 
-    aboba.mb_controller = _LoadingController(aboba)
+    # ==================================================================
+    # Добавление вкладки
+    # ==================================================================
+    aboba.tabs.insertTab(
+        0,
+        tab,
+        "Получение данных",
+    )
+
+    aboba.mb_controller = _LoadingController(
+        aboba
+    )
 
 
 class _LoadingController(QObject):
@@ -445,6 +727,7 @@ class _LoadingController(QObject):
         self.stage = None
         self.manifest_path = None
         self.snapshot_path = None
+        self.resume_stage = "training"
         self.tasks = {}
         self._task_number = 0
         aboba.mb_process = None
@@ -457,6 +740,7 @@ class _LoadingController(QObject):
         self.kill_timer.setInterval(3000)
         self.kill_timer.timeout.connect(self._kill_process)
         aboba.mb_start_button.clicked.connect(self.start)
+        aboba.mb_customers_button.clicked.connect(self.start_customers)
         aboba.mb_cancel_button.clicked.connect(self.cancel)
         aboba.mb_resume_button.clicked.connect(self.resume)
         aboba.mb_manual_interactions_button.clicked.connect(lambda: self.start_manual("interactions"))
@@ -464,6 +748,7 @@ class _LoadingController(QObject):
         for widget in (aboba.mb_interaction_since, aboba.mb_interaction_until, aboba.mb_merge_since):
             widget.dateChanged.connect(self.refresh_merges)
         QTimer.singleShot(0, self.refresh_merges)
+        QTimer.singleShot(0, self.refresh_persisted)
         aboba.installEventFilter(self)
         self._update_controls()
 
@@ -477,7 +762,9 @@ class _LoadingController(QObject):
         a.mb_cancel_button.setEnabled(running and not self.cancel_requested)
         a.mb_resume_block.setVisible(not running and self.resume_path is not None)
         a.mb_resume_button.setEnabled(not running and self.resume_path is not None)
-        a.mb_status_label.setText(self.state.value)
+        a.mb_customers_button.setEnabled(not running)
+        a.mb_customers_since.setEnabled(not running)
+        a.mb_customers_until.setEnabled(not running)
 
     def _log(self, message, *, timestamp=True):
         if timestamp:
@@ -501,12 +788,9 @@ class _LoadingController(QObject):
         if reset_timer is not None:
             reset_timer.stop()
         set_status_processing(self.ui, "Идёт получение данных из Mindbox...")
-        self.ui.mb_progress.setRange(0, 100)
-        self.ui.mb_progress.setValue(0)
-        self.ui.mb_progress.setFormat("%p%")
-        self.ui.mb_progress_label.setText("Прогресс: ожидание...")
+        self.ui.mb_progress.setRange(0, 0)
+        self.ui.mb_progress.setFormat("Идёт загрузка...")
         self.ui.mb_log.clear()
-        self._log("Запуск получения данных...")
         self._update_controls()
 
     def start(self):
@@ -519,22 +803,41 @@ class _LoadingController(QObject):
                 for field, editor in a.mb_selection_fields.items()
             })
             args = training_arguments(*(widget.date().toString("yyyy-MM-dd") for widget in
-                (a.mb_interaction_since, a.mb_interaction_until, a.mb_merge_since)), selection=selection)
+                                        (a.mb_interaction_since, a.mb_interaction_until, a.mb_merge_since)),
+                                      selection=selection)
         except ValueError as exc:
             self._error(str(exc))
             return
         self.resume_path = None
         a.mb_current_state_path = None
         self.manifest_path = self.snapshot_path = None
-        for name in ("merges_status", "actions_status", "orders_status", "customers_status", "batch", "manifest"):
-            label = getattr(a, f"mb_{name}_label")
-            label.setText("—")
-
         self._begin()
-        a.mb_customers_status_label.setText("Ожидание")
-        self._log(f"Период: {a.mb_interaction_since.text()} — {a.mb_interaction_until.text()} [00:00 UTC, по не включительно)")
-        self._log("Источники: Действия, Заказы, Объединения клиентов, Клиенты")
+        for name in ("merges", "actions", "orders"):
+            getattr(a, f"mb_{name}_status_label").setText("Выполняется...")
+        self._log("Запуск получения данных")
+        self._log(f"Период: {a.mb_interaction_since.text()} — {a.mb_interaction_until.text()}")
         self._launch("training", args)
+
+    def start_customers(self):
+        if self.state == LoadingState.RUNNING:
+            return
+        try:
+            args = customers_arguments(self.ui.mb_customers_since.date().toString("yyyy-MM-dd"),
+                                       self.ui.mb_customers_until.date().toString("yyyy-MM-dd"))
+        except ValueError as exc:
+            self._error(str(exc))
+            return
+        self.previous_resume_path = self.resume_path
+        self.previous_resume_stage = self.resume_stage
+        self.snapshot_path = None
+        self.ui.mb_current_state_path = None
+        self._begin()
+        self._log("Запуск обновления клиентов")
+        self._log(f"Период: {self.ui.mb_customers_since.text()} — {self.ui.mb_customers_until.text()}")
+        self._launch("customers", args)
+
+    def refresh_persisted(self):
+        self._read_metadata("persisted", _persisted_summary)
 
     def refresh_merges(self):
         dates = tuple(w.date().toString("yyyy-MM-dd") for w in
@@ -548,7 +851,6 @@ class _LoadingController(QObject):
         self.previous_resume_path = self.resume_path
         self._begin()
         self.ui.mb_progress.setRange(0, 0)
-        self.ui.mb_progress_label.setText("Импорт справочника…")
         self._launch("reference_csv", ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/import_reference_csv.py"),
                                        "--file", str(path), "--kind", kind])
 
@@ -564,7 +866,8 @@ class _LoadingController(QObject):
             args = ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_manual_import.py"), kind]
             if kind == "interactions":
                 selection = MindboxSelectionConfig(**{
-                    field: parse_selection_values(editor.toPlainText() if isinstance(editor, QTextEdit) else editor.text())
+                    field: parse_selection_values(
+                        editor.toPlainText() if isinstance(editor, QTextEdit) else editor.text())
                     for field, editor in a.mb_selection_fields.items()
                 })
                 dates = [w.date().toString("yyyy-MM-dd") for w in
@@ -580,7 +883,6 @@ class _LoadingController(QObject):
         a.mb_current_state_path = None
         self._begin()
         a.mb_progress.setRange(0, 0)
-        a.mb_progress_label.setText("Ручной импорт: ход копирования и проверки — в журнале")
         self._launch("manual_" + kind, args)
 
     def _launch(self, stage, arguments):
@@ -596,6 +898,8 @@ class _LoadingController(QObject):
         process.finished.connect(lambda code, status: self._process_finished(process, code, status))
         process.start(sys.executable, arguments)
         if stage == "training":
+            for field in ("actions", "orders", "merges"):
+                getattr(self.ui, f"mb_{field}_status_label").setText("Выполняется...")
             self.ui.mb_state_timer.start()
         elif stage in ("customers", "manual_customers"):
             self.ui.mb_customers_status_label.setText("Выполняется")
@@ -619,27 +923,42 @@ class _LoadingController(QObject):
             except ValueError:
                 self.reference_result = None
             return
-        self._log(line, timestamp=False)
-        if self.stage.startswith("manual_"):
-            if line.startswith("Manifest: "):
-                self.manifest_path = self._output_path(line[len("Manifest: "):])
-            elif line.startswith("Объединения клиентов:"):
-                self.ui.mb_manual_merges.setText(line)
+        if line.startswith("Event: "):
+            try:
+                event = json.loads(line[7:])
+                source, ready, total = event["source"], event["ready"], event["total"]
+                labels = {"actions": ("actions", "Действия", "дней"), "orders": ("orders", "Заказы", "дней"),
+                          "customer_merges": ("merges", "Объединения клиентов", ""), "customers": ("customers", "Клиенты", "месяцев")}
+                field, title, unit = labels[source]
+                if type(ready) is not int or type(total) is not int or not 0 <= ready <= total:
+                    return
+                text = f"Загружено {unit}: {ready} из {total}" if unit else "Получены"
+                getattr(self.ui, f"mb_{field}_status_label").setText(text)
+                if source == "customers" or source == "customer_merges" or ready % 5 == 0 or ready == total:
+                    self._log(f"{title}: {text.lower()}")
+            except (ValueError, KeyError, TypeError):
+                pass
             return
-        if self.stage == "training":
-            state_text = None
-            if line.startswith("State: "):
-                state_text = line[len("State: "):]
-            elif line.startswith("Batch: ") and "; State: " in line:
-                state_text = line.partition("; State: ")[2]
-            if state_text:
-                self.ui.mb_current_state_path = self._output_path(state_text)
-                self.ui.mb_batch_label.setText(self.ui.mb_current_state_path.parent.name)
-                self._poll_state()
-            if line.startswith("Manifest: "):
-                self.manifest_path = self._output_path(line[len("Manifest: "):])
-        elif self.stage == "customers" and line.startswith("Manifest: "):
-            self.snapshot_path = self._output_path(line[len("Manifest: "):])
+        if line.startswith("Error: "):
+            try:
+                error = json.loads(line[7:])
+                title = {"actions": "действий", "orders": "заказов", "customer_merges": "объединений клиентов", "customers": "клиентов"}.get(error.get("source"), "данных")
+                period = datetime.fromisoformat(error["since"]).strftime("%m.%Y" if error.get("source") == "customers" else "%d.%m.%Y") if error.get("since") else ""
+                text = "Превышено время ожидания выгрузки" if error.get("category") == "timeout" else "Не удалось выполнить выгрузку"
+                self._log(f"{text} {title}" + (f" за {period}." if period else "."))
+            except (ValueError, TypeError, KeyError):
+                self._log("Не удалось обновить данные.")
+            return
+        if line.startswith("State: "):
+            self.ui.mb_current_state_path = self._output_path(line[7:])
+            return
+        if line.startswith("Manifest: "):
+            path = self._output_path(line[10:])
+            if self.stage == "customers":
+                self.snapshot_path = path
+            else:
+                self.manifest_path = path
+        # Everything else is technical output, never user-facing text.
 
     @staticmethod
     def _output_path(value):
@@ -661,74 +980,65 @@ class _LoadingController(QObject):
         self.kill_timer.stop()
         self.ui.mb_state_timer.stop()
         process.deleteLater()
-        if self.stage == "training":
-            self._poll_state()
         if self.cancel_requested:
             self._finish(LoadingState.CANCELLED)
         elif code != 0 or status != QProcess.ExitStatus.NormalExit:
-            self._log(f"Процесс завершился с ошибкой (код {code}).")
+            self._log("Сохранённые данные не повреждены. Ранее обработанные дни и месяцы сохранены.")
             self._finish(LoadingState.FAILED)
         elif self.stage == "reference_csv":
             if self.reference_result is None:
                 self._finish(LoadingState.FAILED)
-            else:
-                from Application.tabs.data_processing_tab import apply_reference_result
-                try:
-                    apply_reference_result(self.ui, self.reference_result)
-                except Exception:
-                    self._log("Справочник сохранён; не удалось обновить связанные элементы интерфейса.")
-                    self._finish(LoadingState.FAILED)
-                    return
-                self.ui.mb_progress.setRange(0, 1)
-                self.ui.mb_progress.setValue(1)
-                self.ui.mb_progress_label.setText("Справочник загружен")
-                self._finish(LoadingState.SUCCESS)
+                return
+            from Application.tabs.data_processing_tab import apply_reference_result
+            try:
+                apply_reference_result(self.ui, self.reference_result)
+            except Exception:
+                self._finish(LoadingState.FAILED)
+                return
+            self._finish(LoadingState.SUCCESS)
         elif self.stage.startswith("manual_"):
             if self.manifest_path is None:
                 self._finish(LoadingState.FAILED)
             else:
                 self._read_metadata("manual_result", _validate_manual_result, self.manifest_path, self.stage)
         elif self.stage == "training":
-            # Transport has exited successfully; local validation is not resumable.
             self.stage = "training_validation"
-            self.resume_path = None
-            if (self.manifest_path is None or self.ui.mb_current_state_path is None
-                    or self.manifest_path != self.ui.mb_current_state_path.parent / "manifest.json"):
-                self._log("CLI не сообщил final manifest текущего batch.")
+            if self.manifest_path is None:
                 self._finish(LoadingState.FAILED)
-                return
-            self._log("Проверка завершённого обучающего набора…")
-            self._read_metadata("training_manifest", _load_training_summary, self.manifest_path, True)
+            else:
+                self._read_metadata("training_manifest", _load_training_summary, self.manifest_path, True)
         elif self.snapshot_path is None:
-            self._log("CLI не сообщил manifest customer profile snapshot.")
             self._finish(LoadingState.FAILED)
         else:
             self.stage = "snapshot_validation"
-            self._read_metadata("snapshot", _validate_snapshot, self.snapshot_path, self.manifest_path)
+            self._read_metadata("snapshot", _validate_manual_result, self.snapshot_path, "manual_customers")
 
     def _finish(self, state):
         self.state = state
         self.ui.mb_state_timer.stop()
-        self.resume_path = (getattr(self, "previous_resume_path", None)
-                            if self.stage.startswith("manual_") or self.stage == "reference_csv" else None)
-        if self.stage == "training" and state in (LoadingState.CANCELLED, LoadingState.FAILED):
+        self.resume_path = getattr(self, "previous_resume_path", None) if self.stage.startswith("manual_") or self.stage == "reference_csv" else None
+        if self.stage == "snapshot_validation" and state == LoadingState.SUCCESS:
+            self.resume_path = getattr(self, "previous_resume_path", None)
+            self.resume_stage = getattr(self, "previous_resume_stage", "training")
+        if self.stage in ("training", "customers") and state in (LoadingState.CANCELLED, LoadingState.FAILED):
             self.resume_path = self.ui.mb_current_state_path
-            if self.resume_path is not None:
-                self.ui.mb_resume_summary.setText(f"Набор: {self.resume_path.parent.name}\nСостояние сохранено.")
-        if self.stage in ("customers", "snapshot_validation", "manual_customers"):
-            self.ui.mb_customers_status_label.setText({LoadingState.FAILED: "Ошибка",
-                LoadingState.CANCELLED: "Отменено", LoadingState.SUCCESS: "Готово"}[state])
+            self.resume_stage = self.stage
+        if self.resume_path is not None:
+            self.ui.mb_resume_summary.setText("Состояние сохранено. Можно продолжить незавершённую загрузку.")
+        self.ui.mb_progress.setRange(0, 1)
+        self.ui.mb_progress.setValue(0)
+        self.ui.mb_progress.setFormat("Прогресс загрузки")
         if state == LoadingState.CANCELLED:
-            self._log("Операция отменена пользователем. Уже загруженные компоненты сохранены.")
+            self._log("Операция отменена. Уже сохранённые данные остаются доступны.")
             set_status_ok(self.ui, "Получение данных отменено")
         elif state == LoadingState.FAILED:
-            self._error("Завершённый обучающий набор не прошёл проверку. Подробности — в журнале операции."
-                        if self.stage == "training_validation" else
-                        "Ошибка получения данных. Подробности — в журнале операции.")
+            self._error("Ошибка получения данных. Подробности — в журнале операции.")
         else:
-            self._log("Получение данных завершено.")
+            self._log("Клиенты успешно обновлены" if self.stage in ("customers", "snapshot_validation", "manual_customers") else "Данные успешно обновлены")
             set_status_ok(self.ui, "Получение данных завершено.")
         schedule_status_reset(self.ui, 5)
+        self.refresh_persisted()
+        self.refresh_merges()
         self._update_controls()
         if self.closing:
             QTimer.singleShot(0, self.ui.close)
@@ -756,9 +1066,10 @@ class _LoadingController(QObject):
             return
         self.ui.mb_current_state_path = self.resume_path
         self.manifest_path = None
+        self.snapshot_path = None
         self._begin()
-        self._log(f"Продолжение batch: {self.resume_path.parent.name}")
-        self._launch("training", resume_arguments(self.resume_path))
+        self._log("Продолжение незавершённой загрузки")
+        self._launch(self.resume_stage, resume_arguments(self.resume_path))
 
     def _poll_state(self):
         path = self.ui.mb_current_state_path
@@ -779,6 +1090,16 @@ class _LoadingController(QObject):
         self.tasks.pop(task_id, None)
         if generation != self.generation:
             return
+        if kind == "persisted":
+            if self.state != LoadingState.RUNNING:
+                if error is None:
+                    for name, value in result.items():
+                        field = "merges" if name == "customer_merges" else name
+                        getattr(self.ui, f"mb_{field}_status_label").setText(_summary_text(value))
+                else:
+                    for field in ("actions", "orders", "merges", "customers"):
+                        getattr(self.ui, f"mb_{field}_status_label").setText("Не удалось прочитать сохранённые данные")
+            return
         if kind == "merge_info":
             if error is None:
                 dates, text = result
@@ -788,58 +1109,20 @@ class _LoadingController(QObject):
                     self.ui.mb_manual_merges.setText(text)
             return
         if kind == "state":
-            # Missing/replaced/partially written state is retried on the next tick.
-            if error is None and self.stage in ("training", "training_validation") and self.state != LoadingState.SUCCESS:
+            if error is None and self.stage == "training" and self.state == LoadingState.RUNNING:
                 self._show_summary(result)
             return
         if self.state != LoadingState.RUNNING or self.cancel_requested:
             return
         if error is not None:
-            self._log(f"Не удалось подтвердить завершённый manifest ({error}).")
+            self._log("Не удалось проверить сохранённый результат.")
             self._finish(LoadingState.FAILED)
-        elif kind == "manual_result":
-            if self.stage == "manual_interactions":
-                self.ui.mb_actions_status_label.setText("Готово")
-                self.ui.mb_orders_status_label.setText("Готово")
-            self.ui.mb_manifest_label.setText("Готов")
-            self.ui.mb_progress.setRange(0, 1)
-            self.ui.mb_progress.setValue(1)
-            self.ui.mb_progress_label.setText("Ручной импорт завершён")
-            self._finish(LoadingState.SUCCESS)
-        elif kind == "training_manifest":
-            self._show_summary(result)
-            self.ui.mb_manifest_label.setText("Готов")
-
-            self._log(f"Обучающий manifest готов: {self.manifest_path}")
-            self.resume_path = None
-            self._log("Запуск загрузки клиентов и создания customer profile snapshot…")
-            self._launch("customers", customers_arguments(self.manifest_path))
-        elif kind == "snapshot":
-            # Customers count as one component, completed only after validation.
-            progress = self.ui.mb_progress
-            progress.setValue(progress.maximum())
-            self.ui.mb_progress_label.setText(
-                f"Готово: {progress.maximum()} / {progress.maximum()} компонентов")
-
-            self._log(f"Customer profile snapshot готов: {self.snapshot_path}")
+        elif kind in ("manual_result", "training_manifest", "snapshot"):
             self._finish(LoadingState.SUCCESS)
 
     def _show_summary(self, summary):
-        a = self.ui
-        a.mb_batch_label.setText(summary["batch_id"])
-
-        a.mb_merges_status_label.setText({"READY": "Готово", "PENDING": "Ожидание",
-            "FAILED": "Ошибка", "RUNNING": "Выполняется"}.get(summary["merges"], "Неизвестно"))
         for name, counts in summary["sources"].items():
-            label = getattr(a, f"mb_{name}_status_label")
-            label.setText(f"{counts['ready']} / {summary['days_total']} дней"
-                          + (f"; Ошибок: {counts['failed']}" if counts['failed'] else ""))
-        a.mb_progress.setRange(0, summary["components_total"] + 1)
-        a.mb_progress.setValue(summary["components_ready"])
-        a.mb_progress.setFormat("%p%")
-        a.mb_progress_label.setText(f"Готово: {summary['components_ready']} / {summary['components_total'] + 1} компонентов")
-        a.mb_resume_summary.setText(f"Период: {summary['period']}\n"
-            f"Готово: {summary['days_ready']} / {summary['days_total']} дней\nНабор: {summary['batch_id']}")
+            getattr(self.ui, f"mb_{name}_status_label").setText(f"Загружено дней: {counts['ready']} из {summary['days_total']}")
 
     def eventFilter(self, watched, event):
         if watched is self.ui and event.type() == QEvent.Type.Close and self.state == LoadingState.RUNNING:

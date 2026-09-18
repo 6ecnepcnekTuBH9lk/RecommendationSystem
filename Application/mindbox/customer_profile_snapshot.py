@@ -67,6 +67,11 @@ def snapshot_manifest_path(raw_root, snapshot_id):
 
 def validate_customer_profile_snapshot(snapshot, *, raw_root):
     """Read directory listings and manifests only, never Customers raw contents."""
+    if isinstance(snapshot, CustomerProfileSnapshot) and snapshot.schema_version == 3:
+        from .canonical_customers import database
+        if snapshot != load_customer_profile_snapshot(database(raw_root), raw_root=raw_root):
+            raise ProfileSnapshotError("Canonical customer metadata changed")
+        return
     try:
         if (not isinstance(snapshot, CustomerProfileSnapshot) or type(snapshot.schema_version) is not int
                 or snapshot.schema_version not in (1, 2) or snapshot.transport_complete is not True):
@@ -135,6 +140,20 @@ def create_customer_profile_snapshot(client, *, training_manifest, raw_root, tim
 
 
 def load_customer_profile_snapshot(manifest, *, raw_root):
+    from .canonical_customers import database, customer_summary
+    if Path(manifest).resolve() == database(raw_root):
+        from .canonical_storage import catalog
+        summary = customer_summary(raw_root)
+        if summary is None:
+            raise ProfileSnapshotError("No canonical customer data")
+        merges = catalog(raw_root)["customer_merges"]
+        if merges is None and any((Path(raw_root) / "training_batches").glob("*/manifest.json")):
+            from .manual_import import select_merges_source
+            entry = select_merges_source(raw_root).components[0].export
+            merges = {"directory": entry.relative_directory, "parts": entry.parts_count}
+        return CustomerProfileSnapshot("canonical", summary["updated"], "canonical/customers.sqlite", 0,
+            merges["directory"] if merges else "", merges["parts"] if merges else 0,
+            schema_version=3, source_kind=summary["source_kind"])
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -160,6 +179,9 @@ def load_customer_profile_snapshot(manifest, *, raw_root):
 
 
 def load_customer_contact_index(profile_manifest, model_mappings=None, *, raw_root, progress=None, progress_every=100000):
+    from .canonical_customers import database, load_contact_index
+    if Path(profile_manifest).resolve() == database(raw_root):
+        return load_contact_index(raw_root, model_mappings, progress=progress, progress_every=progress_every)
     snapshot = load_customer_profile_snapshot(profile_manifest, raw_root=raw_root)
     root = Path(raw_root).resolve()
     resolver = CustomerIdResolver(adapt_customer_merge(raw) for raw in

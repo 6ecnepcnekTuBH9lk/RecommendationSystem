@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def main(argv=None):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
-    from Application.mindbox.manual_import import import_interactions, import_customers, ManualImportError
+    from Application.mindbox.manual_import import import_interactions, ManualImportError
     from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT
     from Application.mindbox.selection import MindboxSelectionConfig, SELECTION_OPTIONS
     from Application.mindbox.training_batch import TrainingBatchWindow
@@ -40,8 +40,8 @@ def main(argv=None):
                                         selection=selection, progress=progress)
             path = args.raw_root / "training_batches" / batch.batch_id / "manifest.json"
         else:
-            snapshot = import_customers(args.customers, raw_root=args.raw_root, progress=progress)
-            path = args.raw_root / "customer_profile_snapshots" / snapshot.snapshot_id / "manifest.json"
+            from Application.mindbox.canonical_customers import import_full
+            path = import_full(args.raw_root, args.customers, progress=progress)
         print(f"Manifest: {path}", flush=True)
         return 0
     except ManualImportError as exc:

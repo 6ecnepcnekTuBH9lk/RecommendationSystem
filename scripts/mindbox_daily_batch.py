@@ -35,6 +35,12 @@ def print_status(batch, state_path):
 def main(argv=None):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and (arguments[0] == "export-daily" or (
+            arguments[0] in ("resume", "status") and "--state" in arguments
+            and "canonical" in Path(arguments[arguments.index("--state") + 1]).parts)):
+        from scripts.mindbox_canonical import main as canonical_main
+        return canonical_main(arguments)
     from Application.mindbox import MindboxConfig, MindboxClient, MindboxError
     from Application.mindbox.daily_training_batch import (
         ChunkedBatchError, create_chunked_training_batch, resume_chunked_training_batch,

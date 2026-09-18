@@ -175,3 +175,13 @@ QFrame#vSeparator, QFrame#hSeparator {{
     background-color: rgba({APP_TEXT_RGB}, 55);
     border: none;
 }}
+/* Text selection */
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QSpinBox,
+QDoubleSpinBox,
+QDateEdit {{
+    selection-background-color: rgba({APP_PRIMARY_RGB}, 110);
+    selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+}}

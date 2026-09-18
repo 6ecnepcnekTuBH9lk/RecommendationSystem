@@ -73,13 +73,13 @@ def test_state_created_callback_precedes_first_network_call(tmp_path, window):
 
 def test_cli_prints_durable_state_before_export(tmp_path, monkeypatch, capsys):
     import Application.mindbox as mindbox
-    client = Client()
+    client = PrefixClient()
     original = client.start_export
 
     def start_export(operation, payload):
         if not client.calls:
             output = capsys.readouterr().out
-            assert f"State: {state_path(tmp_path)}" in output
+            assert f"State: {next(tmp_path.glob('canonical/jobs/*/state.json'))}" in output
         return original(operation, payload)
 
     client.start_export = start_export
@@ -382,21 +382,21 @@ def test_atomic_failed_checkpoint_preserves_previous_state(tmp_path, window, mon
 
 def test_cli_failure_resume_status_security(tmp_path, monkeypatch, capsys):
     import Application.mindbox as mindbox
-    client = Client(5)
+    client = PrefixClient(5)
     monkeypatch.setattr(mindbox.MindboxConfig, "from_env", lambda *a: client.config)
     monkeypatch.setattr(mindbox, "MindboxClient", lambda *a: client)
     assert main(["export-daily", "--since", "2026-08-01", "--until", "2026-08-04",
                  "--merge-since", "2025-01-01 00:00", "--raw-root", str(tmp_path)]) == 1
     output = capsys.readouterr()
-    assert "Last completed: 2026-08-02 actions" in output.out
-    state = state_path(tmp_path)
-    client = Client()
+    assert '"source": "orders"' in output.out and '"category": "failed"' in output.out
+    state = next(tmp_path.glob("canonical/jobs/*/state.json"))
+    client = PrefixClient()
     assert main(["resume", "--state", str(state), "--raw-root", str(tmp_path)]) == 0
     monkeypatch.setattr(mindbox.MindboxConfig, "from_env", lambda *a: pytest.fail("Offline must not load env"))
     assert main(["status", "--state", str(state), "--raw-root", str(tmp_path)]) == 0
-    assert main(["validate", "--manifest", str(state.with_name("manifest.json")), "--raw-root", str(tmp_path)]) == 0
+    assert main(["validate", "--manifest", str((tmp_path / "canonical/training.json")), "--raw-root", str(tmp_path)]) == 0
     output_text = output.out + output.err + capsys.readouterr().out
-    metadata = state.read_text(encoding="utf-8") + state.with_name("manifest.json").read_text(encoding="utf-8")
+    metadata = state.read_text(encoding="utf-8") + (tmp_path / "canonical/training.json").read_text(encoding="utf-8")
     for secret in SECRETS:
         assert secret not in output_text + metadata
 
@@ -496,7 +496,7 @@ def test_prefix_carries_selection(tmp_path):
 
 def test_cli_custom_selection_and_unchanged_payload(tmp_path, monkeypatch):
     import Application.mindbox as mindbox
-    client = Client()
+    client = PrefixClient()
     monkeypatch.setattr(mindbox.MindboxConfig, "from_env", lambda *a: client.config)
     monkeypatch.setattr(mindbox, "MindboxClient", lambda *a: client)
     args = ["export-daily", "--since", "2026-08-01", "--until", "2026-08-02",
@@ -504,7 +504,7 @@ def test_cli_custom_selection_and_unchanged_payload(tmp_path, monkeypatch):
     assert main(args + ["--view-action", "CustomView", "--view-action", "OtherView",
                         "--favorite-action", "CustomFavorite", "--purchase-status", "CustomStatus",
                         "--action-product-namespace", "kanzlerKz", "--order-product-namespace", "offline1C"]) == 0
-    selection = api.load_chunked_training_batch(state_path(tmp_path), raw_root=tmp_path).selection
+    selection = api.load_chunked_training_batch(tmp_path / "canonical/training.json", raw_root=tmp_path).selection
     assert selection.view_action_system_names == ("CustomView", "OtherView")
     assert selection.favorite_action_system_names == ("CustomFavorite",)
     assert selection.purchase_line_statuses == ("CustomStatus",)

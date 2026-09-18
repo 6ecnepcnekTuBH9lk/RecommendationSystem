@@ -140,6 +140,11 @@ def _writer_lock(directory):
 
 
 def validate_chunked_training_batch(batch, *, raw_root, require_complete=False):
+    if batch.source_kind == "CANONICAL":
+        from .canonical_storage import current_batch
+        if batch != current_batch(raw_root):
+            raise TrainingBatchError("Canonical dataset changed; reload current manifest")
+        return
     if not isinstance(batch.selection, MindboxSelectionConfig):
         raise TrainingBatchError("Invalid batch selection")
     root = Path(raw_root).resolve()
@@ -203,6 +208,12 @@ def validate_chunked_training_batch(batch, *, raw_root, require_complete=False):
 
 
 def load_chunked_training_batch(path, *, raw_root, require_complete=False, api_only=False):
+    if Path(path).resolve() == Path(raw_root).resolve() / "canonical/training.json":
+        from .canonical_storage import current_batch
+        with Path(path).open(encoding="utf-8") as stream:
+            if json.load(stream) != {"schema_version": 5, "storage": "canonical"}:
+                raise TrainingBatchError("Invalid current dataset marker")
+        return current_batch(raw_root)
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -395,6 +406,17 @@ def finalize_chunked_training_batch_prefix(client, *, state_path, raw_root, poll
 
 def prepare_training_data_from_chunked_batch(batch, *, raw_root, catalog_path, train_config, diagnose=False):
     from Application.model.mindbox_training_preparation import _prepare_training_data_from_mindbox_sources
+
+    if batch.source_kind == "CANONICAL":
+        from .canonical_storage import storage_lock
+        with storage_lock(raw_root):
+            validate_chunked_training_batch(batch, raw_root=raw_root, require_complete=True)
+            root = Path(raw_root).resolve()
+            return _prepare_training_data_from_mindbox_sources(
+                actions_export_dirs=tuple(root / c.export.relative_directory for c in batch.components if c.name == "actions"),
+                orders_export_dirs=tuple(root / c.export.relative_directory for c in batch.components if c.name == "orders"),
+                customer_merges_export_dir=root / batch.components[0].export.relative_directory,
+                catalog_path=catalog_path, train_config=train_config, diagnose=diagnose, selection=batch.selection)
 
     validate_chunked_training_batch(batch, raw_root=raw_root, require_complete=True)
     root = Path(raw_root).resolve()
