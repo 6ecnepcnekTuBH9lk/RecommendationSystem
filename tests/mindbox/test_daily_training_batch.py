@@ -397,8 +397,14 @@ def test_cli_failure_resume_status_security(tmp_path, monkeypatch, capsys):
     assert main(["validate", "--manifest", str((tmp_path / "canonical/training.json")), "--raw-root", str(tmp_path)]) == 0
     output_text = output.out + output.err + capsys.readouterr().out
     metadata = state.read_text(encoding="utf-8") + (tmp_path / "canonical/training.json").read_text(encoding="utf-8")
+    # Structured message is now preserved for local diagnostics. Technical output
+    # and stored metadata still must not acquire raw records or credentials.
+    error = json.loads(next(line[7:] for line in output.out.splitlines() if line.startswith("Error: ")))
+    assert error["message"] == " ".join(SECRETS).replace(SECRETS[0], "[секрет скрыт]")
+    assert SECRETS[0] not in output_text
+    technical_output = "\n".join(line for line in output_text.splitlines() if not line.startswith("Error: "))
     for secret in SECRETS:
-        assert secret not in output_text + metadata
+        assert secret not in technical_output + metadata
 
 
 def test_process_exit_leaves_pending_checkpoint(tmp_path, window):

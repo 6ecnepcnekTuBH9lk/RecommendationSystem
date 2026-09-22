@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def main(argv=None):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
+    from Application.loading_errors import emit_error
     from Application.mindbox import MindboxClient, MindboxConfig
     from Application.mindbox.canonical_jobs import create_job, resume_job, load_job
     from Application.mindbox.selection import MindboxSelectionConfig, SELECTION_OPTIONS
@@ -30,7 +31,8 @@ def main(argv=None):
     for field, option in SELECTION_OPTIONS.items():
         parser.add_argument(option, dest=field, action="append")
     args = parser.parse_args(argv)
-    active = {}
+    config = None
+    active = {"source": "customers" if args.command == "customers" else "data"}
     def progress(name, ready, total):
         if ready == -1:
             active.update(source=name, since=total)
@@ -46,7 +48,8 @@ def main(argv=None):
             return 0
         selection = MindboxSelectionConfig(**{field: getattr(args, field) for field in SELECTION_OPTIONS if getattr(args, field) is not None})
         kwargs = dict(raw_root=args.raw_root, timeout=args.timeout, poll_interval=args.poll_interval, progress=progress)
-        with MindboxClient(MindboxConfig.from_env(args.env_file)) as client:
+        config = MindboxConfig.from_env(args.env_file)
+        with MindboxClient(config) as client:
             if args.command == "resume":
                 if args.state is None:
                     raise ValueError("State required")
@@ -65,7 +68,7 @@ def main(argv=None):
     except Exception as exc:
         from Application.mindbox.exceptions import MindboxExportTimeoutError
         category = "timeout" if isinstance(exc, (TimeoutError, MindboxExportTimeoutError)) else "failed"
-        print("Error: " + json.dumps({"category": category, **active}), flush=True)
+        emit_error(exc, category=category, secrets=(getattr(config, "secret_key", ""),), **active)
         return 1
 
 

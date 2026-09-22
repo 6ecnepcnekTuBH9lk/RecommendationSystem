@@ -136,6 +136,8 @@ def apply_month(root, directory, since, until, *, job, index):
 def import_full(root, source, *, cancelled=None, progress=None):
     """Manual full snapshot: build a separate DB, then atomically replace the current DB."""
     from .manual_import import check_cancel
+    root = Path(root).resolve()
+    source = Path(source)
     with storage_lock(root):
         from .canonical_storage import collect_unreferenced
         collect_unreferenced(root)

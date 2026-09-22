@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def main(argv=None):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
+    from Application.loading_errors import emit_error
     from Application.mindbox.manual_import import import_interactions, ManualImportError
     from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT
     from Application.mindbox.selection import MindboxSelectionConfig, SELECTION_OPTIONS
@@ -26,7 +27,11 @@ def main(argv=None):
         interactions.add_argument("--" + name, required=True)
     for field, option in SELECTION_OPTIONS.items():
         interactions.add_argument(option, dest=field, action="append")
-    customers.add_argument("--customers", required=True)
+    customers.add_argument(
+        "--customers",
+        required=True,
+        type=Path,
+    )
     args = parser.parse_args(argv)
     try:
         progress = lambda text: print(text, flush=True)
@@ -44,12 +49,12 @@ def main(argv=None):
         print(f"Manifest: {path}", flush=True)
         return 0
     except ManualImportError as exc:
-        print(str(exc), file=sys.stderr)
+        emit_error(exc, source="customers" if args.command == "customers" else "actions/orders")
         return 1
     except (KeyboardInterrupt, InterruptedError):
         return 130
     except Exception as exc:
-        print(f"Ручной импорт не выполнен ({type(exc).__name__}).", file=sys.stderr)
+        emit_error(exc, source="customers" if args.command == "customers" else "actions/orders")
         return 1
 
 

@@ -151,11 +151,25 @@ def test_failed_month_rolls_back_data_metadata_and_receipt(tmp_path):
 
 def test_manual_full_replaces_same_customer_store(tmp_path):
     run(tmp_path)
+
     path = tmp_path / "manual.json"
+
     for keys in ([1, 1, 2], [3]):
-        path.write_text(json.dumps({"customers": [customer_record(key) for key in keys]}))
-        customers.import_full(tmp_path, path)
+        path.write_text(
+            json.dumps({
+                "customers": [
+                    customer_record(key)
+                    for key in keys
+                ]
+            }),
+            encoding="utf-8",
+        )
+
+        # CLI передаёт путь к Customers как строку.
+        customers.import_full(tmp_path, str(path))
+
         assert customers.customer_summary(tmp_path)["count"] == len(set(keys))
+
     assert len(list((tmp_path / "canonical").glob("*.sqlite"))) == 1
     assert list((tmp_path / "canonical").glob(".customers-*")) == []
 

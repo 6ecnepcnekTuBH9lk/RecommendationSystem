@@ -199,6 +199,41 @@ def test_order_line_product_namespaces(order, resolver, namespace):
     assert line.delivery_cost is None
 
 
+def test_order_missing_line_id_uses_stable_fallback(order, resolver):
+    del order["lines"][0]["id"]
+
+    line, = adapt_order(order, resolver)
+
+    assert line.order_id == "2001"
+    assert line.line_number == 1
+    assert line.line_id == "2001:missing-line:0"
+
+
+def test_missing_line_ids_do_not_depend_on_duplicate_line_numbers(
+    order,
+    resolver,
+):
+    second = copy.deepcopy(order["lines"][0])
+
+    del order["lines"][0]["id"]
+    del second["id"]
+
+    order["lines"][0]["number"] = 1
+    second["number"] = 1
+
+    order["lines"].append(second)
+
+    first, second = adapt_order(order, resolver)
+
+    assert first.line_number == 1
+    assert second.line_number == 1
+
+    assert first.line_id == "2001:missing-line:0"
+    assert second.line_id == "2001:missing-line:1"
+
+    assert first.line_id != second.line_id
+
+
 def test_many_order_lines_optional_totals_and_empty_lines(order, resolver):
     order["lines"].append(copy.deepcopy(order["lines"][0]))
     order["lines"][1]["id"] = "second"

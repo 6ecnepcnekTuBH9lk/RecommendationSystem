@@ -9,6 +9,7 @@ import sys
 def main(argv=None):
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
+    from Application.loading_errors import emit_error
     from Application.files.reference_import import REFERENCE_TYPES, import_reference
 
     parser = argparse.ArgumentParser()
@@ -20,8 +21,10 @@ def main(argv=None):
         result = import_reference(args.file, args.kind, output_dir=args.output_dir)
         print("Reference: " + json.dumps(result, ensure_ascii=True), flush=True)
         return 0
+    except (KeyboardInterrupt, InterruptedError):
+        return 130
     except Exception as exc:
-        print(f"Ошибка импорта справочника ({type(exc).__name__}): проверьте CSV, колонки и диапазоны координат.")
+        emit_error(exc, source="reference_csv")
         return 1
 
 

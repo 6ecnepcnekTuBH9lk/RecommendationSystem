@@ -41,7 +41,9 @@ def main(argv=None):
             and "canonical" in Path(arguments[arguments.index("--state") + 1]).parts)):
         from scripts.mindbox_canonical import main as canonical_main
         return canonical_main(arguments)
-    from Application.mindbox import MindboxConfig, MindboxClient, MindboxError
+    from Application.loading_errors import emit_error
+    from Application.mindbox.exceptions import MindboxExportTimeoutError
+    from Application.mindbox import MindboxConfig, MindboxClient
     from Application.mindbox.daily_training_batch import (
         ChunkedBatchError, create_chunked_training_batch, resume_chunked_training_batch,
         load_chunked_training_batch, prepare_training_data_from_chunked_batch,
@@ -50,10 +52,7 @@ def main(argv=None):
     from Application.mindbox.selection import MindboxSelectionConfig, SELECTION_OPTIONS
     from Application.mindbox.training_batch import TrainingBatchWindow
     from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT, RawExportError
-    from Application.mindbox.adapters import AdapterError
-    from Application.mindbox.identity import CustomerIdentityError
-    from Application.interactions import InteractionBuildError
-    from Application.product_resolution import DEFAULT_CATALOG_PATH, CatalogError, ProductResolutionError
+    from Application.product_resolution import DEFAULT_CATALOG_PATH
 
     parser = argparse.ArgumentParser(description="Daily resumable local training batches; no training")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -81,6 +80,7 @@ def main(argv=None):
     prepare.add_argument("--diagnose", action="store_true")
     args = parser.parse_args(argv)
     state = getattr(args, "state", None)
+    config = None
     try:
         if args.command in ("export-daily", "resume", "finalize-prefix"):
             if args.command == "export-daily":
@@ -165,9 +165,14 @@ def main(argv=None):
             for name, count in sorted(issue.breakdown.items()):
                 print(f"  {name}: {count}")
         return 0 if quality.training_allowed else 1
-    except (MindboxError, RawExportError, AdapterError, CustomerIdentityError, InteractionBuildError,
-            CatalogError, ProductResolutionError, ValueError, OSError, KeyError) as exc:
-        print(f"Daily batch failed: {type(exc).__name__}", file=sys.stderr)
+    except (KeyboardInterrupt, InterruptedError):
+        return 130
+    except Exception as exc:
+        cause = (exc.__cause__ or exc.__context__ or exc) if isinstance(exc, ChunkedBatchError) else exc
+        if isinstance(cause, (KeyboardInterrupt, InterruptedError)):
+            return 130
+        category = "timeout" if isinstance(cause, (TimeoutError, MindboxExportTimeoutError)) else "failed"
+        emit_error(cause, category=category, source="actions/orders", secrets=(getattr(config, "secret_key", ""),))
         if isinstance(exc, ChunkedBatchError):
             state = exc.state_path
         if state is not None:
@@ -177,8 +182,6 @@ def main(argv=None):
             except (ValueError, OSError, RawExportError):
                 print("State unavailable or invalid; last completed component unknown.")
         return 1
-    except KeyboardInterrupt:
-        return 130
 
 
 if __name__ == "__main__":

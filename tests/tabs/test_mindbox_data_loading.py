@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 import os
+import json
 import socket
 import sys
 import time
@@ -23,6 +24,129 @@ from Application.settings.set_status import set_ready_status
 
 
 REAL_PROCESS = QProcess
+
+
+@pytest.mark.parametrize("stage,source,context", [
+    ("manual_customers", "customers", "Ошибка импорта клиентов"),
+    ("manual_interactions", "actions/orders", "Ошибка импорта действий и заказов"),
+    ("customers", "customers", "Ошибка выгрузки клиентов за 09.2026"),
+    ("training", "actions", "Ошибка выгрузки действий за 01.09.2026"),
+    ("training", "orders", "Ошибка выгрузки заказов за 01.09.2026"),
+    ("reference_csv", "reference_csv", "Ошибка импорта справочника"),
+])
+def test_structured_error_context_and_reason(window, stage, source, context):
+    controller = window.mb_controller
+    controller._begin()
+    controller._launch(stage, [])
+    window.mb_process.feed("Error: " + json.dumps({"category": "failed", "source": source,
+        "since": "2026-09-01", "error_type": "ValueError", "message": "Не найдена обязательная колонка"}) + "\n")
+    window.mb_process.finish(1)
+    text = window.mb_log.toPlainText()
+    assert context + ": ValueError: Не найдена обязательная колонка" in text
+    assert "без дополнительного описания" not in text
+    assert "Error: {" not in text and "Подробности —" not in text
+
+
+@pytest.mark.parametrize("stage", ["manual_customers", "manual_interactions", "training", "customers", "reference_csv"])
+@pytest.mark.parametrize("code", [0, 2])
+def test_missing_protocol_result_has_specific_reason(window, stage, code):
+    controller = window.mb_controller
+    controller._begin()
+    controller.reference_result = None
+    controller._launch(stage, [])
+    window.mb_process.finish(code)
+    text = window.mb_log.toPlainText()
+    assert ("кодом 2" if code else "процесс не передал") in text
+    assert controller.error_reported
+    assert controller.state == ui.LoadingState.FAILED
+
+
+@pytest.mark.parametrize("kind", ["manual_preflight", "manual_result", "training_manifest", "snapshot", "persisted"])
+def test_metadata_errors_keep_reason(window, kind):
+    controller = window.mb_controller
+    if kind != "persisted":
+        controller._begin()
+        controller.stage = "manual_interactions" if kind == "manual_preflight" else "training_validation"
+    def fail():
+        raise ValueError("Недостаточно сохранённой истории объединений")
+    controller._read_metadata(kind, fail)
+    wait_until(lambda: not controller.tasks)
+    assert "Недостаточно сохранённой истории объединений" in window.mb_log.toPlainText()
+
+
+@pytest.mark.parametrize("stage", ["training", "customers", "manual_customers", "manual_interactions"])
+def test_successful_subprocess_with_failed_validation_reports_reason(window, tmp_path, monkeypatch, stage):
+    def fail(*args):
+        raise ValueError("Не совпадает число сохранённых частей")
+    monkeypatch.setattr(ui, "_load_training_summary", fail)
+    monkeypatch.setattr(ui, "_validate_manual_result", fail)
+    controller = window.mb_controller
+    controller._begin()
+    controller._launch(stage, [])
+    window.mb_process.feed(f"Manifest: {tmp_path / 'synthetic.json'}\n")
+    window.mb_process.finish(0)
+    wait_until(lambda: not controller.tasks)
+    assert controller.state == ui.LoadingState.FAILED
+    assert "Ошибка проверки сохранённого результата: ValueError: Не совпадает число сохранённых частей" in window.mb_log.toPlainText()
+
+
+def test_polling_error_is_silent_and_next_poll_succeeds(window):
+    controller = window.mb_controller
+    controller.start()
+    before = window.mb_log.toPlainText()
+    def fail():
+        raise OSError("Temporary state replacement")
+    controller._read_metadata("state", fail)
+    wait_until(lambda: not controller.tasks)
+    assert window.mb_log.toPlainText() == before
+    controller._read_metadata("state", lambda: {"sources": {"actions": {"ready": 3}}, "days_total": 7})
+    wait_until(lambda: not controller.tasks)
+    assert "3 из 7" in window.mb_actions_status_label.text()
+
+
+def test_apply_reference_failure_reports_reason(window, monkeypatch):
+    from Application.tabs import data_processing_tab as csv_ui
+    def fail(*args):
+        raise ValueError("Отсутствует список категорий")
+    monkeypatch.setattr(csv_ui, "apply_reference_result", fail)
+    controller = window.mb_controller
+    controller._begin()
+    controller._launch("reference_csv", [])
+    window.mb_process.feed('Reference: {}\n')
+    window.mb_process.finish()
+    assert "Ошибка применения справочника: ValueError: Отсутствует список категорий" in window.mb_log.toPlainText()
+
+
+def test_failed_start_cancel_and_error_flag_reset(window):
+    controller = window.mb_controller
+    controller.start()
+    window.mb_process.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
+    assert "Проверьте доступность интерпретатора" in window.mb_log.toPlainText()
+    assert controller.error_reported
+    controller.start()
+    assert not controller.error_reported
+    controller.cancel()
+    window.mb_process.feed('Error: {"message":"Ошибка после отмены"}\n')
+    window.mb_process.finish(1)
+    assert controller.state == ui.LoadingState.CANCELLED
+    assert "Ошибка" not in window.mb_log.toPlainText()
+
+
+@pytest.mark.parametrize("kind,message", [
+    ("AttributeError", "'Foo' object has no attribute 'bar'"),
+    ("KeyError", "'ids'"),
+    ("ValueError", "Missing column 'Город'"),
+    ("ValueError", "Invalid value for field 'email'"),
+])
+def test_structured_errors_preserve_exception_details(window, kind, message):
+    controller = window.mb_controller
+    controller.start_customers()
+    window.mb_process.feed("Error: " + json.dumps({"message": message, "error_type": kind, "source": "customers"}) + "\n")
+    window.mb_process.feed("Traceback PRIVATE\nunknown PRIVATE stdout\nState: C:/PRIVATE/state.json\nBatch: PRIVATE\nManifest: C:/PRIVATE/manifest.json\n")
+    text = window.mb_log.toPlainText()
+    assert kind + ": " + message in text
+    assert "[значение скрыто]" not in text
+    assert "PRIVATE" not in text and "Traceback" not in text
 
 
 class FakeProcess(QObject):
@@ -236,7 +360,7 @@ def test_journal_excludes_technical_output_and_formats_timeout(window):
     window.mb_process.feed('State: C:/private/state.json\nBatch: secret-id\nTraceback secret\nhttps://signed.invalid/?token=secret\n')
     window.mb_process.feed('Error: {"category":"timeout","source":"customers","since":"2026-03-01"}\n')
     text = window.mb_log.toPlainText()
-    assert "Превышено время ожидания выгрузки клиентов за 03.2026" in text
+    assert "Превышено время ожидания выгрузки клиентов за 03.2026: Неизвестная ошибка." in text
     assert not any(value in text for value in ("C:/", "secret", "Traceback", "https://"))
 
 
@@ -569,7 +693,7 @@ def test_resume_only_for_interrupted_transport(window, tmp_path, validation, can
         controller.resume()
         assert len(FakeProcess.instances) == count
         if not cancelled:
-            assert "Ошибка получения данных" in window.status_label.text()
+            assert "Операция завершилась с ошибкой" in window.status_label.text()
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new_export", "resume"])
@@ -609,7 +733,7 @@ def test_global_status_lifecycle_and_scheduled_reset(window, tmp_path, monkeypat
             controller.cancel()
         window.mb_process.finish(1)
         status_function = "set_status_ok" if outcome == "cancel" else "set_status_error"
-        message = "Получение данных отменено" if outcome == "cancel" else "Ошибка получения данных. Подробности — в журнале операции."
+        message = "Получение данных отменено" if outcome == "cancel" else "Операция завершилась с ошибкой."
     spies[status_function].assert_called_once_with(window, message)
     assert window.status_label.text() == message
     spies["schedule_status_reset"].assert_called_once_with(window, 5)

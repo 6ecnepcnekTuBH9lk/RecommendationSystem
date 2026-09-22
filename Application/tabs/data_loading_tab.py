@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (QDateEdit, QFileDialog, QFrame, QGridLayout, QHBoxL
                              QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSizePolicy)
 
 from Application.tabs.data_processing_tab import create_csv_loading_section
+from Application.loading_errors import error_record, format_error, safe_message
 from Application.mindbox.selection import DEFAULT_SELECTION, MindboxSelectionConfig, SELECTION_OPTIONS
 
 from Application.settings.set_status import (set_status_error, set_status_ok,
@@ -187,7 +188,7 @@ class _MetadataTask(QRunnable):
             result, error = self.function(*self.args), None
         except Exception as exc:
             # Never leak record contents, credentials or arbitrary exception text.
-            result, error = None, type(exc).__name__
+            result, error = None, error_record(exc)
         self.signals.finished.emit((self.task_id, self.generation, self.kind, result, error))
 
 
@@ -749,6 +750,7 @@ class _LoadingController(QObject):
         super().__init__(aboba)
         self.ui = aboba
         self.state = LoadingState.IDLE
+        self.error_reported = False
         self.resume_path = None
         self.cancel_requested = False
         self.closing = False
@@ -803,11 +805,16 @@ class _LoadingController(QObject):
         self.ui.mb_log.ensureCursorVisible()
 
     def _error(self, message):
+        self._report_error(safe_message(message))
+        set_status_error(self.ui, safe_message(message))
+
+    def _report_error(self, message):
+        self.error_reported = True
         self._log(message)
-        set_status_error(self.ui, message)
 
     def _begin(self):
         self.generation += 1
+        self.error_reported = False
         self.cancel_requested = False
         self.state = LoadingState.RUNNING
         reset_timer = getattr(self.ui, "_status_reset_timer", None)
@@ -971,14 +978,13 @@ class _LoadingController(QObject):
                 pass
             return
         if line.startswith("Error: "):
+            if self.cancel_requested:
+                return
             try:
                 error = json.loads(line[7:])
-                title = {"actions": "действий", "orders": "заказов", "customer_merges": "объединений клиентов", "customers": "клиентов"}.get(error.get("source"), "данных")
-                period = datetime.fromisoformat(error["since"]).strftime("%m.%Y" if error.get("source") == "customers" else "%d.%m.%Y") if error.get("since") else ""
-                text = "Превышено время ожидания выгрузки" if error.get("category") == "timeout" else "Не удалось выполнить выгрузку"
-                self._log(f"{text} {title}" + (f" за {period}." if period else "."))
             except (ValueError, TypeError, KeyError):
-                self._log("Не удалось обновить данные.")
+                error = None
+            self._report_error(format_error(error, self.stage))
             return
         if line.startswith("State: "):
             self.ui.mb_current_state_path = self._output_path(line[7:])
@@ -1000,7 +1006,8 @@ class _LoadingController(QObject):
         if process is not self.ui.mb_process:
             return
         if error == QProcess.ProcessError.FailedToStart:
-            self._log("Не удалось запустить Python-процесс.")
+            if not self.cancel_requested:
+                self._report_error("Не удалось запустить Python-процесс. Проверьте доступность интерпретатора и права запуска.")
             self._process_finished(process, -1, QProcess.ExitStatus.CrashExit)
 
     def _process_finished(self, process, code, status):
@@ -1014,31 +1021,37 @@ class _LoadingController(QObject):
         if self.cancel_requested:
             self._finish(LoadingState.CANCELLED)
         elif code != 0 or status != QProcess.ExitStatus.NormalExit:
-            self._log("Сохранённые данные не повреждены. Ранее обработанные дни и месяцы сохранены.")
+            if not self.error_reported:
+                self._report_error(format_error({"message": f"процесс завершился с кодом {code} без дополнительного описания причины."}, self.stage))
             self._finish(LoadingState.FAILED)
         elif self.stage == "reference_csv":
             if self.reference_result is None:
+                self._report_error("Ошибка импорта справочника: процесс не передал результат импорта.")
                 self._finish(LoadingState.FAILED)
                 return
             from Application.tabs.data_processing_tab import apply_reference_result
             try:
                 apply_reference_result(self.ui, self.reference_result)
-            except Exception:
+            except Exception as exc:
+                self._report_error(format_error(error_record(exc), context="Ошибка применения справочника"))
                 self._finish(LoadingState.FAILED)
                 return
             self._finish(LoadingState.SUCCESS)
         elif self.stage.startswith("manual_"):
             if self.manifest_path is None:
+                self._report_error(format_error({"message": "процесс не передал подтверждение сохранённого результата."}, self.stage))
                 self._finish(LoadingState.FAILED)
             else:
                 self._read_metadata("manual_result", _validate_manual_result, self.manifest_path, self.stage)
         elif self.stage == "training":
             self.stage = "training_validation"
             if self.manifest_path is None:
+                self._report_error("Ошибка выгрузки: процесс не передал подтверждение сохранённого результата.")
                 self._finish(LoadingState.FAILED)
             else:
                 self._read_metadata("training_manifest", _load_training_summary, self.manifest_path, True)
         elif self.snapshot_path is None:
+            self._report_error("Ошибка выгрузки клиентов: процесс не передал подтверждение сохранённого результата.")
             self._finish(LoadingState.FAILED)
         else:
             self.stage = "snapshot_validation"
@@ -1063,7 +1076,10 @@ class _LoadingController(QObject):
             self._log("Операция отменена. Уже сохранённые данные остаются доступны.")
             set_status_ok(self.ui, "Получение данных отменено")
         elif state == LoadingState.FAILED:
-            self._error("Ошибка получения данных. Подробности — в журнале операции.")
+            if not self.error_reported:
+                self._report_error("Ошибка: процесс завершился без дополнительного описания причины.")
+            self._log("Операция завершилась с ошибкой. Ранее сохранённые данные остаются доступны.")
+            set_status_error(self.ui, "Операция завершилась с ошибкой.")
         else:
             self._log("Клиенты успешно обновлены" if self.stage in ("customers", "snapshot_validation", "manual_customers") else "Данные успешно обновлены")
             set_status_ok(self.ui, "Получение данных завершено.")
@@ -1127,6 +1143,7 @@ class _LoadingController(QObject):
                         field = "merges" if name == "customer_merges" else name
                         getattr(self.ui, f"mb_{field}_status_label").setText(_summary_text(value))
                 else:
+                    self._report_error(format_error(error, context="Ошибка чтения сохранённых данных"))
                     for field in ("actions", "orders", "merges", "customers"):
                         getattr(self.ui, f"mb_{field}_status_label").setText("Не удалось прочитать сохранённые данные")
             return
@@ -1138,13 +1155,13 @@ class _LoadingController(QObject):
             return
         if kind == "manual_preflight":
             if error is not None:
-                self._log("Нет подходящей сохранённой истории объединений клиентов. Сначала обновите объединения через API Mindbox.")
+                self._report_error(format_error(error, context="Ошибка проверки условий ручного импорта"))
                 self._finish(LoadingState.FAILED)
             else:
                 self._launch("manual_interactions", self.manual_arguments)
             return
         if error is not None:
-            self._log("Не удалось проверить сохранённый результат.")
+            self._report_error(format_error(error, context="Ошибка проверки сохранённого результата"))
             self._finish(LoadingState.FAILED)
         elif kind in ("manual_result", "training_manifest", "snapshot"):
             self._finish(LoadingState.SUCCESS)
