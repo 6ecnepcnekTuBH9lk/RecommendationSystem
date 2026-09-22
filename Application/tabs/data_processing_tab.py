@@ -1,6 +1,7 @@
 from Application.paths import ICONS_DIR
 import os
 import json
+from pathlib import Path
 import chardet
 import pandas as pd
 from PyQt6.QtCore import Qt, QSize
@@ -53,23 +54,41 @@ def create_csv_loading_section(aboba):
     aboba.heading_load_data.setProperty("class", "sectionHeader")
     left_layout.addWidget(aboba.heading_load_data, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-    # Выпадающий список с типом данных
-    aboba.combo_box_types = QComboBox()
-    aboba.combo_box_types.addItems(list(REFERENCE_TYPES))
-
+    aboba.reference_paths = {kind: None for kind in REFERENCE_TYPES}
+    aboba.reference_fields = {}
+    aboba.reference_buttons = {}
+    aboba.reference_controls = []
+    aboba.reference_status_overrides = {}
     fields = QGridLayout()
     fields.setVerticalSpacing(10)
     fields.setHorizontalSpacing(12)
-    fields.addWidget(aboba.combo_box_types, 0, 0)
-
-    # Кнопка "Загрузить файл"
-    aboba.btn_load = QPushButton(QIcon(str(ICONS_DIR / "load_file.png")), " Загрузить файл")
-    aboba.btn_load.setIconSize(QSize(17, 17))
-    aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
-
-    fields.addWidget(aboba.btn_load, 0, 1)
+    titles = ("Выбрать номенклатуру", "Выбрать категории", "Выбрать координаты")
+    for row, ((kind, (filename, *_)), title) in enumerate(zip(REFERENCE_TYPES.items(), titles)):
+        editor = QLineEdit()
+        editor.setReadOnly(True)
+        editor.setPlaceholderText(filename)
+        button = QPushButton(QIcon(str(ICONS_DIR / "load_file.png")), title)
+        button.setIconSize(QSize(17, 17))
+        def choose(_checked=False, kind=kind):
+            path, _ = QFileDialog.getOpenFileName(aboba, "Выберите CSV справочник", "", "CSV (*.csv)")
+            if path:
+                selected = Path(path).resolve()
+                aboba.reference_paths[kind] = selected
+                aboba.reference_fields[kind].setText(selected.name)
+                aboba.reference_fields[kind].setToolTip(str(selected))
+        button.clicked.connect(choose)
+        aboba.reference_fields[kind] = editor
+        aboba.reference_buttons[kind] = button
+        aboba.reference_controls.extend((editor, button))
+        fields.addWidget(editor, row, 0)
+        fields.addWidget(button, row, 1)
     fields.setColumnStretch(0, 1)
     left_layout.addLayout(fields)
+
+    aboba.btn_load = QPushButton(QIcon(str(ICONS_DIR / "load_file.png")), "Загрузить справочники")
+    aboba.btn_load.setIconSize(QSize(17, 17))
+    aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
+    left_layout.addWidget(aboba.btn_load, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # Статус загрузки файлов
     aboba.status_files_layout = QHBoxLayout()
@@ -507,8 +526,9 @@ def update_file_status(aboba):
 
     items = list(files.items())
 
-    for title, filename in items:
+    for (title, filename), kind in zip(items, REFERENCE_TYPES):
         exists = os.path.exists(os.path.join(input_dir, filename))
+        exists = getattr(aboba, "reference_status_overrides", {}).get(kind, exists)
 
         block = QWidget()
         block_l = QHBoxLayout()
@@ -1898,13 +1918,7 @@ def analyze_favorites_full_dataset(aboba) -> bool:
 
 # ///////////////////////////////////////////ЗАГРУЗКА ФАЙЛОВ////////////////////////////////////////////////////////////
 def load_csv_file(aboba):
-    selected_type = aboba.combo_box_types.currentText()
-    if selected_type not in REFERENCE_TYPES:
-        set_status_error(aboba, "Допустимы только справочники CSV")
-        return
-    file_path, _ = QFileDialog.getOpenFileName(aboba, "Выберите CSV справочник", "", "CSV (*.csv)")
-    if file_path:
-        aboba.mb_controller.start_reference(file_path, selected_type)
+    aboba.mb_controller.start_references()
 
 
 def apply_reference_result(aboba, result):

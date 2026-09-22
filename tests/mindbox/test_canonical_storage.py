@@ -304,6 +304,82 @@ def test_summary_does_not_read_raw(tmp_path, monkeypatch):
     assert customers.customer_summary(tmp_path)["count"] == 1
 
 
+@pytest.mark.parametrize("manual,api_until,expected", [
+    (False, "2026-07-01", ["API"]),
+    (True, "2026-07-01", ["MANUAL"]),  # All persisted daily parts are overridden.
+    (True, "2026-07-04", ["API", "MANUAL"]),
+])
+def test_summary_sources_follow_effective_coverage(tmp_path, manual, api_until, expected):
+    run(tmp_path, "2026-06-28", api_until)
+    if manual:
+        manual_pair(tmp_path)
+    value = store.summary(tmp_path)
+    assert value["actions"]["source_kinds"] == value["orders"]["source_kinds"] == expected
+    assert value["customer_merges"]["source_kind"] == "API"
+    assert store.catalog(tmp_path)["actions"]  # Physical API parts alone do not imply mixed.
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_customer_dataset_provenance_accumulates_and_manual_resets(tmp_path, legacy):
+    run(tmp_path)
+    source = tmp_path / "customers.json"
+    source.write_text(json.dumps({"customers": [customer_record(1)]}), encoding="utf-8")
+    customers.import_full(tmp_path, source)
+    assert customers.customer_summary(tmp_path)["source_kinds"] == ["MANUAL"]
+    if legacy:
+        with customers.connect(customers.database(tmp_path)) as connection, connection:
+            summary = customers.customer_summary(tmp_path)
+            summary.pop("source_kinds")
+            connection.execute("UPDATE metadata SET value=? WHERE key='summary'", (json.dumps(summary),))
+    before = customers.database(tmp_path).read_bytes()
+    assert customers.customer_summary(tmp_path)["source_kinds"] == ["MANUAL"]
+    assert customers.database(tmp_path).read_bytes() == before
+    directory = tmp_path / "api_customers"
+    directory.mkdir()
+    (directory / "customers_part_001.json").write_text(json.dumps({"customers": [customer_record(2)]}))
+    for index in (1, 2):
+        with store.storage_lock(tmp_path):
+            customers.apply_month(tmp_path, directory, utc("2026-01-01"), utc("2026-02-01"), job="test", index=index)
+        assert customers.customer_summary(tmp_path)["source_kinds"] == ["API", "MANUAL"]
+        assert customers.customer_summary(tmp_path)["count"] == 2
+    customers.import_full(tmp_path, source)
+    assert customers.customer_summary(tmp_path)["source_kinds"] == ["MANUAL"]
+    assert customers.customer_summary(tmp_path)["count"] == 1
+
+
+def test_legacy_api_customer_metadata_remains_readable(tmp_path):
+    client = Client()
+    client.records = [customer_record(1)]
+    jobs.create_job(client, raw_root=tmp_path, customers=True, since=utc("2026-01-01"), until=utc("2026-02-01"))
+    assert customers.customer_summary(tmp_path)["source_kinds"] == ["API"]
+    with customers.connect(customers.database(tmp_path)) as connection, connection:
+        summary = customers.customer_summary(tmp_path)
+        summary.pop("source_kinds")
+        connection.execute("UPDATE metadata SET value=? WHERE key='summary'", (json.dumps(summary),))
+    before = customers.database(tmp_path).read_bytes()
+    assert customers.customer_summary(tmp_path)["source_kinds"] == ["API"]
+    assert customers.database(tmp_path).read_bytes() == before
+
+
+def test_failed_api_month_preserves_manual_provenance(tmp_path, monkeypatch):
+    run(tmp_path)
+    path = tmp_path / "customers.json"
+    path.write_text(json.dumps({"customers": [customer_record(1)]}))
+    customers.import_full(tmp_path, path)
+    before = customers.customer_summary(tmp_path)
+    original = customers.iter_export
+    def records(name, **kwargs):
+        if name != "customers":
+            yield from original(name, **kwargs)
+            return
+        yield customer_record(2)
+        raise ValueError("Invalid later customer")
+    monkeypatch.setattr(customers, "iter_export", records)
+    with store.storage_lock(tmp_path), pytest.raises(ValueError):
+        customers.apply_month(tmp_path, tmp_path, utc("2026-01-01"), utc("2026-02-01"), job="test", index=0)
+    assert customers.customer_summary(tmp_path) == before
+
+
 def test_customers_resume_only_uncommitted_months(tmp_path):
     states = []
     with pytest.raises(RuntimeError):
@@ -420,7 +496,8 @@ def test_manual_overlap_extension_summary_and_single_preparation_source(tmp_path
         assert received[f"{name}_export_dirs"] == expected
         assert len(set(received[f"{name}_export_dirs"])) == 4
         assert store.summary(tmp_path)[name] == {"since": utc("2026-01-01").isoformat(),
-            "until": utc("2026-07-04").isoformat(), "updated": data["manual_interactions"]["updated"]}
+            "until": utc("2026-07-04").isoformat(), "updated": data["manual_interactions"]["updated"],
+            "source_kinds": ["API", "MANUAL"]}
     # A later API refresh retains manual priority, raw and global selection policy.
     from dataclasses import replace
     from Application.mindbox.selection import DEFAULT_SELECTION

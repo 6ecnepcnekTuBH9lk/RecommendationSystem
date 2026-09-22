@@ -127,6 +127,12 @@ def _persisted_summary():
     return result
 
 
+def _source_text(value):
+    kinds = frozenset(value.get("source_kinds", [value.get("source_kind")]))
+    return {frozenset({"API"}): "API", frozenset({"MANUAL"}): "Вручную",
+            frozenset({"API", "MANUAL"}): "Ручная + API"}.get(kinds, "")
+
+
 def _summary_text(value):
     if value is None:
         return "Файлов не найдено"
@@ -135,9 +141,11 @@ def _summary_text(value):
     updated = datetime.fromisoformat(value["updated"]).astimezone().strftime("%d.%m.%Y %H:%M")
     intervals = value.get("intervals")
     period = ("; ".join(f"{date(a)} — {date(b)}" for a, b in intervals) if intervals
-              else "полный ручной снимок, период не задан") if intervals is not None else f"{date(value['since'])} — {date(value['until'])}"
+              else "не задан, загружены все клиенты") if intervals is not None else f"{date(value['since'])} — {date(value['until'])}"
     count = f" | Клиентов: {value['count']:,}".replace(",", " ") if "count" in value else ""
-    return f"Обновлено: {updated} | Период: {period}{count}"
+    source = _source_text(value)
+    source = f" | {source}" if source else ""
+    return f"Обновлено: {updated}{source} | Период: {period}{count}"
 
 
 def _load_training_summary(path, complete=False):
@@ -615,7 +623,7 @@ def create_data_loading_widgets_tab(aboba):
     manual_period.setContentsMargins(0, 0, 0, 0)
     manual_period.setSpacing(8)
 
-    manual_period_label = QLabel("Период выгрузки Действия + Заказы:")
+    manual_period_label = QLabel("Период выгрузки действий и заказов:")
     manual_period_label.setSizePolicy(
         QSizePolicy.Policy.Maximum,
         QSizePolicy.Policy.Preferred,
@@ -646,8 +654,9 @@ def create_data_loading_widgets_tab(aboba):
     right.addLayout(manual_period)
 
     manual_hint = QLabel(
-        "Укажите тот же период, что при выгрузке Actions и Orders в Mindbox. "
-        "Верхняя граница не включается (UTC)."
+        "Укажите тот же период, что при выгрузке Действий и Заказов в Mindbox. "
+        "Верхняя граница не включается (UTC). Период не должен выходить за пределы выгрузки объединений клиентов. "
+        "Клиенты загружаются без периода."
     )
     manual_hint.setProperty("class", "infoLabel")
     manual_hint.setWordWrap(True)
@@ -659,10 +668,35 @@ def create_data_loading_widgets_tab(aboba):
     manual_buttons = QHBoxLayout()
 
     aboba.mb_manual_interactions_button = QPushButton(
-        "Импорт Actions + Orders"
+        " Импорт действий и заказов"
     )
+
+    aboba.mb_manual_interactions_button.setIcon(
+        QIcon(
+            str(
+                ICONS_DIR
+                / "Plus.png"
+            )
+        )
+    )
+    aboba.mb_manual_interactions_button.setIconSize(
+        QSize(17, 17)
+    )
+
     aboba.mb_manual_customers_button = QPushButton(
-        "Импорт Customers"
+        " Импорт клиентов"
+    )
+
+    aboba.mb_manual_customers_button.setIcon(
+        QIcon(
+            str(
+                ICONS_DIR
+                / "customers2.png"
+            )
+        )
+    )
+    aboba.mb_manual_customers_button.setIconSize(
+        QSize(17, 17)
     )
 
     for button in (
@@ -770,6 +804,9 @@ class _LoadingController(QObject):
         self.manifest_path = None
         self.snapshot_path = None
         self.resume_stage = "training"
+        self.reference_queue = []
+        self.reference_failures = []
+        self.reference_kind = None
         self.tasks = {}
         self._task_number = 0
         aboba.mb_process = None
@@ -795,7 +832,7 @@ class _LoadingController(QObject):
         a = self.ui
         running = self.state == LoadingState.RUNNING
         for widget in (a.mb_interaction_since, a.mb_interaction_until, a.mb_merge_since,
-                       *a.mb_selection_fields.values(), *a.mb_manual_controls, a.btn_load, a.combo_box_types):
+                       *a.mb_selection_fields.values(), *a.mb_manual_controls, *a.reference_controls, a.btn_load):
             widget.setEnabled(not running)
         a.mb_start_button.setEnabled(not running)
         a.mb_cancel_button.setEnabled(running and not self.cancel_requested)
@@ -820,6 +857,8 @@ class _LoadingController(QObject):
         set_status_error(self.ui, safe_message(message))
 
     def _report_error(self, message):
+        if self.state == LoadingState.RUNNING and self.stage == "reference_csv" and self.reference_kind:
+            message = f"{self.reference_kind}: {message}"
         self.error_reported = True
         self._log(message)
 
@@ -883,15 +922,69 @@ class _LoadingController(QObject):
     def refresh_persisted(self):
         self._read_metadata("persisted", _persisted_summary)
 
+    def start_references(self):
+        from Application.files.reference_import import REFERENCE_TYPES
+        selected = [(kind, self.ui.reference_paths[kind]) for kind in REFERENCE_TYPES
+                    if self.ui.reference_paths[kind] is not None]
+        self._start_reference_queue(selected)
+
     def start_reference(self, path, kind):
+        self._start_reference_queue([(kind, Path(path))])
+
+    def _start_reference_queue(self, selected):
+        from Application.files.reference_import import REFERENCE_TYPES
         if self.state == LoadingState.RUNNING:
             return
-        self.reference_result = None
+        if not selected:
+            self._error("Выберите хотя бы один файл справочника.")
+            return
+        if any(kind not in REFERENCE_TYPES for kind, _ in selected):
+            self._error("Допустимы только справочники CSV")
+            return
+        self.reference_queue = list(selected)
+        self.reference_failures = []
         self.previous_resume_path = self.resume_path
         self._begin()
         self.ui.mb_progress.setRange(0, 0)
+        self._next_reference()
+
+    def _next_reference(self):
+        kind, path = self.reference_queue.pop(0)
+        self.reference_kind = kind
+        self.reference_result = None
+        self.error_reported = False
+        self._log(f"Загрузка справочника: {kind}")
         self._launch("reference_csv", ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/import_reference_csv.py"),
                                        "--file", str(path), "--kind", kind])
+
+    def _reference_finished(self, code, status):
+        from Application.tabs.data_processing_tab import apply_reference_result, update_file_status
+        kind = self.reference_kind or "Справочник"
+        failed = code != 0 or status != QProcess.ExitStatus.NormalExit or self.error_reported
+        if failed:
+            if not self.error_reported:
+                self._report_error(f"Ошибка импорта справочника: процесс завершился с кодом {code}.")
+        elif self.reference_result is None:
+            self._report_error("Ошибка импорта справочника: процесс не передал результат импорта.")
+            failed = True
+        else:
+            try:
+                apply_reference_result(self.ui, self.reference_result)
+                self._log(f"Справочник загружен: {kind}")
+            except Exception as exc:
+                self._report_error(format_error(error_record(exc), context="Ошибка применения справочника"))
+                failed = True
+        self.ui.reference_status_overrides[kind] = not failed
+        update_file_status(self.ui)
+        if failed:
+            self.reference_failures.append(kind)
+        if self.reference_queue:
+            self._next_reference()
+        else:
+            if self.reference_failures:
+                self.error_reported = True
+                self._log("Не загружены справочники: " + ", ".join(self.reference_failures))
+            self._finish(LoadingState.FAILED if self.reference_failures else LoadingState.SUCCESS)
 
     def start_manual(self, kind):
         if self.state == LoadingState.RUNNING:
@@ -1044,23 +1137,12 @@ class _LoadingController(QObject):
         process.deleteLater()
         if self.cancel_requested:
             self._finish(LoadingState.CANCELLED)
+        elif self.stage == "reference_csv":
+            self._reference_finished(code, status)
         elif code != 0 or status != QProcess.ExitStatus.NormalExit:
             if not self.error_reported:
                 self._report_error(format_error({"message": f"процесс завершился с кодом {code} без дополнительного описания причины."}, self.stage))
             self._finish(LoadingState.FAILED)
-        elif self.stage == "reference_csv":
-            if self.reference_result is None:
-                self._report_error("Ошибка импорта справочника: процесс не передал результат импорта.")
-                self._finish(LoadingState.FAILED)
-                return
-            from Application.tabs.data_processing_tab import apply_reference_result
-            try:
-                apply_reference_result(self.ui, self.reference_result)
-            except Exception as exc:
-                self._report_error(format_error(error_record(exc), context="Ошибка применения справочника"))
-                self._finish(LoadingState.FAILED)
-                return
-            self._finish(LoadingState.SUCCESS)
         elif self.stage.startswith("manual_"):
             if self.manifest_path is None:
                 self._report_error(format_error({"message": "процесс не передал подтверждение сохранённого результата."}, self.stage))
@@ -1083,6 +1165,8 @@ class _LoadingController(QObject):
 
     def _finish(self, state):
         self.state = state
+        if self.stage == "reference_csv":
+            self.reference_queue.clear()
         self.ui.mb_state_timer.stop()
         self.resume_path = getattr(self, "previous_resume_path", None) if self.stage.startswith("manual_") or self.stage == "reference_csv" else None
         if self.stage == "snapshot_validation" and state == LoadingState.SUCCESS:

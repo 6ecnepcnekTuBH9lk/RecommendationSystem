@@ -17,7 +17,12 @@ def test_ascii_runtime_paths_and_icons(monkeypatch, tmp_path):
         "favs": tmp_path / "input_data/favorites.csv",
     }
     icons = list(ICONS_DIR.glob("*.png"))
-    assert len(icons) == 28
+    required = {name + ".png" for name in (
+        "actions analyze app_icon cart clock continue customers default_settings down excel failure favorites "
+        "filter get_data load_file moon order orders refresh save search start_training success sun "
+        "triangle_down triangle_up views warning"
+    ).split()}
+    assert required <= {path.name for path in icons}
     assert all(path.name.isascii() for path in icons)
     assert (ICONS_DIR / "app_icon.png").is_file()
 

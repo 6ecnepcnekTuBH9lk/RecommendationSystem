@@ -296,6 +296,200 @@ def test_initial_widgets_offer_only_full_download(window):
     assert window.mb_interaction_since.displayFormat() == "dd.MM.yyyy"
 
 
+@pytest.mark.parametrize("kinds,label", [(["API"], "API"), (["MANUAL"], "Вручную"),
+                                         (["MANUAL", "API"], "Ручная + API")])
+@pytest.mark.parametrize("customers", [False, True])
+def test_persisted_source_summary_format(kinds, label, customers):
+    value = {"updated": "2026-09-22T09:14:00+00:00", "source_kinds": kinds}
+    if customers:
+        value.update(intervals=[], count=829500)
+    else:
+        value.update(since="2026-09-01", until="2026-09-04")
+    text = ui._summary_text(value)
+    assert f" | {label} | Период: " in text
+    assert text.endswith("не задан, загружены все клиенты | Клиентов: 829 500" if customers
+                         else "01.09.2026 — 04.09.2026")
+
+
+@pytest.mark.parametrize("kind,label", [("API", "API"), ("MANUAL", "Вручную")])
+def test_source_summary_accepts_legacy_single_kind(kind, label):
+    assert ui._source_text({"source_kind": kind}) == label
+
+
+def test_reference_selectors_replace_only_their_path(window, tmp_path, monkeypatch):
+    from Application.tabs import data_processing_tab as csv_ui
+    assert not hasattr(window, "combo_box_types")
+    assert len(window.reference_fields) == len(window.reference_buttons) == 3
+    first, second = tmp_path / "first.csv", tmp_path / "second.csv"
+    first.write_text("synthetic")
+    second.write_text("synthetic")
+    kinds = list(csv_ui.REFERENCE_TYPES)
+    for kind, button in window.reference_buttons.items():
+        assert window.reference_fields[kind].isReadOnly()
+        assert window.reference_fields[kind].placeholderText() == csv_ui.REFERENCE_TYPES[kind][0]
+        monkeypatch.setattr(csv_ui.QFileDialog, "getOpenFileName", lambda *a: (str(first), ""))
+        button.click()
+        assert window.reference_paths[kind] == first
+    monkeypatch.setattr(csv_ui.QFileDialog, "getOpenFileName", lambda *a: (str(second), ""))
+    window.reference_buttons[kinds[1]].click()
+    assert list(window.reference_paths.values()) == [first, second, first]
+    assert window.reference_fields[kinds[1]].text() == second.name
+    assert window.reference_fields[kinds[1]].toolTip() == str(second)
+    assert not FakeProcess.instances
+    layout = window.btn_load.parentWidget().layout()
+    grid = layout.itemAt(1).layout()
+    for row, kind in enumerate(kinds):
+        assert grid.itemAtPosition(row, 0).widget() is window.reference_fields[kind]
+        assert grid.itemAtPosition(row, 1).widget() is window.reference_buttons[kind]
+    assert layout.itemAt(2).widget() is window.btn_load
+    assert layout.itemAt(3).widget() is window.status_files_container
+
+
+def select_references(window, root, indexes):
+    from Application.files.reference_import import REFERENCE_TYPES
+    kinds = list(REFERENCE_TYPES)
+    for index in reversed(indexes):  # Selection order must not control processing order.
+        path = root / f"source{index}.csv"
+        path.write_text("synthetic")
+        window.reference_paths[kinds[index]] = path
+    return [kinds[index] for index in indexes]
+
+
+@pytest.mark.parametrize("indexes", [(0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2)])
+def test_reference_queue_runs_selected_files_sequentially(window, tmp_path, monkeypatch, indexes):
+    from Application.tabs import data_processing_tab as csv_ui
+    kinds = select_references(window, tmp_path, indexes)
+    applied = Mock()
+    monkeypatch.setattr(csv_ui, "apply_reference_result", applied)
+    window.btn_load.click()
+    for index, kind in enumerate(kinds):
+        assert len(FakeProcess.instances) == index + 1
+        assert sum(process.running for process in FakeProcess.instances) == 1
+        assert all(not widget.isEnabled() for widget in window.reference_controls)
+        process = window.mb_process
+        assert process.arguments[process.arguments.index("--kind") + 1] == kind
+        assert process.arguments[process.arguments.index("--file") + 1] == str(window.reference_paths[kind])
+        process.feed("Reference: " + json.dumps({"kind": kind}) + "\n")
+        process.finish()
+    assert window.mb_controller.state == ui.LoadingState.SUCCESS
+    assert [call.args[1]["kind"] for call in applied.call_args_list] == kinds
+    assert all(window.reference_status_overrides[kind] for kind in kinds)
+    assert all(widget.isEnabled() for widget in window.reference_controls)
+    assert window.btn_load.isEnabled()
+
+
+def test_reference_empty_selection_does_not_start(window):
+    window.btn_load.click()
+    assert not FakeProcess.instances
+    assert "Выберите хотя бы один файл справочника" in window.mb_log.toPlainText()
+
+
+def test_finished_reference_does_not_prefix_next_validation_error(window, tmp_path):
+    kind = next(iter(window.reference_paths))
+    window.mb_controller.start_reference(tmp_path / "source.csv", kind)
+    window.mb_process.finish(1)
+    window.mb_log.clear()
+    window.mb_controller.start_manual("interactions")
+    assert "Выберите необходимые JSON-файлы" in window.mb_log.toPlainText()
+    assert kind not in window.mb_log.toPlainText()
+
+
+@pytest.mark.parametrize("failure", ["exit", "missing_result", "apply", "failed_to_start"])
+def test_reference_failure_does_not_stop_remaining_queue(window, tmp_path, monkeypatch, failure):
+    from Application.tabs import data_processing_tab as csv_ui
+    kinds = select_references(window, tmp_path, (0, 1, 2))
+    applied = []
+    def apply(widget, result):
+        if failure == "apply" and result["kind"] == kinds[1]:
+            raise ValueError("synthetic apply failure")
+        applied.append(result["kind"])
+    monkeypatch.setattr(csv_ui, "apply_reference_result", apply)
+    window.btn_load.click()
+    for index, kind in enumerate(kinds):
+        process = window.mb_process
+        if index != 1 or failure == "apply":
+            process.feed("Reference: " + json.dumps({"kind": kind}) + "\n")
+        if index == 1 and failure == "failed_to_start":
+            process.running = False
+            process.errorOccurred.emit(REAL_PROCESS.ProcessError.FailedToStart)
+            process.finish(1)  # Late signal from the old process cannot finish its successor.
+        else:
+            process.finish(1 if index == 1 and failure == "exit" else 0)
+    assert applied == [kinds[0], kinds[2]]
+    assert window.mb_controller.state == ui.LoadingState.FAILED
+    assert window.reference_status_overrides == {kinds[0]: True, kinds[1]: False, kinds[2]: True}
+    assert kinds[1] in window.mb_log.toPlainText()
+    assert "Не загружены справочники:" in window.mb_log.toPlainText()
+
+
+def test_reference_cancel_stops_queue_and_retains_success(window, tmp_path, monkeypatch):
+    from Application.tabs import data_processing_tab as csv_ui
+    kinds = select_references(window, tmp_path, (0, 1, 2))
+    applied = Mock()
+    monkeypatch.setattr(csv_ui, "apply_reference_result", applied)
+    previous = tmp_path / "state.json"
+    window.mb_controller.resume_path = previous
+    window.btn_load.click()
+    window.mb_process.feed("Reference: " + json.dumps({"kind": kinds[0]}) + "\n")
+    window.mb_process.finish()
+    window.mb_controller.cancel()
+    window.mb_process.finish(1)
+    assert len(FakeProcess.instances) == 2
+    assert window.mb_controller.state == ui.LoadingState.CANCELLED
+    assert window.reference_status_overrides[kinds[0]] is True
+    assert window.mb_controller.reference_queue == []
+    assert window.mb_controller.resume_path == previous
+
+
+@pytest.mark.parametrize("kind", ["Заказы клиентов из Mindbox", "Просмотры товаров и категорий из Mindbox",
+                                   "Добавление товаров в избранное из Mindbox"])
+def test_reference_legacy_interaction_routes_rejected(window, tmp_path, kind):
+    window.mb_controller.start_reference(tmp_path / "source.csv", kind)
+    assert not FakeProcess.instances
+    assert "Допустимы только справочники CSV" in window.mb_log.toPlainText()
+
+
+def test_reference_partial_failure_keeps_real_snapshots_and_refreshes_ui(window, tmp_path, monkeypatch):
+    import pandas as pd
+    from Application.files.reference_import import REFERENCE_TYPES, import_reference
+    monkeypatch.chdir(tmp_path)
+    kinds = select_references(window, tmp_path, (0, 1, 2))
+    columns = ["КодНоменклатуры", "Номенклатура", "НазваниеНаСайте", "ВидНоменклатуры",
+               "ВидАссортимента", "Марка", "Коллекция", "СезонНоски", "ПолНоменклатуры",
+               "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа", "ТитульнаяФотография", "Остаток"]
+    pd.DataFrame([{**dict.fromkeys(columns, "Synthetic"), "КодНоменклатуры": "123456", "Остаток": 5}]).to_csv(
+        window.reference_paths[kinds[0]], sep="|", index=False, encoding="utf-8-sig")
+    window.reference_paths[kinds[1]].write_text("broken\nvalue\n")
+    window.reference_paths[kinds[2]].write_text("Город,Широта,Долгота\nSynthetic,55,37\n", encoding="utf-8-sig")
+    output = tmp_path / "input_data"
+    output.mkdir()
+    old_categories = output / REFERENCE_TYPES[kinds[1]][0]
+    old_categories.write_bytes(b"previous categories snapshot")
+    window._name_by_code = {"old": "cached"}
+    window.btn_load.click()
+    saved = None
+    for index, kind in enumerate(kinds):
+        process = window.mb_process
+        try:
+            result = import_reference(window.reference_paths[kind], kind, output_dir=output)
+        except Exception:
+            assert index == 1
+            process.feed('Error: {"error_type": "ValueError", "message": "Некорректный справочник"}\n')
+            process.finish(1)
+        else:
+            process.feed("Reference: " + json.dumps(result) + "\n")
+            process.finish()
+        if index == 0:
+            saved = (output / "nomenclature.csv").read_bytes()
+    assert window.mb_controller.state == ui.LoadingState.FAILED
+    assert (output / "nomenclature.csv").read_bytes() == saved
+    assert old_categories.read_bytes() == b"previous categories snapshot"
+    assert (output / "city_coordinates.csv").is_file()
+    assert window._name_by_code is None
+    assert window._cities == ["Synthetic"]
+    assert window.reference_status_overrides == {kinds[0]: True, kinds[1]: False, kinds[2]: True}
+
+
 @pytest.mark.parametrize("job", ["training", "customers"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
 def test_persisted_summary_restored_after_each_outcome(window, tmp_path, monkeypatch, job, outcome):
@@ -941,7 +1135,7 @@ def test_manual_preflight_cancel_does_not_launch_late_process(window, tmp_path, 
 
 def test_reference_options_and_background_process(window, monkeypatch, tmp_path):
     from Application.tabs import data_processing_tab as csv_ui
-    assert [window.combo_box_types.itemText(i) for i in range(window.combo_box_types.count())] == [
+    assert list(window.reference_fields) == [
         "Номенклатура из 1С", "Категории сайта из 1С", "Координаты городов и погода"]
     assert getattr(window, "combo_box_add_or_not", None) is None
     applied = Mock()

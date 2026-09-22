@@ -268,7 +268,8 @@ def summary(root):
     for name in ("actions", "orders"):
         if pairs:
             result[name] = {"since": pairs[0][name]["since"], "until": pairs[-1][name]["until"],
-                            "updated": max(pair[name]["updated"] for pair in pairs)}
+                            "updated": max(pair[name]["updated"] for pair in pairs),
+                            "source_kinds": sorted({pair[name]["source_kind"] for pair in pairs})}
     if data["customer_merges"]:
-        result["customer_merges"] = {key: data["customer_merges"][key] for key in ("since", "until", "updated")}
+        result["customer_merges"] = {key: data["customer_merges"][key] for key in ("since", "until", "updated", "source_kind")}
     return result

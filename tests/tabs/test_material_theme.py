@@ -64,8 +64,14 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.btn_load.font().weight() >= QFont.Weight.DemiBold
         csv_fields = window.btn_load.parentWidget().layout().itemAt(1).layout()
         assert isinstance(csv_fields, QGridLayout)
-        assert csv_fields.itemAtPosition(0, 0).widget() is window.combo_box_types
-        assert csv_fields.itemAtPosition(0, 1).widget() is window.btn_load
+        assert not hasattr(window, "combo_box_types")
+        for row, kind in enumerate(csv_ui.REFERENCE_TYPES):
+            assert csv_fields.itemAtPosition(row, 0).widget() is window.reference_fields[kind]
+            assert csv_fields.itemAtPosition(row, 1).widget() is window.reference_buttons[kind]
+            assert window.reference_fields[kind].isReadOnly()
+        layout = window.btn_load.parentWidget().layout()
+        assert layout.itemAt(2).widget() is window.btn_load
+        assert layout.itemAt(3).widget() is window.status_files_container
         assert isinstance(window.status_files_layout, QHBoxLayout)
         assert window.status_files_layout.itemAt(0).widget() is window.prefix
         acquisition, processing = window.tabs.widget(0), window.tabs.widget(1)
@@ -73,11 +79,11 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
                     if label.property("class") == "sectionHeader"]
         assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка из Mindbox"}
         assert len(headings) == 3
-        for widget in (window.heading_load_data, window.combo_box_types,
+        for widget in (window.heading_load_data, *window.reference_controls,
                        window.btn_load, window.status_files_container, window.prefix):
             assert acquisition.isAncestorOf(widget)
             assert not processing.isAncestorOf(widget)
-        assert [b for b in window.findChildren(QPushButton) if b.text().strip() == "Загрузить файл"] == [window.btn_load]
+        assert [b for b in window.findChildren(QPushButton) if b.text().strip() == "Загрузить справочники"] == [window.btn_load]
         assert acquisition.isAncestorOf(window.mb_log) and acquisition.isAncestorOf(window.mb_progress)
         assert window.mb_log.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Expanding
         assert window.mb_log.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
@@ -90,7 +96,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         monkeypatch.setattr(csv_ui, "load_csv_file", handler)
         window.btn_load.click()
         handler.assert_called_once_with(window)
-        dialog.assert_called_once()
+        dialog.assert_not_called()
         table = window.recs_table
         table.setRowCount(1)
         table.setItem(0, 1, QTableWidgetItem("synthetic SKU"))

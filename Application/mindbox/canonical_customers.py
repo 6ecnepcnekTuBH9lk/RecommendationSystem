@@ -98,13 +98,22 @@ def _intervals(old, since, until):
     return result
 
 
+def _source_kinds(summary):
+    """Older snapshots contain only source_kind; reads never rewrite their metadata."""
+    return sorted(set(summary.get("source_kinds", [summary["source_kind"]] if summary.get("source_kind") else [])))
+
+
 def customer_summary(root):
     path = database(root)
     if not path.exists():
         return None
     with connect(path) as connection:
         row = connection.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
-        return json.loads(row[0]) if row else None
+        if not row:
+            return None
+        summary = json.loads(row[0])
+        summary["source_kinds"] = _source_kinds(summary)
+        return summary
 
 
 def apply_month(root, directory, since, until, *, job, index):
@@ -129,7 +138,8 @@ def apply_month(root, directory, since, until, *, job, index):
         row = connection.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
         old = json.loads(row[0]) if row else {}
         summary = {"updated": stamp(), "intervals": _intervals(old.get("intervals", []), since, until),
-                   "count": connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], "source_kind": "API"}
+                   "count": connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], "source_kind": "API",
+                   "source_kinds": sorted(set(_source_kinds(old)) | {"API"})}
         connection.execute("INSERT OR REPLACE INTO metadata VALUES ('summary', ?)", (json.dumps(summary),))
         connection.execute("INSERT OR REPLACE INTO receipts VALUES (?, ?)", (job, index))
 
@@ -160,7 +170,8 @@ def import_full(root, source, *, cancelled=None, progress=None):
                         _upsert(connection, raw, resolver)
                 count = connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
                 connection.execute("INSERT INTO metadata VALUES ('summary', ?)", (json.dumps(
-                    {"updated": stamp(), "intervals": [], "count": count, "source_kind": "MANUAL"}),))
+                    {"updated": stamp(), "intervals": [], "count": count, "source_kind": "MANUAL",
+                     "source_kinds": ["MANUAL"]}),))
             check_cancel(cancelled)
             os.replace(temporary, database(root))
             if progress:

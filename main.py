@@ -46,7 +46,6 @@ class MainWindow(QMainWindow):
         # Объявление атрибутов
         self.heading_load_data = None
         self.combo_box_add_or_not = None
-        self.combo_box_types = None
         self.btn_load = None
         self.heading_filters = None
         self.recs_table = None
@@ -222,7 +221,6 @@ class MainWindow(QMainWindow):
     # -------------------------------------------СТАТИЧЕСКИЕ ПРАВКИ РАЗМЕРОВ--------------------------------------------
     def apply_static_widget_styles(self):
 
-        self.combo_box_types.setStyleSheet("""QComboBox { margin: 0px 0px 5px 0px; }""")
         self.btn_apply.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
         self.btn_weather.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
         self.btn_reset.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
