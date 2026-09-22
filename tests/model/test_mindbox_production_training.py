@@ -30,7 +30,7 @@ def forbidden(*args, **kwargs):
 @pytest.fixture(autouse=True)
 def isolate(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(production, "MODEL_ROOT", tmp_path / "Модель")
+    monkeypatch.setattr(production, "MODEL_ROOT", tmp_path / "model")
     monkeypatch.setattr(production, "REPORT_ROOT", tmp_path / "reports")
     monkeypatch.setattr(torch, "set_num_interop_threads", lambda n: None)
     monkeypatch.setattr(socket.socket, "connect", forbidden)
@@ -65,7 +65,7 @@ def source(tmp_path, problem="pass"):
     manifest = raw / "training_batches" / batch.batch_id / "manifest.json"
     manifest.parent.mkdir(parents=True)
     daily._atomic_write(manifest, batch)
-    catalog = tmp_path / "Номенклатура.csv"
+    catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры|Марка\n123456|a\n123457|b\n123458|a\n", encoding="utf-8-sig")
     cfg = core.TrainConfig(data_dir=str(tmp_path), epochs=1, embedding_dim=4, batch_size=2, n_neg=1, topk=2)
     return dict(training_manifest=manifest, raw_root=raw, catalog_path=catalog, cfg=cfg, device=torch.device("cpu"))
@@ -127,7 +127,7 @@ def test_real_train_publish_reload_and_safe_result(tmp_path, problem, allow_warn
     assert "customer_contacts" not in checkpoint
     assert not list(production.MODEL_ROOT.rglob("*.csv"))
     assert not list(production.MODEL_ROOT.rglob("*.xlsx"))
-    assert all(not (tmp_path / name).exists() for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"))
+    assert all(not (tmp_path / name).exists() for name in ("orders.csv", "views.csv", "favorites.csv"))
     output = capsys.readouterr()
     text = Path(result.report_path).read_text(encoding="utf-8") + repr(result) + output.out + output.err
     assert all(value not in text for value in ("SECRET", "123456", "SecretKey", "@", str(tmp_path)))

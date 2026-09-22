@@ -51,14 +51,14 @@ def _catalog_row(code="123456", stock="120"):
 
 
 def _write_reference_files(tmp_path):
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame([_catalog_row()]).to_csv(
-        input_dir / "Номенклатура.csv", sep="|", index=False
+        input_dir / "nomenclature.csv", sep="|", index=False
     )
     pd.DataFrame(
         [{"КодКатегории": "77", "НазваниеКатегории": "Тестовая категория"}]
-    ).to_csv(input_dir / "КатегорииСайта.csv", sep="|", index=False)
+    ).to_csv(input_dir / "site_categories.csv", sep="|", index=False)
 
 
 def _raw_customer_fields(prefix):

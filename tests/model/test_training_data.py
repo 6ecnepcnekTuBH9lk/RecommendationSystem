@@ -76,7 +76,7 @@ def write_csv(tmp_path):
               pd.DataFrame({"MindboxID": ["u0"], "КодНоменклатуры": ["i2"],
                             "ТипТовара": ["Номенклатура"], "Дата": ["2026-01-03"]}),
               pd.DataFrame(columns=["MindboxID", "КодНоменклатуры", "Дата"])]
-    for name, frame in zip(("Заказы", "Просмотры", "Избранное"), frames):
+    for name, frame in zip(("orders", "views", "favorites"), frames):
         frame.to_csv(tmp_path / f"{name}.csv", sep="|", encoding="utf-8-sig", index=False)
     return frames
 
@@ -122,12 +122,12 @@ def test_prepared_core_without_interaction_csv(tmp_path, monkeypatch, prepared, 
                           embedding_dim=4, batch_size=2, n_neg=1, topk=2)
     if features:
         pd.DataFrame({"КодНоменклатуры": ["i0", "i1", "i2"], "Марка": ["a", "b", "a"]}).to_csv(
-            tmp_path / "Номенклатура.csv", sep="|", index=False, encoding="utf-8-sig")
+            tmp_path / "nomenclature.csv", sep="|", index=False, encoding="utf-8-sig")
     reads = []
     original = bpr._read_csv_pipe
 
     def read(path):
-        assert str(path).endswith("Номенклатура.csv")
+        assert str(path).endswith("nomenclature.csv")
         reads.append(path)
         return original(path)
 
@@ -162,7 +162,7 @@ def test_short_training_legacy_wrapper_vs_prepared(tmp_path, monkeypatch):
     assert_splits_equal(old_split, new_split)
     for name, value in old_model.state_dict().items():
         torch.testing.assert_close(value, new_model.state_dict()[name])
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
 
 
 def test_validation_precedes_training_side_effects(prepared, monkeypatch):

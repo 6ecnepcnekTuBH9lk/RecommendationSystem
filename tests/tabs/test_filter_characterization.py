@@ -99,7 +99,7 @@ def test_order_statistics_currently_excludes_rows_with_invalid_dates(
 ):
     """Characterize one side of CORRECTNESS-03 without changing it."""
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
 
     common = {
@@ -122,7 +122,7 @@ def test_order_statistics_currently_excludes_rows_with_invalid_dates(
         {**common, "Дата": "2023-12-31", "Количество": "10"},
         {**common, "Дата": "invalid-date", "Количество": "100"},
     ]
-    pd.DataFrame(rows).to_csv(input_dir / "Заказы.csv", sep="|", index=False)
+    pd.DataFrame(rows).to_csv(input_dir / "orders.csv", sep="|", index=False)
 
     monkeypatch.setattr(data_processing_tab, "QLabel", _Label)
     for name in (
@@ -145,14 +145,14 @@ def test_order_statistics_currently_excludes_rows_with_invalid_dates(
 
 def test_favorites_statistics_handles_missing_date_column(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         [
             _favorites_row("client-1", "item-1"),
             _favorites_row("client-2", "item-2"),
         ]
-    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    ).to_csv(input_dir / "favorites.csv", sep="|", index=False)
     page_messages = _patch_favorites_statistics_ui(monkeypatch)
 
     window = _filter_window(date_from="", date_to="")
@@ -168,7 +168,7 @@ def test_favorites_statistics_handles_missing_date_column(tmp_path, monkeypatch)
 
 def test_favorites_statistics_handles_all_invalid_dates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         [
@@ -177,7 +177,7 @@ def test_favorites_statistics_handles_all_invalid_dates(tmp_path, monkeypatch):
             _favorites_row("client-3", "item-3", "not-a-date"),
             _favorites_row("client-4", "item-4", pd.NA),
         ]
-    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    ).to_csv(input_dir / "favorites.csv", sep="|", index=False)
     page_messages = _patch_favorites_statistics_ui(monkeypatch)
 
     window = _filter_window(date_from="", date_to="")
@@ -193,7 +193,7 @@ def test_favorites_statistics_handles_all_invalid_dates(tmp_path, monkeypatch):
 
 def test_favorites_statistics_uses_only_valid_dates_for_period(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         [
@@ -201,7 +201,7 @@ def test_favorites_statistics_uses_only_valid_dates_for_period(tmp_path, monkeyp
             _favorites_row("client-2", "item-2", "not-a-date"),
             _favorites_row("client-3", "item-3", "2024-02-15"),
         ]
-    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    ).to_csv(input_dir / "favorites.csv", sep="|", index=False)
     page_messages = _patch_favorites_statistics_ui(monkeypatch)
 
     window = _filter_window(date_from="", date_to="")
@@ -216,14 +216,14 @@ def test_favorites_statistics_uses_only_valid_dates_for_period(tmp_path, monkeyp
 
 def test_favorites_period_filter_excludes_all_invalid_dates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         [
             _favorites_row("client-1", "item-1", ""),
             _favorites_row("client-2", "item-2", "not-a-date"),
         ]
-    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    ).to_csv(input_dir / "favorites.csv", sep="|", index=False)
     page_messages = _patch_favorites_statistics_ui(monkeypatch)
 
     result = data_processing_tab.analyze_favorites_full_dataset(_filter_window())
@@ -234,7 +234,7 @@ def test_favorites_period_filter_excludes_all_invalid_dates(tmp_path, monkeypatc
 
 def test_training_date_filter_excludes_rows_with_invalid_dates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
 
     source = pd.DataFrame(
@@ -243,14 +243,14 @@ def test_training_date_filter_excludes_rows_with_invalid_dates(tmp_path, monkeyp
             "MindboxID": ["in-range", "out-of-range", "invalid-date"],
         }
     )
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         source.to_csv(input_dir / name, sep="|", index=False)
 
     window = _filter_window()
     output_dir = train_model_tab._prepare_training_data_dir(window)
 
-    assert output_dir == "ФильтрованныеДанные"
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    assert output_dir == "filtered_data"
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         result = pd.read_csv(tmp_path / output_dir / name, sep="|", dtype=str)
         assert result["MindboxID"].tolist() == ["in-range"]
 
@@ -262,7 +262,7 @@ def test_training_date_filter_excludes_rows_with_empty_dates(
     invalid_date,
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     source = pd.DataFrame(
         {
@@ -270,12 +270,12 @@ def test_training_date_filter_excludes_rows_with_empty_dates(
             "MindboxID": ["undated"],
         }
     )
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         source.to_csv(input_dir / name, sep="|", index=False)
 
     output_dir = train_model_tab._prepare_training_data_dir(_filter_window())
 
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         result = pd.read_csv(tmp_path / output_dir / name, sep="|", dtype=str)
         assert result.empty
 
@@ -285,15 +285,15 @@ def test_training_date_filter_excludes_rows_when_date_column_is_missing(
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     source = pd.DataFrame({"MindboxID": ["undated"]})
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         source.to_csv(input_dir / name, sep="|", index=False)
 
     output_dir = train_model_tab._prepare_training_data_dir(_filter_window())
 
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         result = pd.read_csv(tmp_path / output_dir / name, sep="|", dtype=str)
         assert result.empty
 
@@ -303,31 +303,31 @@ def test_training_without_date_filter_keeps_undated_interactions(
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         {
             "MindboxID": ["missing-column"],
         }
-    ).to_csv(input_dir / "Заказы.csv", sep="|", index=False)
+    ).to_csv(input_dir / "orders.csv", sep="|", index=False)
     pd.DataFrame(
         {
             "MindboxID": ["malformed"],
             "Дата": ["not-a-date"],
         }
-    ).to_csv(input_dir / "Просмотры.csv", sep="|", index=False)
+    ).to_csv(input_dir / "views.csv", sep="|", index=False)
     pd.DataFrame(
         {
             "MindboxID": ["empty"],
             "Дата": [""],
         }
-    ).to_csv(input_dir / "Избранное.csv", sep="|", index=False)
+    ).to_csv(input_dir / "favorites.csv", sep="|", index=False)
 
     output_dir = train_model_tab._prepare_training_data_dir(
         _filter_window(date_from="", date_to="")
     )
 
-    assert output_dir == "ВходныеДанные"
-    for name in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    assert output_dir == "input_data"
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
         result = pd.read_csv(tmp_path / output_dir / name, sep="|", dtype=str)
         assert len(result) == 1

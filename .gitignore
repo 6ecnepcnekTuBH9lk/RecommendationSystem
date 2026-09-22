@@ -31,10 +31,9 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Raw Mindbox exports
-Р’С…РѕРґРЅС‹РµР”Р°РЅРЅС‹Рµ/MindboxRaw/
-
-# Generated Mindbox schema reports
-Р’С…РѕРґРЅС‹РµР”Р°РЅРЅС‹Рµ/MindboxReports/
-
-ВходныеДанные/РучнаяВыгрузкаMindbox/
+# Local user data, exports, reports and settings
+input_data/
+user_settings/
+# Generated training datasets and model exports
+filtered_data/
+model/

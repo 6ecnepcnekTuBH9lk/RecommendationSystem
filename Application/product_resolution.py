@@ -1,5 +1,7 @@
 """Catalog identity boundary: validated legacy prefix-6, without event aggregation."""
 
+from Application.paths import INPUT_DATA_DIR
+
 import csv
 from collections import Counter, defaultdict
 from collections.abc import Mapping
@@ -13,7 +15,7 @@ from Application.mindbox.records import ProductKey
 from Application.mindbox.selection import SUPPORTED_NAMESPACES
 
 
-DEFAULT_CATALOG_PATH = Path(__file__).resolve().parents[1] / "ВходныеДанные" / "Номенклатура.csv"
+DEFAULT_CATALOG_PATH = INPUT_DATA_DIR / "nomenclature.csv"
 
 
 class CatalogError(Exception):

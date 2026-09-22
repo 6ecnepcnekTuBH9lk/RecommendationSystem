@@ -191,7 +191,7 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
     selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
     manifest = manual.import_interactions(actions, orders, raw_root=root, window=source.window, selection=selection)
     loaded = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
-    catalog = root / "Номенклатура.csv"
+    catalog = root / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры\n123456\n654321\n", encoding="utf-8-sig")
     result = daily.prepare_training_data_from_chunked_batch(loaded, raw_root=root, catalog_path=catalog, train_config=TrainConfig())
     assert result.complete
@@ -420,3 +420,141 @@ def test_incomplete_canonical_merges_blocks_manual_publication(tmp_path):
     with pytest.raises(manual.ManualImportError, match="Обновите их через API Mindbox"):
         import_pair(tmp_path, until="2026-08-01")
     assert (tmp_path / "canonical/catalog.json").read_bytes() == before
+
+
+def multipart_sources(root, name, numbers):
+    paths = []
+    for number in numbers:
+        if name == "actions":
+            record = {"actionTemplate": {"ids": {"systemName": "Unmapped"}}, "part": number}
+        else:
+            record = {"ids": {"mindboxId": number}, "customer": {"ids": {"mindboxId": 1}},
+                      "firstAction": {"dateTimeUtc": "2026-01-01T12:00:00Z",
+                                      "channel": {"ids": {"externalId": "test"}, "name": "test"}},
+                      "lines": []}
+        path = root / f"{name}_part{number}.json"
+        path.write_text(json.dumps({EXPORT_ROOTS[name]: [record]}), encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+def test_multipart_unequal_counts_natural_order_and_readers(saved):
+    root, batch, _ = saved
+    paths = {"actions": multipart_sources(root, "actions", [10, 2, 1, 3]),
+             "orders": multipart_sources(root, "orders", [10, 2])}
+    before = {path: path.read_bytes() for sources in paths.values() for path in sources}
+    messages = []
+    manifest = manual.import_interactions(**paths, raw_root=root, window=batch.window, progress=messages.append)
+    pair = store.catalog(root)["manual_interactions"]
+    loaded = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
+    assert [component.export.parts_count for component in loaded.components[1:]] == [4, 2]
+    for name, numbers in (("actions", [1, 2, 3, 10]), ("orders", [2, 10])):
+        assert pair[name]["parts"] == len(numbers)
+        directory = root / pair[name]["directory"]
+        assert sorted(path.name for path in directory.iterdir()) == [
+            f"{name}_part_{number:03d}.json" for number in range(1, len(numbers) + 1)]
+        records = list(iter_export(name, input_dir=directory))
+        assert [raw["part"] if name == "actions" else raw["ids"]["mindboxId"] for raw in records] == numbers
+    assert "Копирование actions: файл 2 из 4" in messages
+    assert "Проверка orders ..." in messages
+    assert all(str(root) not in text for text in messages)
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+@pytest.mark.parametrize("source", ["actions", "orders"])
+@pytest.mark.parametrize("failure", ["invalid", "cancel"])
+def test_multipart_later_failure_preserves_pair_and_cleans_staging(saved, source, failure):
+    root, batch, _ = saved
+    manual.import_interactions(write(root, "actions"), write(root, "orders"), raw_root=root, window=batch.window)
+    before = (root / "canonical/catalog.json").read_bytes()
+    objects = set((root / "canonical/objects").iterdir())
+    paths = {name: multipart_sources(root, name, [1, 2, 3]) for name in ("actions", "orders")}
+    if failure == "invalid":
+        paths[source][1].write_text('{"broken": [', encoding="utf-8")
+    cancelled = False
+    def progress(message):
+        nonlocal cancelled
+        if failure == "cancel" and message == f"Копирование {source}: файл 2 из 3":
+            cancelled = True
+    with pytest.raises(manual.ManualImportError if failure == "invalid" else InterruptedError):
+        manual.import_interactions(**paths, raw_root=root, window=batch.window,
+                                   cancelled=lambda: cancelled, progress=progress)
+    assert (root / "canonical/catalog.json").read_bytes() == before
+    assert set((root / "canonical/objects").iterdir()) == objects
+    assert not list((root / "canonical").glob(".manual-interactions-*"))
+    assert len(store.current_batch(root).components) == 3
+
+
+@pytest.mark.parametrize("invalid", ["empty", "duplicate", "missing", "directory"])
+def test_manual_source_validation(saved, invalid):
+    root, batch, _ = saved
+    actions, orders = write(root, "actions"), write(root, "orders")
+    values = {"empty": [], "duplicate": [actions, str(actions.parent / "." / actions.name)],
+              "missing": [root / "missing.json"], "directory": [root]}
+    with pytest.raises(manual.ManualImportError) as error:
+        manual.import_interactions(values[invalid], orders, raw_root=root, window=batch.window)
+    assert str(root) not in str(error.value)
+    if invalid == "duplicate":
+        assert "несколько раз" in str(error.value)
+    assert store.catalog(root)["manual_interactions"] is None
+
+
+def test_manual_cli_repeated_source_options(saved, capsys):
+    from scripts.mindbox_manual_import import main
+    root, _, _ = saved
+    paths = {"actions": multipart_sources(root, "actions", [10, 2, 1, 3]),
+             "orders": multipart_sources(root, "orders", [2, 1])}
+    args = ["interactions", "--raw-root", str(root), "--since", "2026-08-01", "--until", "2026-08-02"]
+    for name, sources in paths.items():
+        for path in sources:
+            args.extend(["--" + name, str(path)])
+    assert main(args) == 0
+    pair = store.catalog(root)["manual_interactions"]
+    assert pair["actions"]["parts"] == 4 and pair["orders"]["parts"] == 2
+    assert "Копирование actions: файл 4 из 4" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_multipart_bounded_copy_and_cancel_inside_later_part(saved, monkeypatch, cancel):
+    root, batch, _ = saved
+    orders = write(root, "orders")
+    manual.import_interactions(write(root, "actions"), orders, raw_root=root, window=batch.window)
+    before = (root / "canonical/catalog.json").read_bytes()
+    paths = multipart_sources(root, "actions", [1, 2])
+    record = {"actionTemplate": {"ids": {"systemName": "Unmapped"}}, "padding": "x" * (2 * 1024 * 1024)}
+    paths[1].write_text(json.dumps({"customerActions": [record]}), encoding="utf-8")
+    original = Path.open
+    reads = []
+    cancelled = False
+    class BoundedInput:
+        def __enter__(self):
+            self.stream = original(paths[1], "rb")
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def read(self, size):
+            nonlocal cancelled
+            assert 0 < size <= 1024 * 1024
+            chunk = self.stream.read(size)
+            reads.append(len(chunk))
+            cancelled = cancel
+            return chunk
+
+    def open_file(path, *args, **kwargs):
+        if path == paths[1] and args == ("rb",):
+            return BoundedInput()
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_file)
+    def run_import():
+        manual.import_interactions(paths, orders, raw_root=root, window=batch.window, cancelled=lambda: cancelled)
+    if cancel:
+        with pytest.raises(InterruptedError):
+            run_import()
+        assert (root / "canonical/catalog.json").read_bytes() == before
+        assert reads == [1024 * 1024]
+    else:
+        run_import()
+        assert len(reads) == 4 and reads[-1] == 0
+    assert not list((root / "canonical").glob(".manual-interactions-*"))

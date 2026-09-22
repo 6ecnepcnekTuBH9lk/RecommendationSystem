@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR
 import os
 import pandas as pd
 import re
@@ -59,11 +60,11 @@ def create_result_widgets_tab(aboba):
     aboba.recs_topk.setCurrentText("Топ-10")
 
     # ---- кнопки ----
-    aboba.btn_show_history = QPushButton(QIcon("Картинки/Поиск.png"), " Получить данные")
+    aboba.btn_show_history = QPushButton(QIcon(str(ICONS_DIR / "search.png")), " Получить данные")
     aboba.btn_show_history.setIconSize(QSize(17, 17))
     aboba.btn_show_history.clicked.connect(lambda: show_purchase_history_clicked(aboba))
 
-    aboba.btn_excel = QPushButton(QIcon("Картинки/Эксель.png"), " Выгрузить рекомендации")
+    aboba.btn_excel = QPushButton(QIcon(str(ICONS_DIR / "excel.png")), " Выгрузить рекомендации")
     aboba.btn_excel.setIconSize(QSize(17, 17))
     aboba.btn_excel.clicked.connect(lambda: export_recommendations_to_excel(aboba))
 
@@ -410,7 +411,7 @@ def show_purchase_history_clicked(aboba):
         schedule_status_reset(aboba, 5)
 
         show_custom_message(aboba, "Ошибка", "Необходимо ввести идентификатор клиента для поиска",
-                            "Картинки/Неудача.png")
+                            str(ICONS_DIR / "failure.png"))
         aboba.purchases_table.setRowCount(0)
         aboba.recs_table.setRowCount(0)
         _clear_client_info_panel(aboba)
@@ -433,7 +434,7 @@ def show_purchase_history_clicked(aboba):
             schedule_status_reset(aboba, 5)
 
             show_custom_message(aboba, "Ошибка", "По заданному идентификатору клиент не найден",
-                                "Картинки/Неудача.png")
+                                str(ICONS_DIR / "failure.png"))
             aboba.purchases_table.setRowCount(0)
             aboba.recs_table.setRowCount(0)
             _clear_client_info_panel(aboba)
@@ -468,7 +469,7 @@ def show_purchase_history_clicked(aboba):
             schedule_status_reset(aboba, 5)
 
             show_custom_message(aboba, "Ошибка", "У выбранного клиента взаимодействий не найдено",
-                                "Картинки/Неудача.png")
+                                str(ICONS_DIR / "failure.png"))
             return
 
         set_status_ok(aboba, "Данные успешно получены")
@@ -483,7 +484,7 @@ def show_purchase_history_clicked(aboba):
         schedule_status_reset(aboba, 5)
 
         show_custom_message(aboba, "Ошибка", f"Не удалось загрузить данные:\n{e}",
-                            "Картинки/Неудача.png")
+                            str(ICONS_DIR / "failure.png"))
 
 
 # -------------------------------------------ОЧИСТКА ДАННЫХ КЛИЕНТА НА ФОРМЕ----------------------------------------
@@ -525,7 +526,7 @@ def _resolve_mindbox_ids(field_ui: str, value: str):
     if col == "Почта":
         value_clean = value_clean.lower()
 
-    orders_path = os.path.join(os.getcwd(), "ВходныеДанные", "Заказы.csv")
+    orders_path = os.path.join(os.getcwd(), "input_data", "orders.csv")
     if not os.path.isfile(orders_path):
         return []
 
@@ -550,7 +551,7 @@ def _resolve_mindbox_ids(field_ui: str, value: str):
 
 # -------------------------------------------ПОЛУЧЕНИЕ ДАННЫХ КЛИЕНТА НА ФОРМЕ--------------------------------------
 def _load_client_info(mindbox_id: str) -> dict:
-    orders_path = os.path.join(os.getcwd(), "ВходныеДанные", "Заказы.csv")
+    orders_path = os.path.join(os.getcwd(), "input_data", "orders.csv")
     if not os.path.isfile(orders_path):
         return {}
 
@@ -636,11 +637,11 @@ def _fill_client_info_panel(aboba, info: dict) -> None:
 
 # -------------------------------------------ЧТЕНИЕ И СБОР ВСЕХ ВЗАИМОДЕЙСТВИЙ КЛИЕНТА------------------------------
 def _load_client_interactions(aboba, mindbox_id: str):
-    data_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+    data_dir = os.path.join(os.getcwd(), "input_data")
     paths = {
-        "Покупка": os.path.join(data_dir, "Заказы.csv"),
-        "Просмотр": os.path.join(data_dir, "Просмотры.csv"),
-        "Избранное": os.path.join(data_dir, "Избранное.csv"),
+        "Покупка": os.path.join(data_dir, "orders.csv"),
+        "Просмотр": os.path.join(data_dir, "views.csv"),
+        "Избранное": os.path.join(data_dir, "favorites.csv"),
     }
 
     result_cols = [
@@ -811,7 +812,7 @@ def _ensure_item_name_map(aboba):
     if aboba._name_by_code is not None:
         return
 
-    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    nom_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
     if not os.path.isfile(nom_path):
         aboba._name_by_code = {}
         return
@@ -883,7 +884,7 @@ def _ensure_item_stock_map(aboba):
     if getattr(aboba, "_stock_by_code", None) is not None:
         return
 
-    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    nom_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
     if not os.path.isfile(nom_path):
         aboba._stock_by_code = {}
         return
@@ -916,7 +917,7 @@ def _ensure_item_collection_map(aboba):
     if getattr(aboba, "_collection_by_code", None) is not None:
         return
 
-    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    nom_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
     if not os.path.isfile(nom_path):
         aboba._collection_by_code = {}
         return
@@ -970,7 +971,7 @@ def _format_conversion_value_ui(v) -> str:
 
 # -------------------------------------------РЕКОМЕНДАЦИИ ИЗ EXCEL------------------------------------------------------
 def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.DataFrame:
-    path = os.path.join(os.getcwd(), "Модель", "Рекомендации.xlsx")
+    path = os.path.join(os.getcwd(), "model", "recommendations.xlsx")
     empty_cols = ["КодНоменклатуры", "НазваниеНоменклатуры", "Коллекция", "Коэффициент", "Конверсия", "Остаток"]
 
     if not os.path.isfile(path):
@@ -1213,7 +1214,7 @@ def _load_recommendations_from_excel(aboba, mindbox_id: str, topk: int) -> pd.Da
 
 # -------------------------------------------КЭШИРУЕМ EXCEL С РЕКОМЕНДАЦИЯМИ--------------------------------------------
 def _get_recommendations_excel_cache(aboba) -> pd.DataFrame:
-    path = os.path.join(os.getcwd(), "Модель", "Рекомендации.xlsx")
+    path = os.path.join(os.getcwd(), "model", "recommendations.xlsx")
 
     if not os.path.isfile(path):
         return pd.DataFrame()
@@ -1236,7 +1237,7 @@ def _get_recommendations_excel_cache(aboba) -> pd.DataFrame:
 
 # -------------------------------------------ДИСКОНТНАЯ КАРТА ПО MINDBOX ID---------------------------------------------
 def _get_discount_cards_for_mindbox(mindbox_id: str) -> list[str]:
-    orders_path = os.path.join(os.getcwd(), "ВходныеДанные", "Заказы.csv")
+    orders_path = os.path.join(os.getcwd(), "input_data", "orders.csv")
     if not os.path.isfile(orders_path):
         return []
 
@@ -1304,15 +1305,15 @@ def export_recommendations_to_excel(aboba):
 
     try:
         BPRMF_module.export_recommendations_excel(
-            out_xlsx="Модель/Рекомендации.xlsx",
+            out_xlsx="model/recommendations.xlsx",
             k=10,
             include_item_names=True,
             include_scores=True,
             filter_seen=True,
             device_str="cuda",
             include_discount_card=True,
-            out_csv_format1="Модель/InternetMagazin.csv",
-            out_csv_kanzler_ml="Модель/Mindbox.csv",
+            out_csv_format1="model/InternetMagazin.csv",
+            out_csv_kanzler_ml="model/Mindbox.csv",
             max_export_users=max_export_users,
             export_item_kinds=export_item_kinds,
         )
@@ -1331,7 +1332,7 @@ def export_recommendations_to_excel(aboba):
             aboba,
             "Ошибка",
             f"Не удалось выгрузить рекомендации:\n{e}",
-            "Картинки/Неудача.png"
+            str(ICONS_DIR / "failure.png")
         )
 
         QApplication.processEvents()

@@ -32,7 +32,7 @@ def _feature_config(*, enabled=True):
 def test_existing_unreadable_nomenclature_propagates_error(
     tmp_path, monkeypatch, read_error
 ):
-    (tmp_path / "Номенклатура.csv").write_text(
+    (tmp_path / "nomenclature.csv").write_text(
         "synthetic source exists", encoding="utf-8"
     )
 
@@ -62,7 +62,7 @@ def test_missing_nomenclature_keeps_empty_feature_fallback(tmp_path):
 
 
 def test_disabled_item_features_do_not_read_nomenclature(tmp_path, monkeypatch):
-    (tmp_path / "Номенклатура.csv").write_text(
+    (tmp_path / "nomenclature.csv").write_text(
         "synthetic source exists", encoding="utf-8"
     )
 
@@ -97,7 +97,7 @@ def test_valid_nomenclature_keeps_existing_feature_mapping(tmp_path):
             },
         ]
     ).to_csv(
-        tmp_path / "Номенклатура.csv",
+        tmp_path / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",

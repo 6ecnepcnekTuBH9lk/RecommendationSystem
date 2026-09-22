@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR
 import sys
 from Application.theme.SwitchTheme import ThemeSwitch
 from collections import deque
@@ -23,7 +24,7 @@ class MainWindow(QMainWindow):
 
         # Заголовок и иконка
         self.setWindowTitle("Рекомендательная система")
-        self.setWindowIcon(QIcon("Картинки/ChatGPT.png"))
+        self.setWindowIcon(QIcon(str(ICONS_DIR / "app_icon.png")))
 
         # Центральный виджет и основной layout
         central_widget = QWidget()
@@ -83,7 +84,7 @@ class MainWindow(QMainWindow):
         # Иконка статуса
         self.status_icon = QLabel()
         self.status_icon.setFixedSize(30, 30)
-        self.status_icon.setPixmap(QPixmap("Картинки/Успех.png").scaled(17, 17, Qt.AspectRatioMode.KeepAspectRatio,
+        self.status_icon.setPixmap(QPixmap(str(ICONS_DIR / "success.png")).scaled(17, 17, Qt.AspectRatioMode.KeepAspectRatio,
                                                                         Qt.TransformationMode.SmoothTransformation))
         self.status_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 

@@ -14,6 +14,7 @@ from .adapters._common import identifier, timestamp
 from .canonical_storage import catalog, checked_directory, stamp, storage_lock
 from .customers_stream import iter_json_records
 from .identity import CustomerIdResolver
+from .manual_sources import normalize_sources
 from .raw_reader import iter_export
 
 
@@ -137,7 +138,7 @@ def import_full(root, source, *, cancelled=None, progress=None):
     """Manual full snapshot: build a separate DB, then atomically replace the current DB."""
     from .manual_import import check_cancel
     root = Path(root).resolve()
-    source = Path(source)
+    sources = normalize_sources(source)
     with storage_lock(root):
         from .canonical_storage import collect_unreferenced
         collect_unreferenced(root)
@@ -149,9 +150,14 @@ def import_full(root, source, *, cancelled=None, progress=None):
         os.close(fd)
         try:
             with connect(temporary, create=True) as connection, connection:
-                for raw in iter_json_records(source, "customers"):
+                for number, path in enumerate(sources, 1):
                     check_cancel(cancelled)
-                    _upsert(connection, raw, resolver)
+                    if progress:
+                        progress(f"Проверка customers: файл {number} из {len(sources)}")
+                    check_cancel(cancelled)
+                    for raw in iter_json_records(path, "customers"):
+                        check_cancel(cancelled)
+                        _upsert(connection, raw, resolver)
                 count = connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
                 connection.execute("INSERT INTO metadata VALUES ('summary', ?)", (json.dumps(
                     {"updated": stamp(), "intervals": [], "count": count, "source_kind": "MANUAL"}),))

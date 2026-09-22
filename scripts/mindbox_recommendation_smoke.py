@@ -17,8 +17,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--training-manifest", type=Path, required=True)
     parser.add_argument("--profile-manifest", type=Path, required=True)
-    parser.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "Номенклатура.csv")
-    parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "MindboxRaw")
+    parser.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "input_data" / "nomenclature.csv")
+    parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "input_data" / "MindboxRaw")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--max-export-users", type=int, default=100)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
@@ -32,7 +32,7 @@ def main(argv=None):
             raw_root=args.raw_root, catalog_path=args.catalog,
             cfg=TrainConfig(data_dir=str(args.catalog.resolve().parent), epochs=args.epochs),
             device=torch.device(args.device), max_export_users=args.max_export_users,
-            settings_source=PROJECT_ROOT / "Настройки",
+            settings_source=PROJECT_ROOT / "user_settings",
             progress=lambda message: print(message, file=terminal, flush=True))
         print(f"Smoke: {report['status']}; error_code={report['error_code']}")
         for section in ("quality", "dataset", "training", "artifact", "contacts", "export", "cleanup"):

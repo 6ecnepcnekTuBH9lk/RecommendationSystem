@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QMessageBox)
@@ -6,21 +7,21 @@ from PyQt6.QtWidgets import (QMessageBox)
 # ///////////////////////////////////////////РАБОТА СО СТАТУСОМ ЗАДАЧИ//////////////////////////////////////////////
 def set_status_processing(aboba, text):
     aboba.status_label.setText(text)
-    aboba.status_icon.setPixmap(QPixmap("Картинки/Часы.png").scaled(
+    aboba.status_icon.setPixmap(QPixmap(str(ICONS_DIR / "clock.png")).scaled(
         17, 17, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
     ))
 
 
 def set_status_ok(aboba, text):
     aboba.status_label.setText(text)
-    aboba.status_icon.setPixmap(QPixmap("Картинки/Успех.png").scaled(
+    aboba.status_icon.setPixmap(QPixmap(str(ICONS_DIR / "success.png")).scaled(
         17, 17, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
     ))
 
 
 def set_status_error(aboba, text):
     aboba.status_label.setText(text)
-    aboba.status_icon.setPixmap(QPixmap("Картинки/Неудача.png").scaled(
+    aboba.status_icon.setPixmap(QPixmap(str(ICONS_DIR / "failure.png")).scaled(
         17, 17, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
     ))
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from Application.paths import ICONS_DIR
+
 import os
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, pyqtProperty, pyqtSignal
@@ -13,8 +15,8 @@ KNOB_SIZE = 26
 ICON_SIZE = 22
 PADDING = 3
 
-SUN_ICON_PATH = "Картинки/Солнце.png"
-MOON_ICON_PATH = "Картинки/Луна.png"
+SUN_ICON_PATH = str(ICONS_DIR / "sun.png")
+MOON_ICON_PATH = str(ICONS_DIR / "moon.png")
 
 class ThemeSwitch(QWidget):
 

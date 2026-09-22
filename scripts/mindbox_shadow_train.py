@@ -16,8 +16,8 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "Номенклатура.csv")
-    parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "MindboxRaw")
+    parser.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "input_data" / "nomenclature.csv")
+    parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "input_data" / "MindboxRaw")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--device", choices=("cpu",), default="cpu")
     args = parser.parse_args(argv)

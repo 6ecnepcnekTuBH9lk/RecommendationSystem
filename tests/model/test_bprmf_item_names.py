@@ -9,19 +9,19 @@ from Application.model import BPRMF
 
 
 _INVALID_INTERACTION_SCHEMA_CASES = [
-    ("Заказы.csv", "MindboxID"),
-    ("Заказы.csv", "КодНоменклатуры"),
-    ("Просмотры.csv", "MindboxID"),
-    ("Просмотры.csv", "КодНоменклатуры"),
-    ("Просмотры.csv", "ТипТовара"),
-    ("Избранное.csv", "MindboxID"),
-    ("Избранное.csv", "КодНоменклатуры"),
+    ("orders.csv", "MindboxID"),
+    ("orders.csv", "КодНоменклатуры"),
+    ("views.csv", "MindboxID"),
+    ("views.csv", "КодНоменклатуры"),
+    ("views.csv", "ТипТовара"),
+    ("favorites.csv", "MindboxID"),
+    ("favorites.csv", "КодНоменклатуры"),
 ]
 
 
 def _write_nomenclature(data_dir: Path, rows, *, columns=None) -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
-    path = data_dir / "Номенклатура.csv"
+    path = data_dir / "nomenclature.csv"
     pd.DataFrame(rows, columns=columns).to_csv(
         path,
         sep="|",
@@ -193,7 +193,7 @@ class _SyntheticCliModel:
 
 def _prepare_cli_recommendations(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    data_dir = tmp_path / "ВходныеДанные"
+    data_dir = tmp_path / "input_data"
     data_dir.mkdir()
     pd.DataFrame(
         columns=[
@@ -205,7 +205,7 @@ def _prepare_cli_recommendations(tmp_path, monkeypatch):
             "Почта",
         ]
     ).to_csv(
-        data_dir / "Заказы.csv",
+        data_dir / "orders.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -213,13 +213,13 @@ def _prepare_cli_recommendations(tmp_path, monkeypatch):
     pd.DataFrame(
         columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
     ).to_csv(
-        data_dir / "Просмотры.csv",
+        data_dir / "views.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
     )
     pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
-        data_dir / "Избранное.csv",
+        data_dir / "favorites.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -240,7 +240,7 @@ def _prepare_cli_recommendations(tmp_path, monkeypatch):
     monkeypatch.setattr(
         BPRMF,
         "_load_artifacts",
-        lambda model_dir="Модель": (mappings, checkpoint),
+        lambda model_dir="model": (mappings, checkpoint),
     )
     monkeypatch.setattr(
         BPRMF,
@@ -291,7 +291,7 @@ def test_cli_name_failure_preserves_codes_scores_order_and_success(
 
 @pytest.mark.parametrize(
     "missing_filename",
-    ["Заказы.csv", "Просмотры.csv", "Избранное.csv"],
+    ["orders.csv", "views.csv", "favorites.csv"],
 )
 def test_cli_recommendations_fail_when_required_interaction_source_is_missing(
     tmp_path,
@@ -300,7 +300,7 @@ def test_cli_recommendations_fail_when_required_interaction_source_is_missing(
     missing_filename,
 ):
     _prepare_cli_recommendations(tmp_path, monkeypatch)
-    (tmp_path / "ВходныеДанные" / missing_filename).unlink()
+    (tmp_path / "input_data" / missing_filename).unlink()
 
     exit_code = BPRMF.main(["--recommend", "user-1", "--k", "2"])
     captured = capsys.readouterr()
@@ -322,7 +322,7 @@ def test_cli_recommendations_fail_when_interaction_schema_is_invalid(
     missing_column,
 ):
     _prepare_cli_recommendations(tmp_path, monkeypatch)
-    source_path = tmp_path / "ВходныеДанные" / filename
+    source_path = tmp_path / "input_data" / filename
     columns = list(pd.read_csv(source_path, sep="|", dtype=str).columns)
     columns.remove(missing_column)
     pd.DataFrame(columns=columns).to_csv(

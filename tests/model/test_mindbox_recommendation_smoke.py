@@ -27,8 +27,8 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(smoke, "REPORT_ROOT", tmp_path / "reports")
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.setattr(torch, "set_num_interop_threads", lambda n: None)
-    production = tmp_path / "Модель"
-    for name in ("current.json", "runs/old-generation/bprmf.pt", ".staging/pending/sentinel", "Рекомендации.xlsx"):
+    production = tmp_path / "model"
+    for name in ("current.json", "runs/old-generation/bprmf.pt", ".staging/pending/sentinel", "recommendations.xlsx"):
         path = production / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"sentinel\x00\xff")
@@ -82,10 +82,10 @@ def inputs(tmp_path, problem="pass"):
     snapshot = profiles.CustomerProfileSnapshot("b" * 32, since.isoformat(), "customers/20260101_000000", 1,
                                                "customer_merges/20260101_000000", 1, batch.batch_id)
     profile = profiles._publish_snapshot(snapshot, raw)
-    catalog = tmp_path / "Номенклатура.csv"
+    catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры|Марка|НазваниеНаСайте|ВидНоменклатуры|Коллекция|Остаток\n" +
         "".join(f"{100000 + i}|brand|Synthetic {i}|kind|NOS|100\n" for i in range(24)), encoding="utf-8-sig")
-    settings = tmp_path / "Настройки"
+    settings = tmp_path / "user_settings"
     settings.mkdir()
     (settings / "filter_settings.json").write_text('{"active_collections": ["NOS"]}', encoding="utf-8")
     (settings / "sentinel.txt").write_text("SecretKey", encoding="utf-8")
@@ -125,8 +125,8 @@ def test_real_e2e_offline_serialization_export(environment, tmp_path, monkeypatc
     def checked_export(**kwargs):
         root = Path.cwd()
         assert root in environment
-        assert list((root / "ВходныеДанные").iterdir()) == [root / "ВходныеДанные" / "Номенклатура.csv"]
-        assert (root / "Настройки" / "sentinel.txt").read_text() == "SecretKey"
+        assert list((root / "input_data").iterdir()) == [root / "input_data" / "nomenclature.csv"]
+        assert (root / "user_settings" / "sentinel.txt").read_text() == "SecretKey"
         assert isinstance(kwargs["customer_contacts"], CustomerContactIndex)
         assert kwargs["customer_contacts"].diagnostics.with_phone == 2
         assert kwargs["filter_seen"] and kwargs["device_str"] == "cpu"

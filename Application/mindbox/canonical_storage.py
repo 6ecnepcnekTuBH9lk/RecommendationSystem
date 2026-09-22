@@ -79,7 +79,7 @@ def catalog(root):
                 entry = manual[name]
                 if (any(entry[key] != manual[key] for key in ("since", "until", "updated"))
                         or entry["source_kind"] != "MANUAL" or entry["export_id"] is not None
-                        or entry["operation"] != "MANUAL" or type(entry["parts"]) is not int or entry["parts"] != 1):
+                        or entry["operation"] != "MANUAL" or type(entry["parts"]) is not int or entry["parts"] < 1):
                     raise ValueError
                 parents.add(checked_directory(root, entry["directory"], name).parent)
             if len(parents) != 1:

@@ -15,7 +15,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True)
     parser.add_argument("--kind", required=True, choices=REFERENCE_TYPES)
-    parser.add_argument("--output-dir", type=Path, default=root / "ВходныеДанные")
+    parser.add_argument("--output-dir", type=Path, default=root / "input_data")
     args = parser.parse_args(argv)
     try:
         result = import_reference(args.file, args.kind, output_dir=args.output_dir)

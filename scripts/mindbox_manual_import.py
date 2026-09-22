@@ -23,12 +23,15 @@ def main(argv=None):
     customers = commands.add_parser("customers")
     for sub in (interactions, customers):
         sub.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
-    for name in ("actions", "orders", "since", "until"):
+    for name in ("actions", "orders"):
+        interactions.add_argument("--" + name, required=True, action="append", type=Path)
+    for name in ("since", "until"):
         interactions.add_argument("--" + name, required=True)
     for field, option in SELECTION_OPTIONS.items():
         interactions.add_argument(option, dest=field, action="append")
     customers.add_argument(
         "--customers",
+        action="append",
         required=True,
         type=Path,
     )

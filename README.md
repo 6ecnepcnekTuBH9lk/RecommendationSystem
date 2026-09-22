@@ -53,7 +53,7 @@ RecommendationSystem/
 │   └── theme/
 │       ├── SwitchTheme.py
 │       └── apply_theme.py
-├── Картинки/
+├── assets/icons/
 ├── main.py
 └── README.md
 ```
@@ -114,3 +114,20 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+
+
+## Локальные файлы
+
+Иконки находятся в assets/icons/. Общие пути определены в Application/paths.py.
+Пользовательские данные, raw Mindbox и отчёты размещаются в input_data/,
+настройки — в user_settings/; оба каталога целиком игнорируются Git.
+Legacy CSV используют имена orders.csv, views.csv, favorites.csv,
+nomenclature.csv, site_categories.csv, city_coordinates.csv, weather.csv и stores.csv.
+Отфильтрованные датасеты создаются в filtered_data/, файлы рекомендаций —
+в model/ с ASCII-именами. Оба generated-каталога также игнорируются Git.
+
+Переименование каталогов не переводит интерфейс, бизнес-данные или сообщения.
+Содержимое перенесённых пользовательских файлов сохраняется. При чтении старого
+train_config.json загрузчик автоматически заменяет legacy-компонент пути
+ВходныеДанные на input_data в data_dir, в том числе для прямого CLI.
+Остальные параметры, разделители и компоненты пути сохраняются; сам JSON не перезаписывается.

@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR
 import os
 import json
 import chardet
@@ -62,7 +63,7 @@ def create_csv_loading_section(aboba):
     fields.addWidget(aboba.combo_box_types, 0, 0)
 
     # Кнопка "Загрузить файл"
-    aboba.btn_load = QPushButton(QIcon("Картинки/ЗагрузитьФайл.png"), " Загрузить файл")
+    aboba.btn_load = QPushButton(QIcon(str(ICONS_DIR / "load_file.png")), " Загрузить файл")
     aboba.btn_load.setIconSize(QSize(17, 17))
     aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
 
@@ -283,18 +284,18 @@ def create_input_data_widgets_tab(aboba):
     btns.setSpacing(10)
 
     # Кнопка "Применить фильтр"
-    aboba.btn_apply = QPushButton(QIcon("Картинки/Фильтр.png"), " Применить")
+    aboba.btn_apply = QPushButton(QIcon(str(ICONS_DIR / "filter.png")), " Применить")
     aboba.btn_apply.setIconSize(QSize(17, 17))
     aboba.btn_apply.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
     aboba.btn_apply.clicked.connect(lambda: save_and_apply_filters(aboba))
 
     # Кнопка "Сбросить фильтр"
-    aboba.btn_reset = QPushButton(QIcon("Картинки/Корзина.png"), " Сбросить")
+    aboba.btn_reset = QPushButton(QIcon(str(ICONS_DIR / "cart.png")), " Сбросить")
     aboba.btn_reset.setIconSize(QSize(17, 17))
     aboba.btn_reset.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
     aboba.btn_reset.clicked.connect(lambda: reset_order_filters(aboba))
 
-    aboba.btn_weather = QPushButton(QIcon("Картинки/Солнце.png"), " Загрузить погоду")
+    aboba.btn_weather = QPushButton(QIcon(str(ICONS_DIR / "sun.png")), " Загрузить погоду")
     aboba.btn_weather.setIconSize(QSize(17, 17))
     aboba.btn_weather.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
     aboba.btn_weather.clicked.connect(lambda: _maybe_update_weather(aboba))
@@ -327,13 +328,13 @@ def create_input_data_widgets_tab(aboba):
     switch_row = QHBoxLayout()
     switch_row.setSpacing(10)
 
-    aboba.btn_show_orders = QPushButton(QIcon("Картинки/Заказы.png"), " Заказы")
+    aboba.btn_show_orders = QPushButton(QIcon(str(ICONS_DIR / "orders.png")), " Заказы")
     aboba.btn_show_orders.setIconSize(QSize(17, 17))
 
-    aboba.btn_show_views = QPushButton(QIcon("Картинки/Просмотры.png"), " Просмотры")
+    aboba.btn_show_views = QPushButton(QIcon(str(ICONS_DIR / "views.png")), " Просмотры")
     aboba.btn_show_views.setIconSize(QSize(17, 17))
 
-    aboba.btn_show_favs = QPushButton(QIcon("Картинки/Избранное.png"), " Избранное")
+    aboba.btn_show_favs = QPushButton(QIcon(str(ICONS_DIR / "favorites.png")), " Избранное")
     aboba.btn_show_favs.setIconSize(QSize(17, 17))
 
     # Делаем кнопки переключателями
@@ -474,12 +475,12 @@ def vyvod_zaglyschek(text, icon, main_layout, stats_label):
 
 # -------------------------------------------ОБНОВЛЕНИЕ СТАТУСА ЗАГРУЗКИ------------------------------------------------
 def update_file_status(aboba):
-    input_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+    input_dir = os.path.join(os.getcwd(), "input_data")
 
     files = {
-        "Номенклатура": "Номенклатура.csv",
-        "Категории": "КатегорииСайта.csv",
-        "Координаты": "КоординатыГородов.csv"
+        "Номенклатура": "nomenclature.csv",
+        "Категории": "site_categories.csv",
+        "Координаты": "city_coordinates.csv"
     }
 
     # Очистка старых виджетов
@@ -501,8 +502,8 @@ def update_file_status(aboba):
     right_layout.setSpacing(3)
     right_widget.setLayout(right_layout)
 
-    ok_path = "Картинки/Успех.png"
-    fail_path = "Картинки/Неудача.png"
+    ok_path = str(ICONS_DIR / "success.png")
+    fail_path = str(ICONS_DIR / "failure.png")
 
     items = list(files.items())
 
@@ -674,7 +675,7 @@ def _masked_date_is_empty(le) -> bool:
 
 
 def _maybe_update_weather(aboba):
-    coords_path = os.path.join(os.getcwd(), "ВходныеДанные", "КоординатыГородов.csv")
+    coords_path = os.path.join(os.getcwd(), "input_data", "city_coordinates.csv")
     if not os.path.isfile(coords_path):
         return  # координаты не загружены — погоду не трогаем
 
@@ -693,7 +694,7 @@ def _maybe_update_weather(aboba):
             aboba,
             title="Ошибка",
             text="Период заполнен некорректно. Погода не обновлена.",
-            image_path="Картинки/Неудача.png",
+            image_path=str(ICONS_DIR / "failure.png"),
         )
         return
 
@@ -732,7 +733,7 @@ def _maybe_update_weather(aboba):
             aboba,
             title="Ошибка",
             text=f"Не удалось обновить файл Погода.csv:\n{e}",
-            image_path="Картинки/Неудача.png",
+            image_path=str(ICONS_DIR / "failure.png"),
         )
 
 
@@ -772,7 +773,7 @@ def reset_order_filters(aboba):
 
 # -------------------------------------------ФОРМИРУЕМ СПИСОК ГОРОДОВ ДЛЯ ВЫБОРА----------------------------------------
 def load_cities_from_coordinates_file(aboba) -> None:
-    path = os.path.join(os.getcwd(), "ВходныеДанные", "КоординатыГородов.csv")
+    path = os.path.join(os.getcwd(), "input_data", "city_coordinates.csv")
 
     if not os.path.isfile(path):
         aboba._cities = []
@@ -806,7 +807,7 @@ def load_cities_from_coordinates_file(aboba) -> None:
 # -------------------------------------------ФОРМИРУЕМ СПИСОК МАГАЗИНОВ В ТАБЛИЦЕ---------------------------------------
 def refresh_store_city_table(aboba) -> None:
     # Читаем магазины из файла
-    stores_path = os.path.join(os.getcwd(), "ВходныеДанные", "СписокМагазинов.csv")
+    stores_path = os.path.join(os.getcwd(), "input_data", "stores.csv")
 
     stores: list[str] = []
     if os.path.isfile(stores_path):
@@ -851,16 +852,16 @@ def refresh_store_city_table(aboba) -> None:
 # -------------------------------------------ДОСТУПНОСТЬ ПОЛЕЙ ОТБОРА---------------------------------------------------
 def update_filter_controls_availability(aboba):
 
-    base = os.path.join(os.getcwd(), "ВходныеДанные")
+    base = os.path.join(os.getcwd(), "input_data")
 
     required = {
-        "Заказы": "Заказы.csv",
-        "Просмотры": "Просмотры.csv",
-        "Избранное": "Избранное.csv",
-        "Номенклатура": "Номенклатура.csv",
-        "Категории": "КатегорииСайта.csv",
-        "Координаты": "КоординатыГородов.csv",
-        "Список магазинов": "СписокМагазинов.csv",
+        "Заказы": "orders.csv",
+        "Просмотры": "views.csv",
+        "Избранное": "favorites.csv",
+        "Номенклатура": "nomenclature.csv",
+        "Категории": "site_categories.csv",
+        "Координаты": "city_coordinates.csv",
+        "Список магазинов": "stores.csv",
     }
 
     missing = [name for name, fn in required.items()
@@ -926,7 +927,7 @@ def refresh_export_kind_values_from_nomenclature_file(aboba):
     """
     Заполняет список видов номенклатуры для фильтра итоговой выгрузки.
 
-    Источник — текущий файл ВходныеДанные/Номенклатура.csv,
+    Источник — текущий файл input_data/nomenclature.csv,
     потому что рекомендации формируются по актуальному каталогу.
     """
     lw = getattr(aboba, "export_kind_filter", None)
@@ -935,8 +936,8 @@ def refresh_export_kind_values_from_nomenclature_file(aboba):
 
     nom_path = os.path.join(
         os.getcwd(),
-        "ВходныеДанные",
-        "Номенклатура.csv"
+        "input_data",
+        "nomenclature.csv"
     )
 
     if not os.path.isfile(nom_path):
@@ -998,7 +999,7 @@ def refresh_season_values_from_nomenclature_file(aboba):
     if lw is None:
         return
 
-    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    nom_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
     if not os.path.isfile(nom_path):
         set_list_widget_items(aboba, lw, [], [])
         return
@@ -1088,7 +1089,7 @@ def set_order_filters_enabled(aboba, enabled: bool):
 # -------------------------------------------АНАЛИЗ ЗАКЗАОВ---------------------------------------------------------
 def analyze_orders_full_dataset(aboba) -> bool:
     try:
-        file_path = "ВходныеДанные/Заказы.csv"
+        file_path = "input_data/orders.csv"
 
         # --- helpers for masked date fields ---
         def _masked_date_is_empty(le: QLineEdit) -> bool:
@@ -1130,7 +1131,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
             update_filter_summary(aboba)
             vyvod_zaglyschek(
                 text="Файл ещё не загружен",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
@@ -1176,7 +1177,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
         if errors:
             vyvod_zaglyschek(
                 text=";\n".join(errors),
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
@@ -1187,7 +1188,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
             if "Дата" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'Дата' — фильтр периода недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
@@ -1207,7 +1208,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
             if "Магазин" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'Магазин' — фильтр магазина недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
@@ -1230,7 +1231,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
             if "ВидНоменклатуры" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'ВидНоменклатуры' — фильтр недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.order_full_output_layout,
                     stats_label=aboba.order_full_stats_label
                 )
@@ -1247,7 +1248,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
         if df.empty:
             vyvod_zaglyschek(
                 text="Нет данных по выбранным фильтрам",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.order_full_output_layout,
                 stats_label=aboba.order_full_stats_label
             )
@@ -1419,7 +1420,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
         set_order_filters_enabled(aboba, False)
         vyvod_zaglyschek(
             text=f"Ошибка при анализе файла: {e}",
-            icon="Картинки/Неудача.png",
+            icon=str(ICONS_DIR / "failure.png"),
             main_layout=aboba.order_full_output_layout,
             stats_label=aboba.order_full_stats_label)
         return False
@@ -1428,7 +1429,7 @@ def analyze_orders_full_dataset(aboba) -> bool:
 # -------------------------------------------АНАЛИЗ ПРОСМОТРОВ------------------------------------------------------
 def analyze_views_full_dataset(aboba) -> bool:
     try:
-        file_path = "ВходныеДанные/Просмотры.csv"
+        file_path = "input_data/views.csv"
 
         # Очищаем ТОЛЬКО блок результата на странице "Просмотры"
         clear_layout(aboba, aboba.views_full_output_layout)
@@ -1445,7 +1446,7 @@ def analyze_views_full_dataset(aboba) -> bool:
         if not os.path.isfile(file_path):
             vyvod_zaglyschek(
                 text="Файл ещё не загружен",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
@@ -1483,7 +1484,7 @@ def analyze_views_full_dataset(aboba) -> bool:
             if "Дата" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'Дата' — отбор по периоду недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.views_full_output_layout,
                     stats_label=aboba.views_full_stats_label
                 )
@@ -1509,7 +1510,7 @@ def analyze_views_full_dataset(aboba) -> bool:
             if "ВидНоменклатуры" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'ВидНоменклатуры' — отбор по виду номенклатуры недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.views_full_output_layout,
                     stats_label=aboba.views_full_stats_label
                 )
@@ -1525,7 +1526,7 @@ def analyze_views_full_dataset(aboba) -> bool:
         if df.empty:
             vyvod_zaglyschek(
                 text="Нет данных по выбранным фильтрам",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
@@ -1535,7 +1536,7 @@ def analyze_views_full_dataset(aboba) -> bool:
         if df.empty:
             vyvod_zaglyschek(
                 text="Файл пустой — нет данных для анализа.",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.views_full_output_layout,
                 stats_label=aboba.views_full_stats_label
             )
@@ -1688,7 +1689,7 @@ def analyze_views_full_dataset(aboba) -> bool:
     except Exception as e:
         vyvod_zaglyschek(
             text=f"Ошибка при анализе файла: {e}",
-            icon="Картинки/Неудача.png",
+            icon=str(ICONS_DIR / "failure.png"),
             main_layout=aboba.views_full_output_layout,
             stats_label=aboba.views_full_stats_label
         )
@@ -1698,7 +1699,7 @@ def analyze_views_full_dataset(aboba) -> bool:
 # -------------------------------------------АНАЛИЗ ИЗБРАННОГО------------------------------------------------------
 def analyze_favorites_full_dataset(aboba) -> bool:
     try:
-        file_path = "ВходныеДанные/Избранное.csv"
+        file_path = "input_data/favorites.csv"
 
         # Очищаем ТОЛЬКО блок результата на странице "Избранное"
         clear_layout(aboba, aboba.favorites_full_output_layout)
@@ -1714,7 +1715,7 @@ def analyze_favorites_full_dataset(aboba) -> bool:
         if not os.path.isfile(file_path):
             vyvod_zaglyschek(
                 text="Файл ещё не загружен",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.favorites_full_output_layout,
                 stats_label=aboba.favorites_full_stats_label
             )
@@ -1750,7 +1751,7 @@ def analyze_favorites_full_dataset(aboba) -> bool:
             if "Дата" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'Дата' — отбор по периоду недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.favorites_full_output_layout,
                     stats_label=aboba.favorites_full_stats_label
                 )
@@ -1776,7 +1777,7 @@ def analyze_favorites_full_dataset(aboba) -> bool:
             if "ВидНоменклатуры" not in df.columns:
                 vyvod_zaglyschek(
                     text="В файле нет колонки 'ВидНоменклатуры' — отбор по виду номенклатуры недоступен.",
-                    icon="Картинки/Внимание.png",
+                    icon=str(ICONS_DIR / "warning.png"),
                     main_layout=aboba.favorites_full_output_layout,
                     stats_label=aboba.favorites_full_stats_label
                 )
@@ -1792,7 +1793,7 @@ def analyze_favorites_full_dataset(aboba) -> bool:
         if df.empty:
             vyvod_zaglyschek(
                 text="Нет данных по выбранным фильтрам",
-                icon="Картинки/Внимание.png",
+                icon=str(ICONS_DIR / "warning.png"),
                 main_layout=aboba.favorites_full_output_layout,
                 stats_label=aboba.favorites_full_stats_label
             )
@@ -1889,7 +1890,7 @@ def analyze_favorites_full_dataset(aboba) -> bool:
         return True
 
     except Exception as e:
-        vyvod_zaglyschek(text=f"Ошибка при анализе файла: {e}", icon="Картинки/Неудача.png",
+        vyvod_zaglyschek(text=f"Ошибка при анализе файла: {e}", icon=str(ICONS_DIR / "failure.png"),
                          main_layout=aboba.favorites_full_output_layout,
                          stats_label=aboba.favorites_full_stats_label)
         return False
@@ -1954,7 +1955,7 @@ def read_csv_auto_encoding(aboba, file_path: str, sep: str):
         show_custom_message(aboba,
                             title="Ошибка",
                             text=f"Не удалось прочитать файл:\n{file_path}\n\nПричина:\n{str(e)}",
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Ошибка чтения файла")
         schedule_status_reset(aboba, 5)

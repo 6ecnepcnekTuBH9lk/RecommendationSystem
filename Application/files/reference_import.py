@@ -12,9 +12,9 @@ from .files_processing import process_nomenclature_file, process_categories_file
 
 
 REFERENCE_TYPES = {
-    "Номенклатура из 1С": ("Номенклатура.csv", "|", process_nomenclature_file),
-    "Категории сайта из 1С": ("КатегорииСайта.csv", "|", process_categories_file),
-    "Координаты городов и погода": ("КоординатыГородов.csv", ",", process_coordinates_file),
+    "Номенклатура из 1С": ("nomenclature.csv", "|", process_nomenclature_file),
+    "Категории сайта из 1С": ("site_categories.csv", "|", process_categories_file),
+    "Координаты городов и погода": ("city_coordinates.csv", ",", process_coordinates_file),
 }
 
 

@@ -1,5 +1,7 @@
 """Общее чтение опубликованных raw exports для profiler и adapters. Только локальный I/O."""
 
+from Application.paths import INPUT_DATA_DIR
+
 import json
 import re
 from collections.abc import Iterator
@@ -10,7 +12,7 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RAW_ROOT = PROJECT_ROOT / "ВходныеДанные" / "MindboxRaw"
+DEFAULT_RAW_ROOT = INPUT_DATA_DIR / "MindboxRaw"
 EXPORT_ROOTS = {
     "actions": "customerActions", "orders": "orders", "customers": "customers",
     "customer_merges": "customerMerges",

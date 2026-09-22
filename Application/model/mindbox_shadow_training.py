@@ -1,5 +1,7 @@
 """Offline daily-manifest orchestration and allowlisted aggregate JSON report."""
 
+from Application.paths import INPUT_DATA_DIR
+
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
@@ -12,7 +14,7 @@ from Application.mindbox.daily_training_batch import load_chunked_training_batch
 from .shadow_training import run_shadow_training
 from .training_quality import TrainingQualityDiagnostics
 
-REPORT_ROOT = Path(__file__).resolve().parents[2] / "ВходныеДанные" / "MindboxReports" / "shadow_training"
+REPORT_ROOT = INPUT_DATA_DIR / "MindboxReports" / "shadow_training"
 
 
 def _atomic_report(path, payload):
@@ -54,7 +56,7 @@ def _safe_config(cfg):
 def shadow_train_daily_manifest(manifest, *, raw_root, catalog_path, cfg, device, on_quality=None):
     catalog = Path(catalog_path).resolve()
     # The existing feature loader reads this exact basename from cfg.data_dir.
-    if catalog.name != "Номенклатура.csv" or catalog.parent != Path(cfg.data_dir).resolve():
+    if catalog.name != "nomenclature.csv" or catalog.parent != Path(cfg.data_dir).resolve():
         raise ValueError("Preparation and feature catalog must match TrainConfig.data_dir")
     config_summary = _safe_config(cfg)
     batch = load_chunked_training_batch(manifest, raw_root=raw_root, require_complete=True)

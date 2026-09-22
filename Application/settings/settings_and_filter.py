@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR, INPUT_DATA_DIR, USER_SETTINGS_DIR
 import os
 import json
 
@@ -64,7 +65,7 @@ def save_order_filter_settings(aboba):
         show_custom_message(aboba,
                             title="Ошибка",
                             text=f"Не удалось сохранить настройки фильтров:\n{e}",
-                            image_path="Картинки/Неудача.png",
+                            image_path=str(ICONS_DIR / "failure.png"),
                             )
         return False
 
@@ -203,18 +204,18 @@ def get_selected_list_values(lw: QListWidget) -> list[str]:
 
 # -------------------------------------------ПУТЬ К ДИРЕКТОРИИ НАСТРОЕК-------------------------------------------------
 def order_filters_settings_path() -> str:
-    cfg_dir = os.path.join(os.getcwd(), "Настройки")
+    cfg_dir = os.path.join(os.getcwd(), USER_SETTINGS_DIR.name)
     os.makedirs(cfg_dir, exist_ok=True)
     return os.path.join(cfg_dir, "filter_settings.json")
 
 
 # -------------------------------------------ПУТИ К ДАТАСЕТАМ-------------------------------------------------------
 def dataset_paths() -> dict:
-    base = os.path.join(os.getcwd(), "ВходныеДанные")
+    base = os.path.join(os.getcwd(), INPUT_DATA_DIR.name)
     return {
-        "orders": os.path.join(base, "Заказы.csv"),
-        "views": os.path.join(base, "Просмотры.csv"),
-        "favs": os.path.join(base, "Избранное.csv"),
+        "orders": os.path.join(base, "orders.csv"),
+        "views": os.path.join(base, "views.csv"),
+        "favs": os.path.join(base, "favorites.csv"),
     }
 
 

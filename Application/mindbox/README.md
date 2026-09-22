@@ -29,7 +29,7 @@ Copy-Item -LiteralPath .env.example -Destination .env
 По умолчанию `.env` ищется в корне проекта, независимо от текущего каталога.
 `MindboxConfig.from_env(None)` использует только environment.
 
-`.env`, `.env.*` и `ВходныеДанные/MindboxRaw/` исключены из Git;
+`.env`, `.env.*` и `input_data/MindboxRaw/` исключены из Git;
 `.env.example` остаётся доступным для версионирования.
 
 ## Первый ручной запуск
@@ -74,8 +74,8 @@ Export started: 123456
 Waiting for export...
 Export ready. Parts: 2
 Saved:
-.../ВходныеДанные/MindboxRaw/actions/20260909_153500/actions_part_001.json
-.../ВходныеДанные/MindboxRaw/actions/20260909_153500/actions_part_002.json
+.../input_data/MindboxRaw/actions/20260909_153500/actions_part_001.json
+.../input_data/MindboxRaw/actions/20260909_153500/actions_part_002.json
 ```
 
 Скрипт возвращает 0 при успехе, 1 при ошибке, 130 при Ctrl+C.
@@ -199,14 +199,14 @@ python scripts/mindbox_schema_report.py all
 ```
 
 Без параметров выбирается последний timestamp-каталог соответствующего типа
-в `ВходныеДанные/MindboxRaw/`. Суффиксы `_001` и далее сравниваются численно.
+в `input_data/MindboxRaw/`. Суффиксы `_001` и далее сравниваются численно.
 `.staging-*`, `.reserve` и произвольные имена исключены. Последняя выгрузка
 с пропущенными частями/неверным JSON вызывает ошибку: возврата к старой нет.
 Part-файлы должны иметь последовательные номера начиная с 001.
 
 ```powershell
-python scripts/mindbox_schema_report.py actions --input-dir "ВходныеДанные/MindboxRaw/actions/20260909_153500"
-python scripts/mindbox_schema_report.py all --input-dir "ВходныеДанные/MindboxRaw"
+python scripts/mindbox_schema_report.py actions --input-dir "input_data/MindboxRaw/actions/20260909_153500"
+python scripts/mindbox_schema_report.py all --input-dir "input_data/MindboxRaw"
 ```
 
 Для одного типа `--input-dir` — непосредственно каталог с part-файлами.
@@ -214,7 +214,7 @@ python scripts/mindbox_schema_report.py all --input-dir "ВходныеДанн�
 `customer_merges`, из каждого выбирается последний timestamp.
 
 Результат — `<export_name>_schema.json` и `<export_name>_schema.md`
-в `ВходныеДанные/MindboxReports/`, папка исключена из Git. Параметр
+в `input_data/MindboxReports/`, папка исключена из Git. Параметр
 `--output-dir` меняет каталог отчётов; такой каталог следует самостоятельно
 исключить из Git, если он расположен в репозитории. Отчёты нельзя размещать
 внутри raw-каталога. Повторный запуск обновляет отчёты выбранных типов.
@@ -386,7 +386,7 @@ for raw in iter_export("actions"):
 ```powershell
 python scripts/mindbox_adapter_smoke.py all
 python scripts/mindbox_adapter_smoke.py actions
-python scripts/mindbox_adapter_smoke.py all --raw-root "ВходныеДанные/MindboxRaw"
+python scripts/mindbox_adapter_smoke.py all --raw-root "input_data/MindboxRaw"
 python -m pytest tests/mindbox/test_adapters.py tests/mindbox/test_identity.py -q
 ```
 
@@ -478,7 +478,7 @@ stats = builder.diagnostics
 
 ```powershell
 python scripts/mindbox_interaction_smoke.py all
-python scripts/mindbox_interaction_smoke.py all --raw-root "ВходныеДанные/MindboxRaw"
+python scripts/mindbox_interaction_smoke.py all --raw-root "input_data/MindboxRaw"
 python -m pytest tests/test_interactions.py -q
 ```
 
@@ -505,7 +505,7 @@ Required-field ошибки адаптеров, raw reader и resolver по-пр
 ## M02-05: product identity / catalog resolver
 
 `Application/product_resolution.py` отделяет исходные ProductKey от catalog identity.
-`load_catalog()` читает `ВходныеДанные/Номенклатура.csv` стандартным csv module:
+`load_catalog()` читает `input_data/nomenclature.csv` стандартным csv module:
 UTF-8 с optional BOM (`utf-8-sig`), разделитель `|`, обязательный уникальный header
 `КодНоменклатуры`. Ошибки файла, кодировки, CSV, header и ширины строки вызывают
 безопасный CatalogError. Пустые/whitespace-only коды и пустые строки не создают item
@@ -566,7 +566,7 @@ stats = resolver.diagnostics
 
 ```powershell
 python scripts/product_resolution_smoke.py --diagnose
-python scripts/product_resolution_smoke.py --raw-root "ВходныеДанные/MindboxRaw" --catalog "ВходныеДанные/Номенклатура.csv"
+python scripts/product_resolution_smoke.py --raw-root "input_data/MindboxRaw" --catalog "input_data/nomenclature.csv"
 python -m pytest tests/test_product_resolution.py -q
 ```
 
@@ -692,7 +692,7 @@ Private prep helpers остаются. `train_bprmf(maps, events, cfg, device)` 
 
 Prepared path: `train_prepared_data(cfg, prepared, device)` сначала валидирует
 контракт, затем использует готовые weights/splits без пересчёта. Ни наличие, ни
-чтение Заказы/Просмотры/Избранное.csv ему не нужны. Инициализация seed остаётся
+чтение Заказы/Просмотры/favorites.csv ему не нужны. Инициализация seed остаётся
 обязанностью вызывающей стороны, как у прежнего train_bprmf. TrainConfig weights
 сохраняются для legacy preparation/UI; они не заменяют веса prepared input.
 В будущем orchestration явно передаст выбранные веса в BprWeightConfig.
@@ -712,7 +712,7 @@ Core не меняет вход; validation выполняется перед к
 aliasing и повторное отклонение данных после изменения weights на NaN.
 
 Item feature loader не изменён: при use_item_features=True он может читать только
-Номенклатура.csv по canonical mappings; при False prepared training работает без
+nomenclature.csv по canonical mappings; при False prepared training работает без
 любых CSV. Model/loss/negative sampling/evaluation/early stopping/publication
 не изменены. LEGACY_DATE остаётся default M02-06, known evaluation overlap сохранён.
 Mindbox production wiring не добавлен.
@@ -747,7 +747,7 @@ Library требует конкретные export directories, не выбир�
 путь отклоняется. Вызывающая сторона отвечает за согласованность периодов/запусков
 этих exports: наличие explicit paths само по себе её не доказывает.
 Сначала полностью строится CustomerIdResolver, затем адаптируются Actions/Orders.
-Customers export и КатегорииСайта.csv не читаются. Product identity, классификация,
+Customers export и site_categories.csv не читаются. Product identity, классификация,
 quantity и ordering делегированы существующим слоям, business rules не копируются.
 
 TrainConfig передаётся по структурному Protocol (library не импортирует тяжёлый
@@ -869,8 +869,8 @@ merge-since в примере выбран явно: caller должен ука�
 merges для своих данных. После успеха использовать напечатанный manifest path:
 
 ```powershell
-python scripts/mindbox_training_batch.py validate --manifest "ВходныеДанные/MindboxRaw/training_batches/<batch_id>/manifest.json"
-python scripts/mindbox_training_batch.py prepare --manifest "ВходныеДанные/MindboxRaw/training_batches/<batch_id>/manifest.json" --diagnose
+python scripts/mindbox_training_batch.py validate --manifest "input_data/MindboxRaw/training_batches/<batch_id>/manifest.json"
+python scripts/mindbox_training_batch.py prepare --manifest "input_data/MindboxRaw/training_batches/<batch_id>/manifest.json" --diagnose
 ```
 
 Тесты используют mocked API и настоящий M01 raw storage на синтетических байтах:
@@ -969,7 +969,7 @@ Prepare выводит cumulative safe diagnostics, но не обучает и 
 После вывода batch ID подставить его в путь:
 
 ```powershell
-$batchDir = ".\ВходныеДанные\MindboxRaw\training_batches\<batch_id>"
+$batchDir = ".\input_data\MindboxRaw\training_batches\<batch_id>"
 & .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py status --state "$batchDir\state.json"
 & .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py resume --state "$batchDir\state.json" --timeout 3600
 & .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py validate --manifest "$batchDir\manifest.json"
@@ -1047,7 +1047,7 @@ snapshots и CLI exit 0 для WARN при complete=False. Проверяетс�
 Legacy CSV remains the production source. No PyQt/inference integration is added.
 The same TrainConfig instance supplies preparation weights/eval eligibility and all
 training settings. CLI overrides only epochs and data_dir (catalog parent); CPU is
-the supported device. The catalog must be named Номенклатура.csv and match data_dir
+the supported device. The catalog must be named nomenclature.csv and match data_dir
 so product resolution and item features read the same file. Existing feature math,
 including duplicate catalog keep="last", remains unchanged.
 
@@ -1074,7 +1074,7 @@ quality report, metrics, status flags and optional report path. Model remains in
 memory and is excluded from repr (as is report path); no mappings/IDs enter reports.
 The model itself remains an ordinary mutable PyTorch model.
 
-Reports are written only below project `ВходныеДанные/MindboxReports/shadow_training/`
+Reports are written only below project `input_data/MindboxReports/shadow_training/`
 at `<run_id>/report.json`. JSON sections: run_id/timestamp/batch_id/interaction_window,
 quality (level, allowed, metrics, issue counts/rates/systemName breakdown), dataset
 (safe counts, complete, total weight), config (allowlisted scalar training parameters
@@ -1096,8 +1096,8 @@ Manual first smoke, from project root in PowerShell:
 
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_shadow_train.py `
-  --manifest '.\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json' `
-  --catalog '.\ВходныеДанные\Номенклатура.csv' `
+  --manifest '.\input_data\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json' `
+  --catalog '.\input_data\nomenclature.csv' `
   --epochs 2 `
   --device cpu
 ```
@@ -1122,7 +1122,7 @@ call remains supported. New legacy CSV training explicitly builds and saves the
 index from PreparedBprData. No separate identity-to-products JSON is written.
 
 For an embedded index, print_recommendations neither requires nor reads interaction
-CSV for seen filtering. Номенклатура.csv can still supply display names. Train and
+CSV for seen filtering. nomenclature.csv can still supply display names. Train and
 eval-only seen items are excluded, including when fewer than k unseen items exist.
 The print inference function now uses no_grad: the synthetic full-path test exposed
 an existing requires-grad Tensor.numpy error. Output formatting remains unchanged.
@@ -1133,9 +1133,9 @@ legacy seen helper for that branch. filter_seen=False leaves scores unmasked.
 It still validates/reads legacy interaction sources for other responsibilities;
 this is NOT a complete recommendation-source migration. Remaining M02-14/M02-15 work:
 
-- Historical conversion: Просмотры.csv + Заказы.csv.
-- Loyalty ranking: Заказы.csv + Избранное.csv + Просмотры.csv.
-- Contact/profile fields (phone, email, discount card): currently Заказы.csv.
+- Historical conversion: views.csv + orders.csv.
+- Loyalty ranking: orders.csv + favorites.csv + views.csv.
+- Contact/profile fields (phone, email, discount card): currently orders.csv.
 
 Stock handling, seasonal mapping, recommendation output formats, customer sources,
 quality policy, BPR math and PyQt are unchanged. M02-12 shadow still publishes no
@@ -1194,7 +1194,7 @@ Phone eligibility is still applied independently by the existing contact path.
 NEW models need no interaction CSV for seen filtering, historical conversion or
 loyalty/activity calculation. OLD models retain each legacy fallback independently.
 The remaining legacy recommendation dependency is customer/profile/contact fields
-from Заказы.csv: phone, email, discount card (M02-15). Catalog and settings inputs
+from orders.csv: phone, email, discount card (M02-15). Catalog and settings inputs
 also remain. Mass export no longer requires interaction schemas when both embedded
 contracts suffice; reading orders for contacts is still permitted and explicit.
 Print recommendations and M02-12 shadow publication isolation are unchanged.
@@ -1212,11 +1212,11 @@ The NEW recommendation data sources are now:
 
 - Behavior: model checkpoint (SeenItemsIndex + InteractionAnalytics).
 - Contacts: an explicitly supplied CustomersAPI profile snapshot.
-- Catalog: Номенклатура.csv.
-- Settings: Настройки.
+- Catalog: nomenclature.csv.
+- Settings: user_settings.
 
 With both embedded behavior contracts and `customer_contacts=...`, mass export
-does not require Заказы.csv, Просмотры.csv or Избранное.csv. Without the contact
+does not require orders.csv, views.csv or favorites.csv. Without the contact
 index, the old Orders contact loader remains; old checkpoints retain their behavior
 fallbacks. No source switch or PyQt integration is performed automatically.
 
@@ -1348,7 +1348,7 @@ Manual acceptance, reusing the EXISTING snapshot:
 
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_customer_profiles.py inspect `
-  --manifest '.\ВходныеДанные\MindboxRaw\customer_profile_snapshots\81d6d546865946d788c93e79be17de77\manifest.json' `
+  --manifest '.\input_data\MindboxRaw\customer_profile_snapshots\81d6d546865946d788c93e79be17de77\manifest.json' `
   --progress-every 100000
 ```
 
@@ -1403,18 +1403,18 @@ All source paths are resolved before changing cwd. A `TemporaryDirectory` contai
 
 ```text
 <temp_root>/
-  ВходныеДанные/Номенклатура.csv   # only the catalog is copied
-  Настройки/                    # current settings copied if present
-  Модель/.staging/
-  Модель/runs/<generation>/mappings.json, bprmf.pt
-  Модель/current.json
+  input_data/nomenclature.csv   # only the catalog is copied
+  user_settings/                    # current settings copied if present
+  model/.staging/
+  model/runs/<generation>/mappings.json, bprmf.pt
+  model/current.json
   recommendations.xlsx
   format1.csv
   Kanzler.ML.csv
 ```
 
-`Config.data_dir` is an absolute temporary catalog directory. `Заказы.csv`,
-`Просмотры.csv`, and `Избранное.csv` are physically absent and checked before export.
+`Config.data_dir` is an absolute temporary catalog directory. `orders.csv`,
+`views.csv`, and `favorites.csv` are physically absent and checked before export.
 The new inference/export pathway does not require them when seen, analytics and
 contacts are supplied. Synthetic regression spies also forbid legacy sources,
 contact extraction, conversion, seen and activity CSV helpers.
@@ -1444,7 +1444,7 @@ stage messages, Customers progress counts, aggregates and safe error codes.
 The only persistent smoke artifact is:
 
 ```text
-ВходныеДанные/MindboxReports/recommendation_smoke/<run_id>/report.json
+input_data/MindboxReports/recommendation_smoke/<run_id>/report.json
 ```
 
 Schema version 1 contains run/timestamp/batch/snapshot IDs, status/error code,
@@ -1462,9 +1462,9 @@ Manual acceptance (not run automatically by Codex):
 
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_recommendation_smoke.py `
-  --training-manifest ".\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json" `
-  --profile-manifest ".\ВходныеДанные\MindboxRaw\customer_profile_snapshots\81d6d546865946d788c93e79be17de77\manifest.json" `
-  --catalog ".\ВходныеДанные\Номенклатура.csv" `
+  --training-manifest ".\input_data\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json" `
+  --profile-manifest ".\input_data\MindboxRaw\customer_profile_snapshots\81d6d546865946d788c93e79be17de77\manifest.json" `
+  --catalog ".\input_data\nomenclature.csv" `
   --epochs 2 --max-export-users 100 --device cpu
 ```
 
@@ -1557,7 +1557,7 @@ Its repr excludes paths and source/quality details. Generation UUIDs are safe
 technical identities; user/product identities never enter result/report fields.
 
 Only publish writes an aggregate audit report:
-`ВходныеДанные/MindboxReports/production_training/<run_id>/report.json`.
+`input_data/MindboxReports/production_training/<run_id>/report.json`.
 Schema v1 contains batch/window, quality issue counts/rates, dataset counts,
 the shadow config allowlist without paths, training metrics, publication flags/
 generations/error and embedded artifact flags/dimensions. It uses the shared atomic
@@ -1577,8 +1577,8 @@ Safe manual preflight of the existing three-day acceptance batch (not run by Cod
 
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_production_train.py preflight `
-  --manifest ".\ВходныеДанные\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json" `
-  --catalog ".\ВходныеДанные\Номенклатура.csv"
+  --manifest ".\input_data\MindboxRaw\training_batches\dfe6c68e1109410aa47aeb3342877629\manifest.json" `
+  --catalog ".\input_data\nomenclature.csv"
 ```
 
 Production command template, only after selecting a full production period:
@@ -1586,7 +1586,7 @@ Production command template, only after selecting a full production period:
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_production_train.py publish `
   --manifest "<FINAL_PRODUCTION_BATCH_MANIFEST>" `
-  --catalog ".\ВходныеДанные\Номенклатура.csv" `
+  --catalog ".\input_data\nomenclature.csv" `
   --device cpu --allow-warn
 ```
 
@@ -1627,7 +1627,7 @@ not run automatically by Codex):
 
 ```powershell
 .\.venv310aboba\Scripts\python.exe scripts/mindbox_daily_batch.py finalize-prefix `
-  --state ".\ВходныеДанные\MindboxRaw\training_batches\149506b62787416492389a0b547a2c39\state.json" `
+  --state ".\input_data\MindboxRaw\training_batches\149506b62787416492389a0b547a2c39\state.json" `
   --timeout 3600
 ```
 
@@ -1654,3 +1654,43 @@ action system names also remain errors. Classification lists, ProductKey and
 ProductResolver namespaces, malformed mapped policy, weights, dates, quality gate
 and legacy CSV behavior are unchanged. The standalone full `adapt_action` remains
 strict regardless of whether its action name is mapped.
+
+
+## Ручной импорт нескольких частей
+
+Для Actions, Orders и Customers можно выбрать один или несколько JSON-файлов.
+Количество частей независимо: например, четыре Actions, два Orders и три Customers.
+Новый выбор заменяет прежний список; поле показывает имя либо количество файлов,
+а tooltip — полные пути. Тип определяется структурой JSON, а не именем файла.
+
+CLI принимает повторяемые параметры; одиночные параметры остаются совместимыми:
+
+~~~powershell
+python scripts/mindbox_manual_import.py interactions --since 2025-01-01 --until 2026-01-01 --actions actions_part1.json --actions actions_part2.json --orders orders_part1.json
+python scripts/mindbox_manual_import.py customers --customers customers_part1.json --customers customers_part2.json
+~~~
+
+Общий normalize_sources проверяет существование обычных файлов и дубли путей,
+возвращает tuple абсолютных Path в natural filename order: part1, part2, part10.
+При совпадении числового ключа порядок уточняется именем и полным путём.
+Backend применяет ту же нормализацию и при прямом вызове; порядок записей внутри
+JSON сохраняется.
+
+Actions и Orders копируются блоками по 1 МиБ в общий staging, с именами
+actions/actions_part_001.json, actions/actions_part_002.json и аналогично orders.
+Существующие iter_export/part_files и validate_interactions проверяют все части.
+В catalog.parts записывается фактическое количество. Только после полной проверки
+обеих групп происходит прежняя атомарная публикация каталога под storage_lock.
+Ошибка или кооперативная отмена удаляет staging и оставляет прежнюю пару.
+
+Все Customers последовательно читаются в одну временную SQLite-базу через прежние
+resolver и upsert. Повторный customer учитывается как один профиль; правила
+приоритета changeDateTimeUtc сохраняются. Итоговый count равен COUNT(*) profiles.
+os.replace заменяет customers.sqlite только после обработки всех частей.
+При ошибке или кооперативной отмене временная база удаляется, прежняя сохраняется.
+После принудительного завершения процесса незавершённые временные объекты, как
+и раньше, удаляются следующей операцией под блокировкой.
+
+Исходные JSON не изменяются и не перемещаются, части не склеиваются в один JSON.
+Журнал показывает источник и номер части; произвольный stdout и traceback
+по-прежнему не отображаются автоматически.

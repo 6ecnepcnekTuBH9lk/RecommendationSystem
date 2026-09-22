@@ -817,7 +817,7 @@ def test_manual_gui_shared_selection_independent_customers_and_validation(window
     for name, editor in window.mb_manual_files.items():
         path = tmp_path / (name + ".json")
         path.write_text("{}", encoding="utf-8")
-        editor.setText(str(path))
+        ui.set_manual_files(window, name, [path])
     fields = window.mb_selection_fields
     fields["view_action_system_names"].setText("CustomView")
     if kind == "customers":
@@ -858,7 +858,7 @@ def canonical_manual_files(window, root):
     for name in ("actions", "orders"):
         path = root / (name + ".json")
         path.write_text("{}")
-        window.mb_manual_files[name].setText(str(path))
+        ui.set_manual_files(window, name, [path])
     window.mb_manual_since.setDate(QDate(2026, 1, 1))
     window.mb_manual_until.setDate(QDate(2026, 7, 1))
     wait_until(lambda: not window.mb_controller.tasks)
@@ -912,7 +912,7 @@ def test_manual_button_rejects_invalid_input_without_starting_process(window, tm
     elif invalid == "selection":
         window.mb_selection_fields["view_action_system_names"].setText("")
     else:
-        window.mb_manual_files["orders"].clear()
+        window.mb_manual_paths["orders"] = ()
     window.mb_controller.start_manual("interactions")
     wait_until(lambda: not window.mb_controller.tasks)
     assert not FakeProcess.instances
@@ -960,7 +960,7 @@ def test_reference_options_and_background_process(window, monkeypatch, tmp_path)
 def test_manual_cancel_no_api_resume(window, tmp_path):
     path = tmp_path / "customers.json"
     path.write_text('{"customers": []}', encoding="utf-8")
-    window.mb_manual_files["customers"].setText(str(path))
+    ui.set_manual_files(window, "customers", [path])
     window.mb_controller.start_manual("customers")
     window.mb_controller.cancel()
     window.mb_process.finish(1, True)
@@ -975,9 +975,76 @@ def test_independent_manual_import_preserves_pending_api_resume(window, tmp_path
     window.mb_controller.resume_path = state
     path = tmp_path / "customers.json"
     path.write_text('{"customers": []}', encoding="utf-8")
-    window.mb_manual_files["customers"].setText(str(path))
+    ui.set_manual_files(window, "customers", [path])
     window.mb_controller.start_manual("customers")
     window.mb_process.finish(1)
     assert window.mb_controller.resume_path == state
     window.mb_controller.resume()
     assert window.mb_process.arguments == ui.resume_arguments(state)
+
+
+def test_manual_multiselect_replaces_separate_path_state(window, tmp_path, monkeypatch):
+    paths = [tmp_path / f"part{number}.json" for number in (10, 2, 1)]
+    for path in paths:
+        path.write_text("{}")
+    picker = Mock(return_value=([str(path) for path in paths], "JSON (*.json)"))
+    monkeypatch.setattr(ui.QFileDialog, "getOpenFileNames", picker)
+    monkeypatch.setattr(ui.QFileDialog, "getOpenFileName", lambda *a: pytest.fail("Expected multiselect"))
+    window.mb_manual_controls[1].click()
+    expected = (paths[2], paths[1], paths[0])
+    assert window.mb_manual_paths == {"actions": expected, "orders": (), "customers": ()}
+    assert window.mb_manual_files["actions"].isReadOnly()
+    assert window.mb_manual_files["actions"].text() == "Выбрано файлов: 3"
+    assert window.mb_manual_files["actions"].toolTip().splitlines() == [str(path) for path in expected]
+    picker.return_value = ([str(paths[0])], "JSON (*.json)")
+    window.mb_manual_controls[1].click()
+    assert window.mb_manual_paths["actions"] == (paths[0],)
+    assert window.mb_manual_files["actions"].text() == paths[0].name
+    window.mb_manual_controls[3].click()
+    window.mb_manual_controls[5].click()
+    assert window.mb_manual_paths["orders"] == window.mb_manual_paths["customers"] == (paths[0],)
+    assert window.mb_manual_paths["actions"] == (paths[0],)
+
+
+@pytest.mark.parametrize("kind", ["interactions", "customers"])
+def test_manual_multipart_cli_arguments_and_safe_progress(window, tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(ui, "_manual_preflight", lambda dates: None)
+    for name, numbers in (("actions", [10, 2, 1, 3]), ("orders", [2, 1]), ("customers", [10, 2, 1])):
+        paths = []
+        for number in numbers:
+            path = tmp_path / f"{name}{number}.json"
+            path.write_text("{}")
+            paths.append(path)
+        ui.set_manual_files(window, name, paths)
+    window.mb_controller.start_manual(kind)
+    wait_until(lambda: window.mb_process is not None)
+    args = window.mb_process.arguments
+    for name in ("actions", "orders", "customers"):
+        actual = [args[index + 1] for index, value in enumerate(args) if value == "--" + name]
+        wanted = kind == "interactions" and name != "customers" or kind == name
+        assert actual == ([str(path) for path in window.mb_manual_paths[name]] if wanted else [])
+    window.mb_process.feed("Копирование actions: файл 2 из 4\nПроверка orders ...\nПроверка customers: файл 2 из 3\n")
+    window.mb_process.feed("Копирование actions: файл 2 из 4 PRIVATE\nПроверка PRIVATE\nTraceback PRIVATE\n")
+    text = window.mb_log.toPlainText()
+    assert "файл 2 из 4" in text and "файл 2 из 3" in text
+    assert "PRIVATE" not in text
+    window.mb_process.finish(1)
+    wait_until(lambda: not window.mb_controller.tasks)
+
+
+@pytest.mark.parametrize("missing", ["actions", "orders", "customers"])
+@pytest.mark.parametrize("invalid", ["empty", "deleted", "directory"])
+def test_manual_missing_parts_never_launch(window, tmp_path, missing, invalid):
+    for name in ("actions", "orders", "customers"):
+        path = tmp_path / f"{name}.json"
+        path.write_text("{}")
+        ui.set_manual_files(window, name, [path])
+    if invalid == "empty":
+        window.mb_manual_paths[missing] = ()
+    elif invalid == "deleted":
+        window.mb_manual_paths[missing][0].unlink()
+    else:
+        window.mb_manual_paths[missing] = (tmp_path,)
+    window.mb_controller.start_manual("customers" if missing == "customers" else "interactions")
+    assert not FakeProcess.instances
+    assert window.mb_controller.state != ui.LoadingState.RUNNING

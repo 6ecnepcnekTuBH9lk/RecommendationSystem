@@ -24,9 +24,9 @@ CLIENT_FIELDS = (
 def test_item_name_map_failed_read_does_not_publish_and_second_call_retries(
     tmp_path, monkeypatch
 ):
-    data_dir = tmp_path / "ВходныеДанные"
+    data_dir = tmp_path / "input_data"
     data_dir.mkdir()
-    (data_dir / "Номенклатура.csv").write_text(
+    (data_dir / "nomenclature.csv").write_text(
         "synthetic source",
         encoding="utf-8",
     )
@@ -70,9 +70,9 @@ def test_item_name_map_failed_read_does_not_publish_and_second_call_retries(
 def test_item_collection_map_failed_read_does_not_publish_and_second_call_retries(
     tmp_path, monkeypatch
 ):
-    data_dir = tmp_path / "ВходныеДанные"
+    data_dir = tmp_path / "input_data"
     data_dir.mkdir()
-    (data_dir / "Номенклатура.csv").write_text(
+    (data_dir / "nomenclature.csv").write_text(
         "synthetic source",
         encoding="utf-8",
     )
@@ -116,9 +116,9 @@ def test_item_collection_map_failed_read_does_not_publish_and_second_call_retrie
 def test_item_stock_map_failed_read_does_not_publish_and_second_call_retries(
     tmp_path, monkeypatch
 ):
-    data_dir = tmp_path / "ВходныеДанные"
+    data_dir = tmp_path / "input_data"
     data_dir.mkdir()
-    (data_dir / "Номенклатура.csv").write_text(
+    (data_dir / "nomenclature.csv").write_text(
         "synthetic source",
         encoding="utf-8",
     )
@@ -162,7 +162,7 @@ def test_item_stock_map_failed_read_does_not_publish_and_second_call_retries(
 def test_persistent_item_name_read_error_keeps_client_search_in_degraded_mode(
     tmp_path, monkeypatch
 ):
-    data_dir = tmp_path / "ВходныеДанные"
+    data_dir = tmp_path / "input_data"
     data_dir.mkdir()
     pd.DataFrame([
         {
@@ -171,17 +171,17 @@ def test_persistent_item_name_read_error_keeps_client_search_in_degraded_mode(
             "Дата": "01.01.2026",
         }
     ]).to_csv(
-        data_dir / "Заказы.csv",
+        data_dir / "orders.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
     )
-    nomenclature_path = data_dir / "Номенклатура.csv"
+    nomenclature_path = data_dir / "nomenclature.csv"
     nomenclature_path.write_text("synthetic source", encoding="utf-8")
 
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
-    (model_dir / "Рекомендации.xlsx").write_bytes(b"synthetic workbook")
+    (model_dir / "recommendations.xlsx").write_bytes(b"synthetic workbook")
     monkeypatch.chdir(tmp_path)
 
     recommendations = pd.DataFrame([
@@ -298,7 +298,7 @@ def test_persistent_item_name_read_error_keeps_client_search_in_degraded_mode(
 def test_persistent_item_collection_read_error_keeps_client_search_in_degraded_mode(
     tmp_path, monkeypatch
 ):
-    data_dir = tmp_path / "ВходныеДанные"
+    data_dir = tmp_path / "input_data"
     data_dir.mkdir()
     pd.DataFrame([
         {
@@ -307,17 +307,17 @@ def test_persistent_item_collection_read_error_keeps_client_search_in_degraded_m
             "Дата": "01.01.2026",
         }
     ]).to_csv(
-        data_dir / "Заказы.csv",
+        data_dir / "orders.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
     )
-    nomenclature_path = data_dir / "Номенклатура.csv"
+    nomenclature_path = data_dir / "nomenclature.csv"
     nomenclature_path.write_text("synthetic source", encoding="utf-8")
 
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
-    (model_dir / "Рекомендации.xlsx").write_bytes(b"synthetic workbook")
+    (model_dir / "recommendations.xlsx").write_bytes(b"synthetic workbook")
     monkeypatch.chdir(tmp_path)
 
     recommendations = pd.DataFrame([

@@ -212,6 +212,74 @@ def test_manual_failure_and_cancel_leave_current_database(tmp_path):
     assert customers.database(tmp_path).read_bytes() == before
 
 
+def customer_parts(root):
+    paths = []
+    for number in (10, 2, 1):
+        path = root / f"customers_part{number}.json"
+        records = [customer_record(number), {**customer_record(99), "email": f"part{number}@example.test"}]
+        path.write_text(json.dumps({"customers": records}), encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+def test_manual_customers_multipart_unique_profiles_and_natural_upsert(tmp_path, monkeypatch):
+    run(tmp_path)
+    paths = customer_parts(tmp_path)
+    original = customers._upsert
+    seen = []
+    def upsert(connection, raw, resolver):
+        seen.append(raw["ids"]["mindboxId"])
+        original(connection, raw, resolver)
+    monkeypatch.setattr(customers, "_upsert", upsert)
+    messages = []
+    customers.import_full(tmp_path, paths, progress=messages.append)
+    assert seen == [1, 99, 2, 99, 10, 99]
+    assert customers.customer_summary(tmp_path)["count"] == 4
+    with customers.connect(customers.database(tmp_path)) as connection:
+        profiles = dict(connection.execute("SELECT id, raw FROM profiles"))
+    assert set(profiles) == {"1", "2", "10", "99"}
+    assert json.loads(profiles["99"])["email"] == "part10@example.test"
+    assert "Проверка customers: файл 2 из 3" in messages
+    assert all(str(tmp_path) not in message for message in messages)
+    assert not list((tmp_path / "canonical").glob(".customers-*"))
+
+
+@pytest.mark.parametrize("failure", ["invalid", "cancel", "duplicate", "empty"])
+def test_manual_customers_multipart_failure_preserves_database(tmp_path, monkeypatch, failure):
+    run(tmp_path)
+    paths = customer_parts(tmp_path)
+    customers.import_full(tmp_path, paths[0])
+    before = customers.database(tmp_path).read_bytes()
+    if failure == "invalid":
+        paths[0].write_text('{"customers": [', encoding="utf-8")  # Part 10 is last.
+    if failure == "duplicate":
+        paths.append(str(paths[0]))
+    if failure == "empty":
+        paths = []
+    original = customers._upsert
+    cancelled = False
+    def upsert(connection, raw, resolver):
+        nonlocal cancelled
+        original(connection, raw, resolver)
+        if failure == "cancel" and raw["ids"]["mindboxId"] == 2:
+            cancelled = True  # After inserting a record from the second part.
+    monkeypatch.setattr(customers, "_upsert", upsert)
+    with pytest.raises(InterruptedError if failure == "cancel" else Exception):
+        customers.import_full(tmp_path, paths, cancelled=lambda: cancelled)
+    assert customers.database(tmp_path).read_bytes() == before
+    assert not list((tmp_path / "canonical").glob(".customers-*"))
+
+
+def test_manual_customers_cli_multiple_parts(tmp_path):
+    from scripts.mindbox_manual_import import main
+    run(tmp_path)
+    args = ["customers", "--raw-root", str(tmp_path)]
+    for path in customer_parts(tmp_path):
+        args.extend(["--customers", str(path)])
+    assert main(args) == 0
+    assert customers.customer_summary(tmp_path)["count"] == 4
+
+
 def test_abandoned_manual_database_cleanup_is_confined(tmp_path):
     run(tmp_path)
     abandoned = tmp_path / "canonical/.customers-interrupted.sqlite"

@@ -1,5 +1,7 @@
 """Хранение raw-байтов; здесь нет HTTP и преобразования бизнес-данных."""
 
+from Application.paths import INPUT_DATA_DIR
+
 import gzip
 import logging
 import os
@@ -13,7 +15,7 @@ from pathlib import Path
 from .exceptions import MindboxDownloadError
 
 
-DEFAULT_RAW_ROOT = Path(__file__).resolve().parents[2] / "ВходныеДанные" / "MindboxRaw"
+DEFAULT_RAW_ROOT = INPUT_DATA_DIR / "MindboxRaw"
 EXPORT_NAMES = ("actions", "orders", "customers", "customer_merges")
 COPY_BUFFER_SIZE = 1024 * 1024
 logger = logging.getLogger(__name__)

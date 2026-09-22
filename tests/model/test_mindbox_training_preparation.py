@@ -52,7 +52,7 @@ def data(tmp_path, monkeypatch):
               for user, item in [("SECRET_A", "001236_FULL"), ("SECRET_C", "001235_FULL")]]
     raw = {"actions": actions, "orders": orders, "customer_merges": []}
     dirs = {name: tmp_path / name / "20260101_000000" for name in raw}
-    catalog = tmp_path / "Номенклатура.csv"
+    catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры\n001234\n001235\n001236\n", encoding="utf-8-sig")
     return raw, dirs, catalog
 
@@ -137,7 +137,7 @@ def test_end_to_end_raw_vs_legacy_equal_date_order_and_custom_weights(data, tmp_
     views = pd.DataFrame({"MindboxID": ["SECRET_A"] * 9, "КодНоменклатуры": ["001234"] * 9,
                           "ТипТовара": ["Номенклатура"] * 9, "Дата": ["2026-01-01"] * 9})
     fav = pd.DataFrame({"MindboxID": ["SECRET_A"], "КодНоменклатуры": ["001235"], "Дата": ["2026-01-01"]})
-    for name, frame in (("Заказы", orders), ("Просмотры", views), ("Избранное", fav)):
+    for name, frame in (("orders", orders), ("views", views), ("favorites", fav)):
         frame.to_csv(tmp_path / f"{name}.csv", sep="|", encoding="utf-8-sig", index=False)
     old = legacy.prepare_training_data_from_csv(cfg)
     new = result.prepared_data
@@ -294,7 +294,7 @@ def test_training_core_integration(data, tmp_path, monkeypatch):
     model, splits = legacy.train_prepared_data(cfg, result.prepared_data, torch.device("cpu"))
     assert splits is result.prepared_data.splits
     assert model is not None
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
 
 
 @pytest.mark.parametrize("malformed", [False, True])

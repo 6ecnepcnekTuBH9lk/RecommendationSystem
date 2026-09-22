@@ -3,6 +3,8 @@
 Use a dedicated process: legacy training log suppression is process-wide.
 """
 
+from Application.paths import INPUT_DATA_DIR
+
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -26,8 +28,8 @@ from .training_metrics import TrainingRunMetrics
 from .training_quality import TrainingQualityReport, TrainingQualityDiagnostics, evaluate_training_quality
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODEL_ROOT = PROJECT_ROOT / "Модель"
-REPORT_ROOT = PROJECT_ROOT / "ВходныеДанные" / "MindboxReports" / "production_training"
+MODEL_ROOT = PROJECT_ROOT / "model"
+REPORT_ROOT = INPUT_DATA_DIR / "MindboxReports" / "production_training"
 
 
 @dataclass(frozen=True)
@@ -105,7 +107,7 @@ def _current(model_dir):
 
 
 def _prepare(manifest, raw_root, catalog, cfg):
-    if catalog.name != "Номенклатура.csv" or catalog.parent != Path(cfg.data_dir).resolve():
+    if catalog.name != "nomenclature.csv" or catalog.parent != Path(cfg.data_dir).resolve():
         raise _Failure("PREPARATION_FAILED")
     batch = load_chunked_training_batch(manifest, raw_root=raw_root, require_complete=True)
     prepared = prepare_training_data_from_chunked_batch(batch, raw_root=raw_root, catalog_path=catalog,

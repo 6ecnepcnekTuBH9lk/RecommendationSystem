@@ -135,7 +135,7 @@ def _store_window(stores):
 
 def test_store_city_successfully_replaces_old_table(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "СписокМагазинов.csv"
+    source = tmp_path / "input_data" / "stores.csv"
     _write_pipe_csv(source, [{"Магазин": "NEW"}], ["Магазин"])
     window = _store_window(["OLD"])
 
@@ -161,7 +161,7 @@ def test_store_city_missing_source_keeps_empty_contract(tmp_path, monkeypatch):
 
 def test_store_city_valid_empty_source_replaces_old_table(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "СписокМагазинов.csv"
+    source = tmp_path / "input_data" / "stores.csv"
     _write_pipe_csv(source, [], ["Магазин"])
     window = _store_window(["OLD"])
 
@@ -176,7 +176,7 @@ def test_store_city_valid_empty_source_replaces_old_table(tmp_path, monkeypatch)
 
 def test_store_city_unreadable_source_preserves_old_table(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "СписокМагазинов.csv"
+    source = tmp_path / "input_data" / "stores.csv"
     source.parent.mkdir()
     source.write_text("synthetic source exists", encoding="utf-8")
     window = _store_window(["OLD"])
@@ -203,11 +203,11 @@ def _kind_window(values):
 
 def test_multi_source_kind_successfully_replaces_old_values(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     for filename, value in (
-        ("Заказы.csv", "A"),
-        ("Просмотры.csv", "B"),
-        ("Избранное.csv", "C"),
+        ("orders.csv", "A"),
+        ("views.csv", "B"),
+        ("favorites.csv", "C"),
     ):
         _write_pipe_csv(
             input_dir / filename,
@@ -223,14 +223,14 @@ def test_multi_source_kind_successfully_replaces_old_values(tmp_path, monkeypatc
 
 def test_multi_source_kind_allows_missing_optional_source(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     _write_pipe_csv(
-        input_dir / "Заказы.csv",
+        input_dir / "orders.csv",
         [{"ВидНоменклатуры": "A"}],
         ["ВидНоменклатуры"],
     )
     _write_pipe_csv(
-        input_dir / "Избранное.csv",
+        input_dir / "favorites.csv",
         [{"ВидНоменклатуры": "C"}],
         ["ВидНоменклатуры"],
     )
@@ -245,8 +245,8 @@ def test_multi_source_kind_read_error_does_not_publish_partial_values(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
-    for filename in ("Заказы.csv", "Просмотры.csv", "Избранное.csv"):
+    input_dir = tmp_path / "input_data"
+    for filename in ("orders.csv", "views.csv", "favorites.csv"):
         _write_pipe_csv(
             input_dir / filename,
             [{"ВидНоменклатуры": filename}],
@@ -256,7 +256,7 @@ def test_multi_source_kind_read_error_does_not_publish_partial_values(
     real_read_csv = data_processing_tab.pd.read_csv
 
     def read_with_failure(path, *args, **kwargs):
-        if Path(path).name == "Избранное.csv":
+        if Path(path).name == "favorites.csv":
             raise PermissionError("synthetic unreadable kind source")
         return real_read_csv(path, *args, **kwargs)
 
@@ -272,7 +272,7 @@ def test_startup_reference_failure_is_reported_and_does_not_stop_other_refreshes
     tmp_path, monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "Заказы.csv"
+    source = tmp_path / "input_data" / "orders.csv"
     source.parent.mkdir()
     source.write_text("synthetic source exists", encoding="utf-8")
 
@@ -358,7 +358,7 @@ def test_nomenclature_reference_successfully_replaces_old_values(
     tmp_path, monkeypatch, function_name, widget_name, column, values
 ):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "Номенклатура.csv"
+    source = tmp_path / "input_data" / "nomenclature.csv"
     _write_pipe_csv(source, [{column: value} for value in reversed(values)], [column])
     widget = _ListWidget(["OLD"])
     window = SimpleNamespace(**{widget_name: widget})
@@ -404,7 +404,7 @@ def test_nomenclature_reference_unreadable_source_preserves_old_values(
     tmp_path, monkeypatch, function_name, widget_name
 ):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "Номенклатура.csv"
+    source = tmp_path / "input_data" / "nomenclature.csv"
     source.parent.mkdir()
     source.write_text("synthetic source exists", encoding="utf-8")
     widget = _ListWidget(["OLD"])
@@ -445,7 +445,7 @@ def test_valid_empty_nomenclature_reference_may_publish_empty_values(
     tmp_path, monkeypatch, function_name, widget_name, column
 ):
     monkeypatch.chdir(tmp_path)
-    source = tmp_path / "ВходныеДанные" / "Номенклатура.csv"
+    source = tmp_path / "input_data" / "nomenclature.csv"
     _write_pipe_csv(source, [], [column])
     widget = _ListWidget(["OLD"])
     window = SimpleNamespace(**{widget_name: widget})

@@ -5,13 +5,13 @@ from Application.model import BPRMF
 
 
 _INVALID_INTERACTION_SCHEMA_CASES = [
-    ("Заказы.csv", "MindboxID"),
-    ("Заказы.csv", "КодНоменклатуры"),
-    ("Просмотры.csv", "MindboxID"),
-    ("Просмотры.csv", "КодНоменклатуры"),
-    ("Просмотры.csv", "ТипТовара"),
-    ("Избранное.csv", "MindboxID"),
-    ("Избранное.csv", "КодНоменклатуры"),
+    ("orders.csv", "MindboxID"),
+    ("orders.csv", "КодНоменклатуры"),
+    ("views.csv", "MindboxID"),
+    ("views.csv", "КодНоменклатуры"),
+    ("views.csv", "ТипТовара"),
+    ("favorites.csv", "MindboxID"),
+    ("favorites.csv", "КодНоменклатуры"),
 ]
 
 
@@ -36,16 +36,16 @@ def _write_training_csvs(data_dir, *, with_interaction):
     views = pd.DataFrame(columns=["MindboxID", "КодНоменклатуры", "ТипТовара"])
     favorites = pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"])
 
-    orders.to_csv(data_dir / "Заказы.csv", sep="|", index=False, encoding="utf-8-sig")
-    views.to_csv(data_dir / "Просмотры.csv", sep="|", index=False, encoding="utf-8-sig")
+    orders.to_csv(data_dir / "orders.csv", sep="|", index=False, encoding="utf-8-sig")
+    views.to_csv(data_dir / "views.csv", sep="|", index=False, encoding="utf-8-sig")
     favorites.to_csv(
-        data_dir / "Избранное.csv", sep="|", index=False, encoding="utf-8-sig"
+        data_dir / "favorites.csv", sep="|", index=False, encoding="utf-8-sig"
     )
 
 
 def _training_frames():
     return {
-        "Заказы.csv": pd.DataFrame(
+        "orders.csv": pd.DataFrame(
             [
                 {
                     "MindboxID": "synthetic-user",
@@ -54,7 +54,7 @@ def _training_frames():
                 }
             ]
         ),
-        "Просмотры.csv": pd.DataFrame(
+        "views.csv": pd.DataFrame(
             [
                 {
                     "MindboxID": "synthetic-user",
@@ -63,7 +63,7 @@ def _training_frames():
                 }
             ]
         ),
-        "Избранное.csv": pd.DataFrame(
+        "favorites.csv": pd.DataFrame(
             [
                 {
                     "MindboxID": "synthetic-user",
@@ -261,12 +261,12 @@ def test_training_rejects_invalid_interaction_schema(
     assert result is False
     assert filename in diagnostic
     assert missing_column in diagnostic
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
 
 
 @pytest.mark.parametrize(
     "empty_filename",
-    ["Заказы.csv", "Просмотры.csv", "Избранное.csv"],
+    ["orders.csv", "views.csv", "favorites.csv"],
 )
 def test_training_accepts_schema_valid_empty_individual_source(
     tmp_path,
@@ -310,9 +310,9 @@ def test_training_orders_without_quantity_use_one(tmp_path, monkeypatch):
     monkeypatch.setattr(BPRMF.torch.cuda, "is_available", lambda: False)
 
     frames = _training_frames()
-    frames["Заказы.csv"] = frames["Заказы.csv"].drop(columns=["Количество"])
-    frames["Просмотры.csv"] = frames["Просмотры.csv"].iloc[0:0]
-    frames["Избранное.csv"] = frames["Избранное.csv"].iloc[0:0]
+    frames["orders.csv"] = frames["orders.csv"].drop(columns=["Количество"])
+    frames["views.csv"] = frames["views.csv"].iloc[0:0]
+    frames["favorites.csv"] = frames["favorites.csv"].iloc[0:0]
     data_dir = tmp_path / "training_data"
     _write_training_frames(data_dir, frames)
     captured_events = []
@@ -372,7 +372,7 @@ def test_training_rejects_zero_byte_interaction_source(
 
     data_dir = tmp_path / "training_data"
     _write_training_frames(data_dir, _training_frames())
-    (data_dir / "Просмотры.csv").write_bytes(b"")
+    (data_dir / "views.csv").write_bytes(b"")
 
     result = BPRMF._train_in_this_process(
         BPRMF.TrainConfig(data_dir=str(data_dir))
@@ -380,7 +380,7 @@ def test_training_rejects_zero_byte_interaction_source(
     diagnostic = capsys.readouterr().out
 
     assert result is False
-    assert "Просмотры.csv" in diagnostic
+    assert "views.csv" in diagnostic
     assert "MindboxID" in diagnostic
 
 
@@ -394,13 +394,13 @@ def test_training_reports_controlled_failure_when_required_csv_is_missing(
 
     data_dir = tmp_path / "training_data"
     data_dir.mkdir()
-    (data_dir / "Заказы.csv").write_text("synthetic", encoding="utf-8")
-    (data_dir / "Просмотры.csv").write_text("synthetic", encoding="utf-8")
+    (data_dir / "orders.csv").write_text("synthetic", encoding="utf-8")
+    (data_dir / "views.csv").write_text("synthetic", encoding="utf-8")
 
     result = BPRMF._train_in_this_process(BPRMF.TrainConfig(data_dir=str(data_dir)))
 
     assert result is False
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
 
 
 def test_training_reports_controlled_failure_when_interactions_are_empty(
@@ -417,7 +417,7 @@ def test_training_reports_controlled_failure_when_interactions_are_empty(
     result = BPRMF._train_in_this_process(BPRMF.TrainConfig(data_dir=str(data_dir)))
 
     assert result is False
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
 
 
 def test_training_reports_success_only_after_artifacts_are_saved(tmp_path, monkeypatch):

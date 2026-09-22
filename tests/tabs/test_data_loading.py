@@ -35,9 +35,9 @@ def _nomenclature_frame(code, name, collection, stock):
 @pytest.mark.parametrize("failure", [None, "schema", "replace", "write"])
 def test_nomenclature_publication_and_cache_invalidation(tmp_path, monkeypatch, failure):
     monkeypatch.chdir(tmp_path)
-    directory = tmp_path / "ВходныеДанные"
+    directory = tmp_path / "input_data"
     directory.mkdir()
-    target = directory / "Номенклатура.csv"
+    target = directory / "nomenclature.csv"
     _nomenclature_frame("old-code", "OLD name", "OLD collection", "1").to_csv(target, sep="|", index=False)
     before = target.read_bytes()
     source = tmp_path / "source.csv"

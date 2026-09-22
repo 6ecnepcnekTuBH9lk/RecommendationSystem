@@ -4,6 +4,8 @@ The process-wide cwd/stdout scopes are intentionally unsuitable for GUI workers.
 Only the existing serializer/exporter writes artifacts, all below the temp root.
 """
 
+from Application.paths import INPUT_DATA_DIR
+
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -25,8 +27,8 @@ from .seen_items import build_seen_items_index, seen_items_from_checkpoint
 from .mindbox_shadow_training import _atomic_report
 from .training_quality import TrainingQualityDiagnostics, evaluate_training_quality
 
-REPORT_ROOT = Path(__file__).resolve().parents[2] / "ВходныеДанные" / "MindboxReports" / "recommendation_smoke"
-INTERACTION_FILES = ("Заказы.csv", "Просмотры.csv", "Избранное.csv")
+REPORT_ROOT = INPUT_DATA_DIR / "MindboxReports" / "recommendation_smoke"
+INTERACTION_FILES = ("orders.csv", "views.csv", "favorites.csv")
 
 
 def _tree_state(root):
@@ -105,8 +107,8 @@ def run_recommendation_smoke(training_manifest, profile_manifest, *, raw_root, c
     source_cwd = Path.cwd()
     training_manifest, profile_manifest, raw_root, catalog_path = (
         Path(p).resolve() for p in (training_manifest, profile_manifest, raw_root, catalog_path))
-    settings_source = Path(settings_source or source_cwd / "Настройки").resolve()
-    production_root = source_cwd / "Модель"
+    settings_source = Path(settings_source or source_cwd / "user_settings").resolve()
+    production_root = source_cwd / "model"
     report_root = REPORT_ROOT.resolve()
     run_id = uuid.uuid4().hex
     report = {"schema_version": 1, "run_id": run_id, "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -131,11 +133,11 @@ def run_recommendation_smoke(training_manifest, profile_manifest, *, raw_root, c
         state_captured = True
         temporary = tempfile.TemporaryDirectory(prefix="mindbox-recommendation-smoke-")
         temp_root = Path(temporary.name).resolve()
-        data_dir = temp_root / "ВходныеДанные"
+        data_dir = temp_root / "input_data"
         data_dir.mkdir()
-        shutil.copyfile(catalog_path, data_dir / "Номенклатура.csv")
+        shutil.copyfile(catalog_path, data_dir / "nomenclature.csv")
         if settings_source.exists():
-            shutil.copytree(settings_source, temp_root / "Настройки")
+            shutil.copytree(settings_source, temp_root / "user_settings")
         temp_cfg = replace(cfg, data_dir=str(data_dir))
         # Do not retain arbitrary legacy logs in memory/on disk or leak paths/PII.
         with open(os.devnull, "w") as sink, _working_directory(temp_root), redirect_stdout(sink), redirect_stderr(sink):
@@ -143,7 +145,7 @@ def run_recommendation_smoke(training_manifest, profile_manifest, *, raw_root, c
             batch = load_chunked_training_batch(training_manifest, raw_root=raw_root, require_complete=True)
             report["training_batch_id"] = batch.batch_id
             prepared = prepare_training_data_from_chunked_batch(batch, raw_root=raw_root,
-                catalog_path=data_dir / "Номенклатура.csv", train_config=temp_cfg, diagnose=True)
+                catalog_path=data_dir / "nomenclature.csv", train_config=temp_cfg, diagnose=True)
             d = prepared.diagnostics
             quality = evaluate_training_quality(prepared.prepared_data, TrainingQualityDiagnostics(
                 actions_view=d.actions_view, actions_favorite=d.actions_favorite,
@@ -169,7 +171,7 @@ def run_recommendation_smoke(training_manifest, profile_manifest, *, raw_root, c
                 core._save_artifacts(temp_cfg, prepared.prepared_data.mappings, model,
                     seen_items=build_seen_items_index(prepared.prepared_data), analytics=prepared.prepared_data.analytics)
                 report["artifact"]["saved"] = True
-                mappings, checkpoint = core._load_artifacts(str(temp_root / "Модель"))
+                mappings, checkpoint = core._load_artifacts(str(temp_root / "model"))
                 report["artifact"]["reloaded"] = True
                 seen = seen_items_from_checkpoint(checkpoint)
                 analytics = analytics_from_checkpoint(checkpoint)
@@ -197,7 +199,7 @@ def run_recommendation_smoke(training_manifest, profile_manifest, *, raw_root, c
                     raise ValueError("Interaction CSV isolation failed")
                 announce("Export: STARTED")
                 core.export_recommendations_excel(out_xlsx=str(temp_root / "recommendations.xlsx"),
-                    model_dir=str(temp_root / "Модель"), customer_contacts=contacts, device_str="cpu", filter_seen=True,
+                    model_dir=str(temp_root / "model"), customer_contacts=contacts, device_str="cpu", filter_seen=True,
                     max_export_users=max_export_users, out_csv_format1=str(temp_root / "format1.csv"),
                     out_csv_kanzler_ml=str(temp_root / "Kanzler.ML.csv"))
                 stage = "VALIDATION_FAILED"

@@ -145,7 +145,7 @@ def test_finalize_prefix_reuses_six_days_and_prepares(tmp_path, partial_actions,
     manifest = tmp_path / "training_batches" / final.batch_id / "manifest.json"
     assert api.load_chunked_training_batch(manifest, raw_root=tmp_path, require_complete=True) == final
     assert api.load_chunked_training_batch(manifest.with_name("state.json"), raw_root=tmp_path) == final
-    catalog = tmp_path / "Номенклатура.csv"
+    catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры\n123456\n", encoding="utf-8-sig")
     prepared = api.prepare_training_data_from_chunked_batch(final, raw_root=tmp_path, catalog_path=catalog,
         train_config=core.TrainConfig(data_dir=str(tmp_path)), diagnose=True)

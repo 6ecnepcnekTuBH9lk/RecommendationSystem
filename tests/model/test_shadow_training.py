@@ -31,7 +31,7 @@ def isolation(tmp_path, monkeypatch):
     # PyTorch interop initialization is process-global and can only run once.
     monkeypatch.setattr(torch, "set_num_interop_threads", lambda count: None)
     monkeypatch.setattr(orchestration, "REPORT_ROOT", tmp_path / "reports")
-    production = tmp_path / "Модель"
+    production = tmp_path / "model"
     for name in ("current.json", "runs/old/model.pt", ".staging/old/sentinel"):
         path = production / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,7 @@ def config(tmp_path, **kwargs):
 def test_metrics_legacy_parity_and_determinism(prepared, tmp_path, features):
     cfg = config(tmp_path, use_item_features=features)
     pd.DataFrame({"КодНоменклатуры": prepared.mappings.idx2item, "Марка": ["a", "b", "a"]}).to_csv(
-        tmp_path / "Номенклатура.csv", sep="|", encoding="utf-8-sig", index=False)
+        tmp_path / "nomenclature.csv", sep="|", encoding="utf-8-sig", index=False)
     core._set_seed(cfg.seed)
     old_model, old_splits = core.train_prepared_data(cfg, prepared, torch.device("cpu"))
     core._set_seed(cfg.seed)
@@ -134,7 +134,7 @@ def synthetic_manifest(tmp_path, problem):
     manifest = root / "training_batches" / batch.batch_id / "manifest.json"
     manifest.parent.mkdir(parents=True)
     daily._atomic_write(manifest, batch)
-    catalog = tmp_path / "Номенклатура.csv"
+    catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры|Марка\n001234|a\n001235|b\n001236|a\n", encoding="utf-8-sig")
     return manifest, root, catalog
 

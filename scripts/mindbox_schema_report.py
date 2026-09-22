@@ -13,7 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("export", choices=("actions", "orders", "customers", "customer_merges", "all"))
     parser.add_argument("--input-dir", type=Path,
                         help="Каталог с part-файлами; для all — общий корень с подкаталогами четырёх типов")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "MindboxReports")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "input_data" / "MindboxReports")
     return parser
 
 

@@ -35,8 +35,8 @@ def main(argv=None):
     for command in ("preflight", "publish"):
         sub = commands.add_parser(command)
         sub.add_argument("--manifest", type=Path, required=True)
-        sub.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "Номенклатура.csv")
-        sub.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "ВходныеДанные" / "MindboxRaw")
+        sub.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "input_data" / "nomenclature.csv")
+        sub.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "input_data" / "MindboxRaw")
         sub.add_argument("--device", choices=("cpu",), default="cpu")
         if command == "publish":
             sub.add_argument("--allow-warn", action="store_true")

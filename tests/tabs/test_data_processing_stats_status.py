@@ -115,9 +115,9 @@ def test_real_orders_read_error_does_not_end_with_false_success(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
-    (input_dir / "Заказы.csv").write_text("synthetic", encoding="utf-8")
+    (input_dir / "orders.csv").write_text("synthetic", encoding="utf-8")
 
     window = SimpleNamespace(order_full_output_layout=_Layout())
     statuses = []

@@ -172,7 +172,7 @@ def test_training_data_preparation_error_does_not_start_process(monkeypatch):
 
 def test_store_city_map_uses_existing_in_memory_map(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     (settings_dir / "filter_settings.json").write_text(
         "{not valid json",
@@ -203,7 +203,7 @@ def test_store_city_map_missing_settings_file_returns_empty(tmp_path, monkeypatc
 
 def test_store_city_map_reads_valid_settings_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     settings_path = settings_dir / "filter_settings.json"
     settings_path.write_text(
@@ -222,7 +222,7 @@ def test_store_city_map_reads_valid_settings_file(tmp_path, monkeypatch):
 
 def test_store_city_map_existing_unreadable_settings_raises(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     settings_path = settings_dir / "filter_settings.json"
     settings_path.write_text("synthetic existing settings", encoding="utf-8")
@@ -239,7 +239,7 @@ def test_store_city_map_existing_unreadable_settings_raises(tmp_path, monkeypatc
 
 def test_store_city_map_malformed_json_raises(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     settings_path = settings_dir / "filter_settings.json"
     settings_path.write_text("{not valid json", encoding="utf-8")
@@ -251,7 +251,7 @@ def test_store_city_map_malformed_json_raises(tmp_path, monkeypatch):
 
 def test_store_city_map_unexpected_json_structure_raises(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     settings_path = settings_dir / "filter_settings.json"
     settings_path.write_text("[]", encoding="utf-8")
@@ -263,13 +263,13 @@ def test_store_city_map_unexpected_json_structure_raises(tmp_path, monkeypatch):
 
 def test_broken_store_city_settings_does_not_start_training(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
-    (input_dir / "Заказы.csv").write_text(
+    (input_dir / "orders.csv").write_text(
         "Магазин|Дата\nМагазин 1|2025-01-01\n",
         encoding="utf-8",
     )
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     settings_path = settings_dir / "filter_settings.json"
     settings_path.write_text(
@@ -377,7 +377,7 @@ def test_successful_config_preparation_always_starts_with_config(tmp_path, monke
 
 def test_degraded_weather_preparation_still_starts_qprocess(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         [
@@ -388,16 +388,16 @@ def test_degraded_weather_preparation_still_starts_qprocess(tmp_path, monkeypatc
                 "Дата": "2025-01-15",
             }
         ]
-    ).to_csv(input_dir / "Заказы.csv", sep="|", index=False)
+    ).to_csv(input_dir / "orders.csv", sep="|", index=False)
     pd.DataFrame(
         columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
-    ).to_csv(input_dir / "Просмотры.csv", sep="|", index=False)
+    ).to_csv(input_dir / "views.csv", sep="|", index=False)
     pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
-        input_dir / "Избранное.csv", sep="|", index=False
+        input_dir / "favorites.csv", sep="|", index=False
     )
     pd.DataFrame(
         [{"Дата": "2025-01-15", "ПогодныеУсловия": "Ясно"}]
-    ).to_csv(input_dir / "Погода.csv", sep="|", index=False)
+    ).to_csv(input_dir / "weather.csv", sep="|", index=False)
 
     window = _window_with_training_values()
     window._store_city_map = {"STORE-1": "Москва"}
@@ -433,7 +433,7 @@ def test_duplicate_normalized_weather_headers_still_start_qprocess(
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
     pd.DataFrame(
         [
@@ -444,14 +444,14 @@ def test_duplicate_normalized_weather_headers_still_start_qprocess(
                 "Дата": "2025-01-15",
             }
         ]
-    ).to_csv(input_dir / "Заказы.csv", sep="|", index=False)
+    ).to_csv(input_dir / "orders.csv", sep="|", index=False)
     pd.DataFrame(
         columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
-    ).to_csv(input_dir / "Просмотры.csv", sep="|", index=False)
+    ).to_csv(input_dir / "views.csv", sep="|", index=False)
     pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
-        input_dir / "Избранное.csv", sep="|", index=False
+        input_dir / "favorites.csv", sep="|", index=False
     )
-    (input_dir / "Погода.csv").write_text(
+    (input_dir / "weather.csv").write_text(
         "Дата| Дата |Город|ПогодныеУсловия|СредняяТемпература|КоличествоОсадков\n"
         "2025-01-15|2025-01-15|Москва|Ясно|1.5|0\n",
         encoding="utf-8",

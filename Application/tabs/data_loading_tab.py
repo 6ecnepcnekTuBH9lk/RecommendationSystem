@@ -1,7 +1,10 @@
 """Mindbox loading UI. CLI owns exports; this module only orchestrates jobs."""
 
+from Application.paths import ICONS_DIR, INPUT_DATA_DIR
+
 import codecs
 import json
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -17,13 +20,22 @@ from PyQt6.QtWidgets import (QDateEdit, QFileDialog, QFrame, QGridLayout, QHBoxL
 
 from Application.tabs.data_processing_tab import create_csv_loading_section
 from Application.loading_errors import error_record, format_error, safe_message
+from Application.mindbox.manual_sources import normalize_sources
 from Application.mindbox.selection import DEFAULT_SELECTION, MindboxSelectionConfig, SELECTION_OPTIONS
 
 from Application.settings.set_status import (set_status_error, set_status_ok,
                                              set_status_processing, schedule_status_reset)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RAW_ROOT = PROJECT_ROOT / "ВходныеДанные" / "MindboxRaw"
+RAW_ROOT = INPUT_DATA_DIR / "MindboxRaw"
+
+
+def set_manual_files(ui, name, sources):
+    paths = normalize_sources(sources)
+    ui.mb_manual_paths[name] = paths
+    editor = ui.mb_manual_files[name]
+    editor.setText(paths[0].name if len(paths) == 1 else f"Выбрано файлов: {len(paths)}")
+    editor.setToolTip("\n".join(str(path) for path in paths))
 
 
 class LoadingState(Enum):
@@ -395,9 +407,8 @@ def create_data_loading_widgets_tab(aboba):
     aboba.mb_start_button.setIcon(
         QIcon(
             str(
-                PROJECT_ROOT
-                / "Картинки"
-                / "ПолучитьДанные.png"
+                ICONS_DIR
+                / "get_data.png"
             )
         )
     )
@@ -411,9 +422,8 @@ def create_data_loading_widgets_tab(aboba):
     aboba.mb_cancel_button.setIcon(
         QIcon(
             str(
-                PROJECT_ROOT
-                / "Картинки"
-                / "Неудача.png"
+                ICONS_DIR
+                / "failure.png"
             )
         )
     )
@@ -428,9 +438,8 @@ def create_data_loading_widgets_tab(aboba):
     aboba.mb_customers_button.setIcon(
         QIcon(
             str(
-                PROJECT_ROOT
-                / "Картинки"
-                / "Обновить.png"
+                ICONS_DIR
+                / "refresh.png"
             )
         )
     )
@@ -501,9 +510,8 @@ def create_data_loading_widgets_tab(aboba):
     aboba.mb_resume_button.setIcon(
         QIcon(
             str(
-                PROJECT_ROOT
-                / "Картинки"
-                / "Продолжить.png"
+                ICONS_DIR
+                / "continue.png"
             )
         )
     )
@@ -533,12 +541,13 @@ def create_data_loading_widgets_tab(aboba):
     manual = QGridLayout()
 
     aboba.mb_manual_files = {}
+    aboba.mb_manual_paths = {name: () for name in ("actions", "orders", "customers")}
     aboba.mb_manual_controls = []
 
     for row, (name, icon_name) in enumerate((
-            ("Actions", "Действия.png"),
-            ("Orders", "Заказ.png"),
-            ("Customers", "Клиенты.png"),
+            ("Actions", "actions.png"),
+            ("Orders", "order.png"),
+            ("Customers", "customers.png"),
     )):
         editor = QLineEdit()
         editor.setReadOnly(True)
@@ -553,8 +562,7 @@ def create_data_loading_widgets_tab(aboba):
         button.setIcon(
             QIcon(
                 str(
-                    PROJECT_ROOT
-                    / "Картинки"
+                    ICONS_DIR
                     / icon_name
                 )
             )
@@ -565,17 +573,20 @@ def create_data_loading_widgets_tab(aboba):
 
         def choose(
                 _checked=False,
-                target=editor,
+                source_name=name.lower(),
         ):
-            path, _ = QFileDialog.getOpenFileName(
+            paths, _ = QFileDialog.getOpenFileNames(
                 aboba,
                 "Выберите Mindbox JSON",
                 "",
                 "JSON (*.json)",
             )
 
-            if path:
-                target.setText(path)
+            if paths:
+                try:
+                    set_manual_files(aboba, source_name, paths)
+                except ValueError as exc:
+                    aboba.mb_controller._error(str(exc))
 
         button.clicked.connect(choose)
 
@@ -888,9 +899,10 @@ class _LoadingController(QObject):
         a = self.ui
         try:
             names = ("actions", "orders") if kind == "interactions" else ("customers",)
-            paths = {name: a.mb_manual_files[name].text() for name in names}
-            if any(not value or not Path(value).is_file() for value in paths.values()):
+            paths = {name: a.mb_manual_paths[name] for name in names}
+            if any(not value for value in paths.values()):
                 raise ValueError("Выберите необходимые JSON-файлы для ручного импорта.")
+            paths = {name: normalize_sources(value) for name, value in paths.items()}
             args = ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_manual_import.py"), kind]
             if kind == "interactions":
                 selection = MindboxSelectionConfig(**{
@@ -901,8 +913,9 @@ class _LoadingController(QObject):
                 dates = [w.date().toString("yyyy-MM-dd") for w in
                          (a.mb_manual_since, a.mb_manual_until)]
                 args = manual_interactions_arguments(*dates, selection=selection)
-            for name, path in paths.items():
-                args.extend(("--" + name, path))
+            for name, sources in paths.items():
+                for path in sources:
+                    args.extend(("--" + name, str(path)))
         except ValueError as exc:
             self._error(str(exc))
             return
@@ -955,6 +968,17 @@ class _LoadingController(QObject):
             self._consume_line(line.rstrip("\r"))
 
     def _consume_line(self, line):
+        # Manual progress is a closed grammar: no paths, record values or arbitrary stdout.
+        if self.stage in ("manual_interactions", "manual_customers"):
+            match = re.fullmatch(r"(Копирование|Проверка) (actions|orders|customers): файл ([0-9]{1,9}) из ([0-9]{1,9})", line)
+            if match:
+                part, total = int(match[3]), int(match[4])
+                if 1 <= part <= total:
+                    self._log(f"{match[1]} {match[2]}: файл {part} из {total}")
+                return
+            if line in ("Проверка actions ...", "Проверка orders ..."):
+                self._log(line)
+                return
         if self.stage == "reference_csv" and line.startswith("Reference: "):
             try:
                 self.reference_result = json.loads(line[len("Reference: "):])

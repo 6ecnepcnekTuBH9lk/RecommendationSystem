@@ -1,5 +1,7 @@
 """Raw JSON -> статистика схемы. Значения не сохраняются, кроме systemName действий."""
 
+from Application.paths import INPUT_DATA_DIR
+
 import html
 import json
 import os
@@ -14,7 +16,7 @@ from .raw_reader import DEFAULT_RAW_ROOT, EXPORT_ROOTS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REPORT_ROOT = PROJECT_ROOT / "ВходныеДанные" / "MindboxReports"
+DEFAULT_REPORT_ROOT = INPUT_DATA_DIR / "MindboxReports"
 FOCUS_FIELDS = {
     "actions": ("actionTemplate", "customer", "product", "products", "productCategories", "order", "customFields"),
     "orders": ("ids", "firstAction", "customer", "lines", "payments", "appliedPromotions",

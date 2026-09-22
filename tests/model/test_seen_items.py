@@ -74,7 +74,7 @@ def test_save_rejects_dimension_mismatch_before_publication(tmp_path, monkeypatc
     index = SeenItemsIndex(1, 3, np.array([0, 0], dtype=np.int64), np.array([], dtype=np.int64))
     with pytest.raises(SeenItemsError):
         core._save_artifacts(core.TrainConfig(), prepared.mappings, object(), seen_items=index)
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
 
 
 @pytest.mark.parametrize("embedded", [False, True])
@@ -122,7 +122,7 @@ def test_checkpoint_corruption_rejected(prepared, corrupt):
 
 
 def test_csv_seen_parity_with_nomenclature_view_rule(tmp_path, events):
-    for name, kind in (("Заказы", "PURCHASE"), ("Избранное", "FAVORITE"), ("Просмотры", "VIEW")):
+    for name, kind in (("orders", "PURCHASE"), ("favorites", "FAVORITE"), ("views", "VIEW")):
         rows = [{"MindboxID": e.customer_id, "КодНоменклатуры": e.item_id, "Количество": 1,
                  "Дата": e.timestamp.strftime("%Y-%m-%d"), "ТипТовара": "Номенклатура"}
                 for e in events if e.interaction_type.value == kind]

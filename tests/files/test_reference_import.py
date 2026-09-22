@@ -25,7 +25,7 @@ def test_reference_snapshot_atomic_replace(tmp_path, monkeypatch, failure):
     source.write_text("Город,Широта,Долгота\nSynthetic,55.75,37.61\n", encoding="utf-8-sig")
     output = tmp_path / "out"
     output.mkdir()
-    destination = output / "КоординатыГородов.csv"
+    destination = output / "city_coordinates.csv"
     destination.write_bytes(b"previous snapshot")
     if failure == "schema":
         source.write_text("wrong\nvalue\n", encoding="utf-8")

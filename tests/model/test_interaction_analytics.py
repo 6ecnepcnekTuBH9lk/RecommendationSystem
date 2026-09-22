@@ -43,7 +43,7 @@ def test_first_view_repeated_purchases_and_compact_state():
 
 
 def test_catalog_last_duplicate_and_no_history_kind_fallback(tmp_path):
-    path = tmp_path / "Номенклатура.csv"
+    path = tmp_path / "nomenclature.csv"
     path.write_text("КодНоменклатуры|ВидНоменклатуры\na|old\na|shirt\nb|shirt\n", encoding="utf-8-sig")
     kinds = load_catalog_kinds(path)
     assert kinds["a"] == "shirt"
@@ -69,11 +69,11 @@ def test_conversion_csv_parity_activity_and_fallback(tmp_path):
         c.add(user, item, kind, date, qty)
         frames[kind].append({"MindboxID": user, "КодНоменклатуры": item, "Дата": date.strftime("%Y-%m-%d"),
                              "Количество": qty, "ТипТовара": "Номенклатура"})
-    for kind, filename in (("VIEW", "Просмотры"), ("FAVORITE", "Избранное"), ("PURCHASE", "Заказы")):
+    for kind, filename in (("VIEW", "views"), ("FAVORITE", "favorites"), ("PURCHASE", "orders")):
         pd.DataFrame(frames[kind]).to_csv(tmp_path / f"{filename}.csv", sep="|", encoding="utf-8-sig", index=False)
     kinds = {"a": "shirt", "b": "shirt", "c": "", "new": "shirt", "unknown": "other"}
     pd.DataFrame({"КодНоменклатуры": list(kinds), "ВидНоменклатуры": list(kinds.values())}).to_csv(
-        tmp_path / "Номенклатура.csv", sep="|", encoding="utf-8-sig", index=False)
+        tmp_path / "nomenclature.csv", sep="|", encoding="utf-8-sig", index=False)
     a = c.finalize(mappings(("u1", "u2", "u3"), ("a", "b", "c")), kinds)
     assert a.viewers.tolist() == [2, 1, 1]
     assert a.converted.tolist() == [1, 0, 1]

@@ -48,7 +48,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 @dataclass
 class TrainConfig:
     # processed csv folder (created in your "dataset processing" tab)
-    data_dir: str = "ВходныеДанные"
+    data_dir: str = "input_data"
 
     # implicit feedback weights
     w_view_item: float = 0.1
@@ -116,7 +116,8 @@ def _ensure_dir(path: str) -> None:
 
 
 def _path_csv(data_dir: str, name: str) -> str:
-    return os.path.join(data_dir, f"{name}.csv")
+    names = {"Заказы": "orders", "Просмотры": "views", "Избранное": "favorites", "Номенклатура": "nomenclature"}
+    return os.path.join(data_dir, f"{names.get(name, name)}.csv")
 
 
 class _MissingInteractionSourcesError(FileNotFoundError):
@@ -386,7 +387,7 @@ def _build_item_feature_matrix(
     if not bool(getattr(cfg, "use_item_features", True)):
         return {}, item_feat_mat
 
-    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    nom_path = os.path.join(data_dir, "nomenclature.csv")
     if not os.path.isfile(nom_path):
         return {}, item_feat_mat
 
@@ -879,7 +880,7 @@ def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
 
 
 def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_items: SeenItemsIndex | None = None,
-                    analytics=None, model_dir="Модель", _before_commit=None, _publication_state=None) -> str:
+                    analytics=None, model_dir="model", _before_commit=None, _publication_state=None) -> str:
     # Internal hooks let production orchestration guard the final switch and
     # observe an interrupted commit without duplicating serialization.
     receipt = _publication_state if _publication_state is not None else {}
@@ -949,7 +950,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
         # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
         # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
         train_item_meta: Dict[str, Dict[str, str]] = {}
-        nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
+        nom_path = os.path.join(cfg.data_dir, "nomenclature.csv")
         if os.path.isfile(nom_path):
             nom = _read_csv_pipe(nom_path)
             nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
@@ -1049,7 +1050,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
         raise
 
 
-def _load_artifacts(model_dir: str = "Модель") -> Tuple[Dict[str, List[str]], dict]:
+def _load_artifacts(model_dir: str = "model") -> Tuple[Dict[str, List[str]], dict]:
     mappings_path, ckpt_path = _resolve_model_artifact_paths(model_dir)
 
     if not (os.path.isfile(mappings_path) and os.path.isfile(ckpt_path)):
@@ -1106,10 +1107,10 @@ def _parse_season_base_and_year(coll: str) -> Tuple[Optional[str], Optional[int]
 
 def _load_selected_collections_from_settings() -> List[str]:
     """
-    Берём выбранные пользователем актуальные коллекции из Настройки/filter_settings.json.
+    Берём выбранные пользователем актуальные коллекции из user_settings/filter_settings.json.
     Ключ: collections_selected (или старый seasons_selected).
     """
-    path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
+    path = os.path.join(os.getcwd(), "user_settings", "filter_settings.json")
     if not os.path.isfile(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -1150,7 +1151,7 @@ def _similarity_score(old_meta: Dict[str, str], new_meta: Dict[str, str]) -> flo
 
 
 def _load_item_names(data_dir: str) -> Dict[str, str]:
-    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    nom_path = os.path.join(data_dir, "nomenclature.csv")
     if not os.path.isfile(nom_path):
         return {}
     nom = _read_csv_pipe(nom_path)
@@ -1225,10 +1226,10 @@ def _format_stock_value(v) -> str:
 
 def _load_item_stocks(data_dir: str) -> Dict[str, str]:
     """
-    Загружает остатки из ВходныеДанные/Номенклатура.csv:
+    Загружает остатки из input_data/nomenclature.csv:
       КодНоменклатуры -> Остаток
     """
-    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    nom_path = os.path.join(data_dir, "nomenclature.csv")
     if not os.path.isfile(nom_path):
         return {}
 
@@ -1535,6 +1536,9 @@ def _load_train_config_from_json(path: str) -> TrainConfig:
         ):
             raise TypeError(f"Train config field '{key}' must be a list of strings")
 
+        if key == "data_dir":
+            # Legacy config compatibility only; preserve separators and all other path components.
+            value = re.sub(r"(^|[/\\])ВходныеДанные(?=[/\\]|$)", r"\1input_data", value)
         setattr(cfg, key, value)
 
     return cfg
@@ -2064,9 +2068,9 @@ def _validate_export_xlsx(path: str) -> None:
 # -------------------------------------------ВЫГРУЗКА В ЭКСЕЛЬ----------------------------------------------------------
 @torch.no_grad()
 def export_recommendations_excel(
-    out_xlsx: str = "Модель/Рекомендации.xlsx",
+    out_xlsx: str = "model/recommendations.xlsx",
     k: Optional[int] = None,
-    model_dir: str = "Модель",
+    model_dir: str = "model",
     include_item_names: bool = True,
     include_scores: bool = True,
     include_discount_card: bool = True,
@@ -2075,8 +2079,8 @@ def export_recommendations_excel(
     filter_seen: bool = True,
     batch_users: int = 1024,
     chunksize_seen: int = 500_000,
-    out_csv_format1: Optional[str] = "Модель/Рекомендации_format1.csv",
-    out_csv_kanzler_ml: Optional[str] = "Модель/Kanzler.ML.csv",
+    out_csv_format1: Optional[str] = "model/recommendations_format1.csv",
+    out_csv_kanzler_ml: Optional[str] = "model/Kanzler.ML.csv",
     export_item_kinds: Optional[List[str]] = None,
     max_export_users: Optional[int] = 1000,
     device_str: str = "cuda",
@@ -2379,7 +2383,7 @@ def export_recommendations_excel(
 
     device = torch.device(device_str if (device_str == "cpu" or torch.cuda.is_available()) else "cpu")
     model, cfg, num_users, num_items = _build_model_from_ckpt(ckpt, device)
-    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
+    data_dir = getattr(cfg, "data_dir", "input_data")
     embedded_analytics = analytics_from_checkpoint(ckpt)
     if embedded_analytics is None or (filter_seen and seen_items_from_checkpoint(ckpt) is None):
         _require_interaction_sources(data_dir)
@@ -2400,8 +2404,8 @@ def export_recommendations_excel(
             if prev is None or year > prev[1]:
                 active_by_base[base] = (coll, year)
 
-    # читаем актуальную номенклатуру (текущая ВходныеДанные)
-    catalog_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    # читаем актуальную номенклатуру (текущая input_data)
+    catalog_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
     new_meta_by_code: Dict[str, Dict[str, str]] = {}
     codes_by_collection: Dict[str, List[str]] = {}
     index_by_collection_key: Dict[str, Dict[Tuple[str, str, str], List[str]]] = {}
@@ -2611,10 +2615,10 @@ def export_recommendations_excel(
 
     # Остатки берём из текущей номенклатуры, потому что после сезонного сопоставления
     # код товара может быть заменён на товар из актуальной коллекции.
-    current_data_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+    current_data_dir = os.path.join(os.getcwd(), "input_data")
     current_nomenclature_path = os.path.join(
         current_data_dir,
-        "Номенклатура.csv",
+        "nomenclature.csv",
     )
     if os.path.isfile(current_nomenclature_path):
         item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)

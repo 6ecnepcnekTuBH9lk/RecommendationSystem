@@ -84,7 +84,7 @@ def test_contacts_not_accepted_or_written_by_model_publication(tmp_path, monkeyp
     model = core.BPRMF(1, 1, cfg.embedding_dim)
     with pytest.raises(TypeError):
         core._save_artifacts(cfg, maps, model, customer_contacts=index)
-    assert not (tmp_path / "Модель").exists()
+    assert not (tmp_path / "model").exists()
     core._save_artifacts(cfg, maps, model)
     _, ckpt = core._load_artifacts()
     assert all(s not in repr(ckpt) for s in ("pii@example.test", "89161234567", "PII_CARD", "CustomerContact", "CustomerRecord"))

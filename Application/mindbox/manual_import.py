@@ -11,17 +11,13 @@ import uuid
 
 from .adapters import adapt_customer_merge
 from .adapters.customer_contacts import adapt_customer_contact_candidate
-from .customers_stream import iter_json_records
 from .customer_profile_snapshot import CustomerProfileSnapshot
 from .daily_training_batch import load_chunked_training_batch
 from .identity import CustomerIdResolver
-from .raw_reader import EXPORT_ROOTS, iter_export, part_files, _unique_object
+from .raw_reader import iter_export, part_files, _unique_object
+from .manual_sources import ManualImportError, normalize_sources
 from .selection import DEFAULT_SELECTION, MindboxSelectionConfig
 from .training_batch import TrainingBatchWindow, TrainingBatchError
-
-
-class ManualImportError(ValueError):
-    """Only static categories, never source values or identities."""
 
 
 def check_cancel(cancelled):
@@ -70,29 +66,32 @@ def _resolver(source, root, cancelled=None):
 
 def _copy_validate(source, staging, name, *, cancelled=None, progress=None, resolver=None, validate=None):
     """Copy bytes in bounded chunks, validate one record at a time before commit."""
+    sources = normalize_sources(source)
     directory = staging / name
     directory.mkdir()
-    target = directory / f"{name}_part_001.json"
     try:
-        with Path(source).open("rb") as incoming, target.open("xb") as outgoing:
-            total = os.fstat(incoming.fileno()).st_size
-            copied = 0
-            while True:
-                check_cancel(cancelled)
-                chunk = incoming.read(1024 * 1024)
-                if not chunk:
-                    break
-                outgoing.write(chunk)
-                copied += len(chunk)
-                if progress:
-                    progress(f"Копирование {name}: {copied} / {total} bytes")
-            outgoing.flush()
-            os.fsync(outgoing.fileno())
+        for number, path in enumerate(sources, 1):
+            check_cancel(cancelled)
+            if progress:
+                progress(f"Копирование {name}: файл {number} из {len(sources)}")
+            target = directory / f"{name}_part_{number:03d}.json"
+            with path.open("rb") as incoming, target.open("xb") as outgoing:
+                while True:
+                    check_cancel(cancelled)
+                    chunk = incoming.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    outgoing.write(chunk)
+                outgoing.flush()
+                os.fsync(outgoing.fileno())
+        check_cancel(cancelled)
+        if progress:
+            progress(f"Проверка {name} ...")
         if validate is not None:
             validate(directory)
-            return
+            return len(sources)
         count = 0
-        for raw in iter_json_records(target, EXPORT_ROOTS[name]):
+        for raw in iter_export(name, input_dir=directory):
             check_cancel(cancelled)
             if resolver is not None:
                 adapt_customer_contact_candidate(raw, resolver)
@@ -101,6 +100,8 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
                 progress(f"Проверка {name}: {count} записей")
         if progress:
             progress(f"Проверка {name} завершена: {count} записей")
+        check_cancel(cancelled)
+        return len(sources)
     except InterruptedError:
         raise
     except Exception:
@@ -118,6 +119,7 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
     root = Path(raw_root).resolve()
     if not isinstance(selection, MindboxSelectionConfig) or not isinstance(window, TrainingBatchWindow):
         raise ManualImportError("Требуются корректные период и правила отбора.")
+    actions, orders = normalize_sources(actions), normalize_sources(orders)
     since, until = window.interaction_since, window.interaction_until
     with store.storage_lock(root):
         check_cancel(cancelled)
@@ -144,8 +146,9 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".manual-interactions-", dir=root / "canonical") as temporary:
             staging = Path(temporary)
+            counts = {}
             for name, path in (("actions", actions), ("orders", orders)):
-                _copy_validate(path, staging, name, cancelled=cancelled, progress=progress,
+                counts[name] = _copy_validate(path, staging, name, cancelled=cancelled, progress=progress,
                                validate=lambda directory: store.validate_interactions(
                                    name, directory, resolver, selection, cancelled=cancelled, progress=progress))
             check_cancel(cancelled)
@@ -154,7 +157,7 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
             pair = {"since": since.isoformat(), "until": until.isoformat(), "updated": store.stamp()}
             for name in ("actions", "orders"):
                 pair[name] = {**{key: pair[key] for key in ("since", "until", "updated")},
-                              "directory": (target / name).relative_to(root).as_posix(), "parts": 1,
+                              "directory": (target / name).relative_to(root).as_posix(), "parts": counts[name],
                               "source_kind": "MANUAL", "export_id": None, "operation": "MANUAL"}
             data.update(manual_interactions=pair, schema_version=2, revision=uuid.uuid4().hex, selection=asdict(selection))
             os.replace(staging, target)
@@ -194,9 +197,9 @@ def import_customers(customers, *, raw_root, cancelled=None, progress=None):
     merges = source.components[0].export
     with tempfile.TemporaryDirectory(prefix=".manual-", dir=parent) as temporary:
         staging = Path(temporary)
-        _copy_validate(customers, staging, "customers", cancelled=cancelled, progress=progress, resolver=resolver)
+        count = _copy_validate(customers, staging, "customers", cancelled=cancelled, progress=progress, resolver=resolver)
         snapshot = CustomerProfileSnapshot(
-            snapshot_id, datetime.now(timezone.utc).isoformat(), f"customer_profile_snapshots/{snapshot_id}/customers", 1,
+            snapshot_id, datetime.now(timezone.utc).isoformat(), f"customer_profile_snapshots/{snapshot_id}/customers", count,
             merges.relative_directory, merges.parts_count, schema_version=2, source_kind="MANUAL",
             merge_source_training_batch_id=source.batch_id,
         )
