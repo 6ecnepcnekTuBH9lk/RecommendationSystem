@@ -11,7 +11,7 @@ from unittest.mock import Mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QByteArray, QObject, QProcess, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QDate, QObject, QProcess, QThread, QTimer, pyqtSignal
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QLabel, QTabWidget, QWidget
 
@@ -160,7 +160,7 @@ def finish_training(window, state):
 
 
 def test_initial_widgets_offer_only_full_download(window):
-    assert window.mb_progress.text() == "Не запущено"
+    assert window.mb_progress.text() == "Прогресс загрузки"
     assert window.mb_progress.isTextVisible()
     assert window.mb_customers_button.isEnabled()
     texts = [label.text() for label in window.tabs.widget(0).findChildren(QLabel)]
@@ -200,7 +200,7 @@ def test_persisted_summary_restored_after_each_outcome(window, tmp_path, monkeyp
     for source, data in saved.items():
         field = "merges" if source == "customer_merges" else source
         assert getattr(window, f"mb_{field}_status_label").text() == ui._summary_text(data)
-    assert window.mb_progress.text() == "Не запущено"
+    assert window.mb_progress.text() == "Прогресс загрузки"
 
 
 def test_customer_cancel_resume_preserves_independent_job(window, tmp_path):
@@ -280,7 +280,7 @@ def test_state_ready_pending_failed_counts(window, tmp_path):
     assert window.mb_orders_status_label.text() == "Загружено дней: 2 из 14"
     assert window.mb_customers_status_label.text() == "Файлов не найдено"
     assert window.mb_progress.maximum() == 0
-    assert window.mb_progress.text() == "Идёт загрузка"
+    assert window.mb_progress.text() == "Идёт загрузка..."
 
 
 @pytest.mark.parametrize("content", [None, "{incomplete"])
@@ -335,7 +335,7 @@ def test_success_requires_verified_final_manifest(window, tmp_path):
     assert window.mb_controller.state == ui.LoadingState.SUCCESS
     assert len(FakeProcess.instances) == 1
     assert window.mb_process is None
-    assert window.mb_progress.text() == "Не запущено"
+    assert window.mb_progress.text() == "Прогресс загрузки"
     assert window.mb_start_button.isEnabled()
 
 
@@ -377,7 +377,7 @@ def test_customers_run_independently_and_snapshot_required(window, tmp_path, mon
     wait_until(lambda: not window.mb_controller.tasks)
     assert checked == [path]
     assert window.mb_controller.state == ui.LoadingState.SUCCESS
-    assert window.mb_progress.text() == "Не запущено"
+    assert window.mb_progress.text() == "Прогресс загрузки"
 
 
 def test_cancel_preserves_state_and_parts_then_resume_uses_exact_path(window, tmp_path):
@@ -507,7 +507,7 @@ def test_customer_failure_preserves_completed_training_manifest(window, tmp_path
     wait_until(lambda: not controller.tasks)
     assert controller.state == ui.LoadingState.FAILED
     assert window.mb_customers_status_label.text() == "Файлов не найдено"
-    assert window.mb_progress.text() == "Не запущено"
+    assert window.mb_progress.text() == "Прогресс загрузки"
     assert state.with_name("manifest.json").read_bytes() == original
 
 
@@ -579,12 +579,12 @@ def test_new_job_resets_component_progress_format(window, tmp_path, resume):
     controller.start()
     window.mb_process.feed(f"State: {state}\n")
     wait_until(lambda: not controller.tasks)
-    assert window.mb_progress.format() == "Идёт загрузка"
+    assert window.mb_progress.format() == "Идёт загрузка..."
     window.mb_process.finish(1)
     wait_until(lambda: not controller.tasks)
     (controller.resume if resume else controller.start)()
-    assert window.mb_progress.text() == "Идёт загрузка"
-    assert window.mb_progress.format() == "Идёт загрузка"
+    assert window.mb_progress.text() == "Идёт загрузка..."
+    assert window.mb_progress.format() == "Идёт загрузка..."
     assert (window.mb_progress.minimum(), window.mb_progress.maximum(), window.mb_progress.value()) == (0, 0, 0)
 
 
@@ -700,9 +700,12 @@ def test_manual_gui_shared_selection_independent_customers_and_validation(window
         # Customers does not consume interaction dates or selection.
         fields["view_action_system_names"].setText("")
         window.mb_interaction_until.setDate(window.mb_interaction_since.date())
+        window.mb_manual_until.setDate(window.mb_manual_since.date())
     checked = Mock(return_value="valid")
     monkeypatch.setattr(ui, "_validate_manual_result", checked)
+    monkeypatch.setattr(ui, "_manual_preflight", lambda dates: None)
     window.mb_controller.start_manual(kind)
+    wait_until(lambda: window.mb_process is not None)
     process = window.mb_process
     assert "mindbox_manual_import.py" in process.arguments[3]
     assert process.arguments[4] == kind
@@ -718,6 +721,98 @@ def test_manual_gui_shared_selection_independent_customers_and_validation(window
     checked.assert_called_once_with(manifest, "manual_" + kind)
     assert len(FakeProcess.instances) == 1  # No Customers export after manual interactions.
     assert all(widget.isEnabled() for widget in window.mb_manual_controls)
+
+
+def canonical_manual_files(window, root):
+    from Application.mindbox import canonical_storage as store
+    staged = root / "merges"
+    staged.mkdir()
+    (staged / "customer_merges_part_001.json").write_text('{"customerMerges": []}')
+    with store.storage_lock(root):
+        store.publish(root, "customer_merges", datetime(2025, 1, 1, tzinfo=timezone.utc),
+                      datetime(2027, 1, 1, tzinfo=timezone.utc), staged)
+    for name in ("actions", "orders"):
+        path = root / (name + ".json")
+        path.write_text("{}")
+        window.mb_manual_files[name].setText(str(path))
+    window.mb_manual_since.setDate(QDate(2026, 1, 1))
+    window.mb_manual_until.setDate(QDate(2026, 7, 1))
+    wait_until(lambda: not window.mb_controller.tasks)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+@pytest.mark.parametrize("resume_stage", ["training", "customers"])
+def test_manual_independent_period_runtime_summary_and_resume(window, tmp_path, monkeypatch, outcome, resume_stage):
+    canonical_manual_files(window, tmp_path)
+    window.mb_interaction_since.setDate(QDate(2026, 9, 1))
+    window.mb_interaction_until.setDate(QDate(2026, 9, 8))
+    controller = window.mb_controller
+    state = tmp_path / "canonical/jobs/pending/state.json"
+    controller.resume_path, controller.resume_stage = state, resume_stage
+    controller.refresh_persisted()
+    wait_until(lambda: not controller.tasks)
+    prior = {field: getattr(window, f"mb_{field}_status_label").text() for field in ("actions", "orders", "merges", "customers")}
+    monkeypatch.setattr(ui, "_validate_manual_result", lambda *args: None)
+    controller.start_manual("interactions")
+    wait_until(lambda: window.mb_process is not None)
+    process = window.mb_process
+    args = process.arguments
+    assert args[args.index("--since") + 1] == "2026-01-01"
+    assert args[args.index("--until") + 1] == "2026-07-01"
+    assert "--merge-since" not in args
+    for field in ("actions", "orders"):
+        assert getattr(window, f"mb_{field}_status_label").text() == "Выполняется..."
+    for field in ("merges", "customers"):
+        assert getattr(window, f"mb_{field}_status_label").text() == prior[field]
+    if outcome == "success":
+        process.feed(f"Manifest: {tmp_path / 'canonical/training.json'}\n")
+    if outcome == "cancel":
+        controller.cancel()
+    process.finish(0 if outcome == "success" else 1)
+    wait_until(lambda: not controller.tasks)
+    assert controller.state == {"success": ui.LoadingState.SUCCESS, "failure": ui.LoadingState.FAILED,
+                                "cancel": ui.LoadingState.CANCELLED}[outcome]
+    assert controller.resume_path == state and controller.resume_stage == resume_stage
+    assert all(getattr(window, f"mb_{field}_status_label").text() == text for field, text in prior.items())
+
+
+@pytest.mark.parametrize("invalid", ["missing_merges", "insufficient_merges", "period", "selection", "file"])
+def test_manual_button_rejects_invalid_input_without_starting_process(window, tmp_path, invalid):
+    canonical_manual_files(window, tmp_path)
+    if invalid == "missing_merges":
+        (tmp_path / "canonical/catalog.json").unlink()
+    elif invalid == "insufficient_merges":
+        window.mb_manual_since.setDate(QDate(2024, 1, 1))
+    elif invalid == "period":
+        window.mb_manual_until.setDate(window.mb_manual_since.date())
+    elif invalid == "selection":
+        window.mb_selection_fields["view_action_system_names"].setText("")
+    else:
+        window.mb_manual_files["orders"].clear()
+    window.mb_controller.start_manual("interactions")
+    wait_until(lambda: not window.mb_controller.tasks)
+    assert not FakeProcess.instances
+    assert window.mb_controller.state != ui.LoadingState.RUNNING
+    if invalid.endswith("merges"):
+        assert "API Mindbox" in window.mb_log.toPlainText()
+    assert str(tmp_path) not in window.mb_log.toPlainText()
+
+
+def test_manual_preflight_cancel_does_not_launch_late_process(window, tmp_path, monkeypatch):
+    import threading
+    canonical_manual_files(window, tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    def preflight(dates):
+        entered.set()
+        release.wait(5)
+    monkeypatch.setattr(ui, "_manual_preflight", preflight)
+    window.mb_controller.start_manual("interactions")
+    wait_until(entered.is_set)
+    window.mb_controller.cancel()
+    release.set()
+    wait_until(lambda: not window.mb_controller.tasks)
+    assert window.mb_controller.state == ui.LoadingState.CANCELLED
+    assert not FakeProcess.instances
 
 
 def test_reference_options_and_background_process(window, monkeypatch, tmp_path):

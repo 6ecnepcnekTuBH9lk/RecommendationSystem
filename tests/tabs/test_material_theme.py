@@ -3,6 +3,7 @@
 import os
 import socket
 from unittest.mock import Mock
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -27,12 +28,19 @@ def app():
 def test_material_light_dark_light(app, caplog):
     apply_app_theme(app, False)
     light = app.styleSheet()
-    assert light and os.environ["QTMATERIAL_THEME"] == "light_purple.xml"
+
+    assert light
+    assert Path(os.environ["QTMATERIAL_THEME"]).name == "light_custom.xml"
+
     apply_app_theme(app, True)
+
     assert app.styleSheet() != light
-    assert os.environ["QTMATERIAL_THEME"] == "dark_purple.xml"
+    assert Path(os.environ["QTMATERIAL_THEME"]).name == "dark_custom.xml"
+
     apply_app_theme(app, False)
+
     assert app.styleSheet() == light
+    assert Path(os.environ["QTMATERIAL_THEME"]).name == "light_custom.xml"
     assert "must be imported after" not in caplog.text
 
 
@@ -52,14 +60,12 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.purchases_table.columnCount() == 6
         assert window.recs_table.columnCount() == 7
         assert window.mb_progress.isTextVisible()
-        assert window.mb_progress.text() == "Не запущено"
+        assert window.mb_progress.text() == "Прогресс загрузки"
         assert window.btn_load.font().weight() >= QFont.Weight.DemiBold
         csv_fields = window.btn_load.parentWidget().layout().itemAt(1).layout()
         assert isinstance(csv_fields, QGridLayout)
         assert csv_fields.itemAtPosition(0, 0).widget() is window.combo_box_types
-        assert csv_fields.itemAtPosition(1, 0).widget().text() == "Полная замена справочника"
         assert csv_fields.itemAtPosition(0, 1).widget() is window.btn_load
-        assert csv_fields.itemAtPosition(1, 1).widget() is window.btn_load
         assert isinstance(window.status_files_layout, QHBoxLayout)
         assert window.status_files_layout.itemAt(0).widget() is window.prefix
         acquisition, processing = window.tabs.widget(0), window.tabs.widget(1)
@@ -95,7 +101,9 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         for dark in (True, False):
             QTest.mouseClick(window.theme_switch, Qt.MouseButton.LeftButton)
             assert window._current_is_dark is dark
-            assert os.environ["QTMATERIAL_THEME"] == ("dark_purple.xml" if dark else "light_purple.xml")
+            assert Path(os.environ["QTMATERIAL_THEME"]).name == (
+                "dark_custom.xml" if dark else "light_custom.xml"
+            )
             assert table.cellWidget(0, 0) is photo
             assert table.item(0, 1).text() == "synthetic SKU"
             assert table.item(0, 1).isSelected()

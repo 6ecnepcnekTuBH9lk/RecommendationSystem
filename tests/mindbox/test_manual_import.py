@@ -3,14 +3,20 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import socket
+import shutil
 
 import pytest
 
-from Application.mindbox import daily_training_batch as daily, manual_import as manual
+from Application.mindbox import daily_training_batch as daily, manual_import as manual, canonical_storage as store
 from Application.mindbox.customer_profile_snapshot import load_customer_profile_snapshot, load_customer_contact_index
 from Application.mindbox.raw_reader import iter_export, EXPORT_ROOTS
 from Application.mindbox.selection import DEFAULT_SELECTION
 from Application.mindbox.training_batch import TrainingBatchExport, TrainingBatchWindow
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("No real network"))
 
 
 @pytest.fixture
@@ -34,6 +40,11 @@ def saved(tmp_path, monkeypatch):
     path = tmp_path / "training_batches" / batch.batch_id / "manifest.json"
     path.parent.mkdir(parents=True)
     daily._atomic_write(path, batch)
+    staged = tmp_path / "staged_merges"
+    shutil.copytree(tmp_path / components[0].export.relative_directory, staged)
+    with store.storage_lock(tmp_path):
+        store.publish(tmp_path, "customer_merges", start, window.interaction_until, staged,
+                      source_kind="API", export_id="synthetic", operation="merges")
     return tmp_path, batch, path
 
 
@@ -44,35 +55,33 @@ def write(root, name, records=None, text=None):
 
 
 def test_manual_batch_atomic_metadata_selection_and_common_readers(saved, monkeypatch):
-    root, source, _ = saved
-    actions = write(root, "actions", [{"arbitrary": 1}])
+    root, source, legacy = saved
+    records = [{"actionTemplate": {"ids": {"systemName": "Unmapped"}}}]
+    actions = write(root, "actions", records)
     orders = write(root, "orders")
-    before = actions.read_bytes()
+    before = actions.read_bytes(), orders.read_bytes()
     selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
-    progress = []
     original = manual.os.replace
     def publish(src, dst):
         if Path(src).is_dir():
             assert not Path(dst).exists()
-            assert (Path(src) / "manifest.json").is_file()
-            assert (Path(src) / "actions/actions_part_001.json").read_bytes() == before
+            assert (Path(src) / "actions/actions_part_001.json").read_bytes() == before[0]
+            assert (Path(src) / "orders/orders_part_001.json").read_bytes() == before[1]
         return original(src, dst)
     monkeypatch.setattr(manual.os, "replace", publish)
-    batch = manual.import_interactions(actions, orders, raw_root=root, window=source.window,
-                                        selection=selection, progress=progress.append)
-    manifest = root / "training_batches" / batch.batch_id / "manifest.json"
-    loaded = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
-    assert loaded == batch and loaded.selection == selection
-    assert batch.source_kind == "MANUAL"
-    assert batch.merge_source_training_batch_id == source.batch_id
-    assert batch.components[0] == source.components[0]
+    manifest = manual.import_interactions(actions, orders, raw_root=root, window=source.window, selection=selection)
+    batch = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
+    assert manifest == root / "canonical/training.json"
+    assert batch.selection == selection and batch.source_kind == "CANONICAL"
+    pair = store.catalog(root)["manual_interactions"]
+    assert pair["actions"]["directory"].rsplit("/", 1)[0] == pair["orders"]["directory"].rsplit("/", 1)[0]
     for component in batch.components[1:]:
         assert component.export.source_kind == "MANUAL" and component.export.export_id is None
-    assert list(iter_export("actions", input_dir=root / batch.components[1].export.relative_directory)) == [{"arbitrary": 1}]
-    assert actions.read_bytes() == before
-    assert str(actions) not in manifest.read_text(encoding="utf-8")
-    assert any("API snapshot" in line for line in progress)
-    assert manual.select_merges_source(root).batch_id == source.batch_id  # Manual batch cannot become merges source.
+        assert component.operation == "MANUAL"
+    assert list(iter_export("actions", input_dir=root / batch.components[1].export.relative_directory)) == records
+    assert (actions.read_bytes(), orders.read_bytes()) == before
+    assert list((root / "training_batches").glob("*/manifest.json")) == [legacy]
+    assert manual.select_merges_source(root).batch_id == source.batch_id
 
 
 @pytest.mark.parametrize("name", ["actions", "orders", "customers"])
@@ -180,8 +189,7 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
                         "status": {"ids": {"externalId": "CP"}}, "product": {"ids": {"offline1C": "654321_variant"}}}]}
     orders = write(root, "orders", [order, order])
     selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
-    batch = manual.import_interactions(actions, orders, raw_root=root, window=source.window, selection=selection)
-    manifest = root / "training_batches" / batch.batch_id / "manifest.json"
+    manifest = manual.import_interactions(actions, orders, raw_root=root, window=source.window, selection=selection)
     loaded = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
     catalog = root / "Номенклатура.csv"
     catalog.write_text("КодНоменклатуры\n123456\n654321\n", encoding="utf-8-sig")
@@ -192,3 +200,223 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
     assert result.diagnostics.orders_duplicate_identical == 1
     assert result.diagnostics.unmapped_actions == 1
     assert result.prepared_data.mappings.idx2user == ["2"]
+
+
+def utc(value):
+    return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+
+
+def publish_merges(root, since="2025-01-01", until="2027-01-01"):
+    directory = root / "staged"
+    directory.mkdir()
+    (directory / "customer_merges_part_001.json").write_text('{"customerMerges": []}')
+    with store.storage_lock(root):
+        store.publish(root, "customer_merges", utc(since), utc(until), directory,
+                      source_kind="API", export_id="test", operation="merges")
+
+
+def import_pair(root, since="2026-01-01", until="2026-07-01", **kwargs):
+    return manual.import_interactions(write(root, "actions"), write(root, "orders"), raw_root=root,
+        window=TrainingBatchWindow(utc(since), utc(until), utc(since)), **kwargs)
+
+
+@pytest.mark.parametrize("merges", [None, ("2026-02-01", "2027-01-01"), ("2025-01-01", "2026-06-01")])
+def test_canonical_merges_required_for_entire_manual_interval(tmp_path, merges):
+    if merges:
+        publish_merges(tmp_path, *merges)
+    with pytest.raises(manual.ManualImportError, match="API Mindbox") as error:
+        import_pair(tmp_path)
+    assert str(tmp_path) not in str(error.value)
+    assert not store.catalog(tmp_path)["manual_interactions"]
+
+
+def test_legacy_merges_alone_cannot_authorize_new_manual_import(saved):
+    root, batch, _ = saved
+    (root / "canonical/catalog.json").unlink()
+    with pytest.raises(manual.ManualImportError, match="API Mindbox"):
+        manual.import_interactions(write(root, "actions"), write(root, "orders"), raw_root=root, window=batch.window)
+
+
+def test_long_range_replacement_and_source_safety(tmp_path):
+    publish_merges(tmp_path)
+    manifest = import_pair(tmp_path)
+    old = store.catalog(tmp_path)["manual_interactions"]
+    old_object = (tmp_path / old["actions"]["directory"]).parent
+    assert old_object.exists()
+    batch = daily.load_chunked_training_batch(manifest, raw_root=tmp_path)
+    assert len(batch.components) == 3
+    assert batch.diagnostics["days_total"] == batch.diagnostics["days_ready"] == 181
+    assert batch.window.interaction_since == utc("2026-01-01")
+    assert not (tmp_path / "training_batches").exists()
+    original = {name: (tmp_path / (name + ".json")).read_bytes() for name in ("actions", "orders")}
+    import_pair(tmp_path, "2026-02-01", "2026-08-01")
+    assert not old_object.exists()
+    assert len(list((tmp_path / "canonical/objects").iterdir())) == 2
+    assert all((tmp_path / (name + ".json")).read_bytes() == value for name, value in original.items())
+    assert store.summary(tmp_path)["orders"]["since"] == utc("2026-02-01").isoformat()
+
+
+@pytest.mark.parametrize("failure", ["orders_json", "orders_record", "cancel_copy", "cancel_validation", "cancel_commit", "catalog_commit"])
+def test_failed_replacement_keeps_entire_old_pair(tmp_path, monkeypatch, failure):
+    publish_merges(tmp_path)
+    import_pair(tmp_path)
+    before = (tmp_path / "canonical/catalog.json").read_bytes()
+    data = store.catalog(tmp_path)
+    objects = set((tmp_path / "canonical/objects").iterdir())
+    paths = {name: write(tmp_path, name) for name in ("actions", "orders")}
+    if failure == "orders_json":
+        paths["orders"].write_text('{"orders": [')
+    if failure == "orders_record":
+        paths["orders"].write_text('{"orders": [{}]}')
+    source_bytes = {name: path.read_bytes() for name, path in paths.items()}
+    cancelled = False
+    def progress(message):
+        nonlocal cancelled
+        if ((failure == "cancel_copy" and message.startswith("Копирование orders"))
+                or (failure == "cancel_validation" and message.startswith("Проверка orders завершена"))):
+            cancelled = True
+    original = store.atomic_json
+    def commit(path, value):
+        nonlocal cancelled
+        if failure == "catalog_commit" and Path(path).name == "catalog.json":
+            raise OSError("synthetic")
+        original(path, value)
+        if failure == "cancel_commit" and Path(path).name == "training.json":
+            cancelled = True
+    monkeypatch.setattr(store, "atomic_json", commit)
+    with pytest.raises((manual.ManualImportError, InterruptedError, OSError)):
+        manual.import_interactions(**paths, raw_root=tmp_path,
+            window=TrainingBatchWindow(utc("2026-01-01"), utc("2026-08-01"), utc("2026-01-01")),
+            cancelled=lambda: cancelled, progress=progress)
+    assert (tmp_path / "canonical/catalog.json").read_bytes() == before
+    assert store.catalog(tmp_path) == data
+    assert set((tmp_path / "canonical/objects").iterdir()) == objects
+    assert not list((tmp_path / "canonical").glob(".manual-interactions-*"))
+    assert all(path.read_bytes() == source_bytes[name] for name, path in paths.items())
+
+
+def test_manual_cleanup_confined_and_keeps_live_pair(tmp_path):
+    publish_merges(tmp_path)
+    import_pair(tmp_path)
+    abandoned = tmp_path / "canonical/.manual-interactions-interrupted"
+    abandoned.mkdir()
+    (abandoned / "partial.json").write_text("{")
+    unrelated = tmp_path / ".manual-interactions-user"
+    unrelated.mkdir()
+    legacy = tmp_path / "training_batches/legacy"
+    legacy.mkdir(parents=True)
+    with store.storage_lock(tmp_path):
+        store.collect_unreferenced(tmp_path)
+    assert not abandoned.exists()
+    assert unrelated.exists() and legacy.exists()
+    assert len(store.current_batch(tmp_path).components) == 3
+
+
+def test_canonical_v1_read_does_not_rewrite_until_mutation(tmp_path):
+    publish_merges(tmp_path)
+    data = store.catalog(tmp_path)
+    data.pop("manual_interactions")
+    data["schema_version"] = 1
+    path = tmp_path / "canonical/catalog.json"
+    store.atomic_json(path, data)
+    before = path.read_bytes()
+    assert store.catalog(tmp_path)["manual_interactions"] is None
+    assert path.read_bytes() == before
+    import_pair(tmp_path)
+    assert store.catalog(tmp_path)["schema_version"] == 2
+
+
+def test_legacy_manual_v4_remains_readable_and_preparable(saved, monkeypatch):
+    root, source, _ = saved
+    batch_id = "b" * 32
+    directory = root / "training_batches" / batch_id
+    components = [source.components[0]]
+    for name in ("actions", "orders"):
+        part_dir = directory / name
+        part_dir.mkdir(parents=True)
+        (part_dir / f"{name}_part_001.json").write_text(json.dumps({EXPORT_ROOTS[name]: []}))
+        export = TrainingBatchExport(name, None, "MANUAL", part_dir.relative_to(root).as_posix(), 1, "MANUAL")
+        components.append(daily.BatchComponent(name, source.window.interaction_since, source.window.interaction_until,
+                                               "MANUAL", "READY", export))
+    batch = replace(source, batch_id=batch_id, components=tuple(components), source_kind="MANUAL",
+                    merge_source_training_batch_id=source.batch_id)
+    daily._atomic_write(directory / "manifest.json", batch)
+    loaded = daily.load_chunked_training_batch(directory / "manifest.json", raw_root=root, require_complete=True)
+    assert loaded == batch
+    from Application.model import mindbox_training_preparation as preparation
+    received = {}
+    monkeypatch.setattr(preparation, "_prepare_training_data_from_mindbox_sources", lambda **kwargs: received.update(kwargs))
+    daily.prepare_training_data_from_chunked_batch(loaded, raw_root=root, catalog_path="unused", train_config=None)
+    assert received["actions_export_dirs"] == (directory / "actions",)
+
+
+def test_manual_cli_uses_canonical_entry_without_merge_since(tmp_path, capsys):
+    from scripts.mindbox_manual_import import main
+    publish_merges(tmp_path)
+    assert main(["interactions", "--raw-root", str(tmp_path), "--actions", str(write(tmp_path, "actions")),
+                 "--orders", str(write(tmp_path, "orders")), "--since", "2026-01-01", "--until", "2026-07-01"]) == 0
+    assert f"Manifest: {tmp_path / 'canonical/training.json'}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, OSError])
+def test_interrupt_immediately_after_catalog_switch_keeps_published_raw(tmp_path, monkeypatch, failure):
+    publish_merges(tmp_path)
+    import_pair(tmp_path)
+    previous = store.catalog(tmp_path)["manual_interactions"]
+    original = store.atomic_json
+    def interrupt(path, data):
+        original(path, data)
+        if Path(path).name == "catalog.json":
+            raise failure()
+    monkeypatch.setattr(store, "atomic_json", interrupt)
+    with pytest.raises(failure):
+        import_pair(tmp_path, until="2026-08-01")
+    current = store.catalog(tmp_path)["manual_interactions"]
+    assert current != previous
+    assert store.current_batch(tmp_path).window.interaction_until == utc("2026-08-01")
+    with store.storage_lock(tmp_path):
+        store.collect_unreferenced(tmp_path)
+    assert len(list((tmp_path / "canonical/objects").iterdir())) == 2
+
+
+def test_manual_validation_consumes_records_once_incrementally(tmp_path, monkeypatch):
+    from Application.mindbox.adapters import actions as action_adapter
+    publish_merges(tmp_path)
+    processed = 0
+    calls = []
+    original = action_adapter.adapt_action_system_name
+    def adapt(raw):
+        nonlocal processed
+        processed += 1
+        return original(raw)
+    def records(name, **kwargs):
+        calls.append(name)
+        if name == "actions":
+            for index in range(1000):
+                assert processed == index
+                yield {"actionTemplate": {"ids": {"systemName": "Unmapped"}}}
+    monkeypatch.setattr(action_adapter, "adapt_action_system_name", adapt)
+    monkeypatch.setattr(store, "iter_export", records)
+    import_pair(tmp_path)
+    assert processed == 1000 and calls == ["actions", "orders"]
+
+
+def test_manual_import_holds_training_storage_lock(tmp_path):
+    publish_merges(tmp_path)
+    import_pair(tmp_path)
+    before = (tmp_path / "canonical/catalog.json").read_bytes()
+    with store.storage_lock(tmp_path), pytest.raises(ValueError):
+        import_pair(tmp_path, until="2026-08-01")
+    assert (tmp_path / "canonical/catalog.json").read_bytes() == before
+
+
+def test_incomplete_canonical_merges_blocks_manual_publication(tmp_path):
+    publish_merges(tmp_path)
+    import_pair(tmp_path)
+    data = store.catalog(tmp_path)
+    data["customer_merges"]["parts"] = 2  # A missing final part must not look like complete history.
+    store.atomic_json(tmp_path / "canonical/catalog.json", data)
+    before = (tmp_path / "canonical/catalog.json").read_bytes()
+    with pytest.raises(manual.ManualImportError, match="Обновите их через API Mindbox"):
+        import_pair(tmp_path, until="2026-08-01")
+    assert (tmp_path / "canonical/catalog.json").read_bytes() == before

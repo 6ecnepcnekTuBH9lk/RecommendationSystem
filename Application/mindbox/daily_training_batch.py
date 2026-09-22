@@ -56,10 +56,12 @@ class ChunkedTrainingBatch:
 
     @property
     def diagnostics(self):
+        pairs = [self.components[i:i + 2] for i in range(1, len(self.components), 2)]
+        def days(pair):
+            return (pair[0].until - pair[0].since).days if self.source_kind == "CANONICAL" else 1
         return {
-            "days_total": (len(self.components) - 1) // 2,
-            "days_ready": sum(all(c.status == "READY" for c in self.components[i:i + 2])
-                              for i in range(1, len(self.components), 2)),
+            "days_total": sum(days(pair) for pair in pairs),
+            "days_ready": sum(days(pair) for pair in pairs if all(c.status == "READY" for c in pair)),
             "components_ready": sum(c.status == "READY" for c in self.components),
             "components_failed": sum(c.status == "FAILED" for c in self.components),
         }

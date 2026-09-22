@@ -60,14 +60,13 @@ def create_csv_loading_section(aboba):
     fields.setVerticalSpacing(10)
     fields.setHorizontalSpacing(12)
     fields.addWidget(aboba.combo_box_types, 0, 0)
-    fields.addWidget(QLabel("Полная замена справочника"), 1, 0)
 
     # Кнопка "Загрузить файл"
     aboba.btn_load = QPushButton(QIcon("Картинки/ЗагрузитьФайл.png"), " Загрузить файл")
     aboba.btn_load.setIconSize(QSize(17, 17))
     aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
 
-    fields.addWidget(aboba.btn_load, 0, 1, 2, 1, Qt.AlignmentFlag.AlignVCenter)
+    fields.addWidget(aboba.btn_load, 0, 1)
     fields.setColumnStretch(0, 1)
     left_layout.addLayout(fields)
 

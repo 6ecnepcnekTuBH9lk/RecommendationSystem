@@ -50,12 +50,17 @@ def catalog(root):
     path = Path(root) / "canonical/catalog.json"
     if not path.exists():
         return {"schema_version": 1, "revision": uuid.uuid4().hex, "actions": {}, "orders": {},
-                "customer_merges": None, "selection": asdict(DEFAULT_SELECTION)}
+                "customer_merges": None, "manual_interactions": None, "selection": asdict(DEFAULT_SELECTION)}
     try:
         with path.open(encoding="utf-8") as stream:
             result = json.load(stream, object_pairs_hook=_unique_object)
-        if set(result) != {"schema_version", "revision", "actions", "orders", "customer_merges", "selection"} or result["schema_version"] != 1:
+        fields = {"schema_version", "revision", "actions", "orders", "customer_merges", "selection"}
+        version = result["schema_version"]
+        if version == 2:
+            fields.add("manual_interactions")
+        if version not in (1, 2) or set(result) != fields:
             raise ValueError
+        result.setdefault("manual_interactions", None)
         MindboxSelectionConfig(**result["selection"])
         for name in ("actions", "orders"):
             for day, entry in result[name].items():
@@ -66,6 +71,19 @@ def catalog(root):
                 checked_directory(root, entry["directory"], name)
         if result["customer_merges"]:
             checked_directory(root, result["customer_merges"]["directory"], "customer_merges")
+        manual = result["manual_interactions"]
+        if manual is not None:
+            validate_manual_period(datetime.fromisoformat(manual["since"]), datetime.fromisoformat(manual["until"]))
+            parents = set()
+            for name in ("actions", "orders"):
+                entry = manual[name]
+                if (any(entry[key] != manual[key] for key in ("since", "until", "updated"))
+                        or entry["source_kind"] != "MANUAL" or entry["export_id"] is not None
+                        or entry["operation"] != "MANUAL" or type(entry["parts"]) is not int or entry["parts"] != 1):
+                    raise ValueError
+                parents.add(checked_directory(root, entry["directory"], name).parent)
+            if len(parents) != 1:
+                raise ValueError
         return result
     except (ValueError, TypeError, KeyError, OSError):
         raise TrainingBatchError("Invalid canonical catalog; legacy fallback is disabled") from None
@@ -82,27 +100,58 @@ def checked_directory(root, value, name):
     return path
 
 
+def validate_manual_period(since, until):
+    if (since.tzinfo is None or until.tzinfo is None or since >= until
+            or any(value.utcoffset().total_seconds() != 0 or any((value.hour, value.minute, value.second, value.microsecond))
+                   for value in (since, until))):
+        raise TrainingBatchError("Период ручной выгрузки должен идти от ранней до поздней даты, в полночь UTC.")
+
+
+def require_manual_merges(data, since, until):
+    validate_manual_period(since, until)
+    entry = data["customer_merges"]
+    if not entry or datetime.fromisoformat(entry["since"]) > since or datetime.fromisoformat(entry["until"]) < until:
+        raise TrainingBatchError("Для выбранного периода недостаточно сохранённой истории объединений клиентов. "
+                                 "Сначала обновите объединения клиентов через API Mindbox.")
+    return entry
+
+
 def continuous_range(data):
-    """Longest common run; ties choose the most recent run. Never bridge a gap."""
+    """Return source pairs in the longest covered run, latest on ties; no virtual days."""
     merges = data["customer_merges"]
     if not merges:
         return ()
-    days = sorted(set(data["actions"]) & set(data["orders"]))
-    runs = []
-    for day in days:
-        entry = data["actions"][day]
-        if entry["since"] < merges["since"] or entry["until"] > merges["until"]:
+    def covered(entry):
+        return (datetime.fromisoformat(merges["since"]) <= datetime.fromisoformat(entry["since"])
+                and datetime.fromisoformat(entry["until"]) <= datetime.fromisoformat(merges["until"]))
+    manual = data.get("manual_interactions")
+    pairs = []
+    if manual and covered(manual):
+        pairs.append({name: manual[name] for name in ("actions", "orders")})
+    for day in set(data["actions"]) & set(data["orders"]):
+        pair = {name: data[name][day] for name in ("actions", "orders")}
+        entry = pair["actions"]
+        if manual and (datetime.fromisoformat(entry["since"]) < datetime.fromisoformat(manual["until"])
+                       and datetime.fromisoformat(entry["until"]) > datetime.fromisoformat(manual["since"])):
             continue
-        if not runs or (datetime.fromisoformat(day) - datetime.fromisoformat(runs[-1][-1])).days != 1:
+        if all(covered(value) for value in pair.values()):
+            pairs.append(pair)
+    pairs.sort(key=lambda pair: datetime.fromisoformat(pair["actions"]["since"]))
+    runs = []
+    for pair in pairs:
+        if not runs or datetime.fromisoformat(runs[-1][-1]["actions"]["until"]) != datetime.fromisoformat(pair["actions"]["since"]):
             runs.append([])
-        runs[-1].append(day)
-    return tuple(max(runs, key=lambda run: (len(run), run[-1]))) if runs else ()
+        runs[-1].append(pair)
+    def rank(run):
+        end = datetime.fromisoformat(run[-1]["actions"]["until"])
+        return end - datetime.fromisoformat(run[0]["actions"]["since"]), end
+    return tuple(max(runs, key=rank)) if runs else ()
 
 
 def current_batch(root):
     data = catalog(root)
-    days = continuous_range(data)
-    if not days:
+    pairs = continuous_range(data)
+    if not pairs:
         raise TrainingBatchError("No continuous common Actions/Orders coverage")
     def component(name, entry):
         directory = checked_directory(root, entry["directory"], name)
@@ -113,11 +162,32 @@ def current_batch(root):
         return BatchComponent(name, datetime.fromisoformat(entry["since"]), datetime.fromisoformat(entry["until"]),
                               entry["operation"], "READY", export)
     merges = component("customer_merges", data["customer_merges"])
-    components = (merges, *(component(name, data[name][day]) for day in days for name in ("actions", "orders")))
+    components = (merges, *(component(name, pair[name]) for pair in pairs for name in ("actions", "orders")))
     window = TrainingBatchWindow(components[1].since, components[-1].until, merges.since)
     return ChunkedTrainingBatch(data["revision"], datetime.fromisoformat(max(
-        entry["updated"] for name in ("actions", "orders") for day, entry in data[name].items() if day in days)),
+        pair[name]["updated"] for pair in pairs for name in ("actions", "orders"))),
         window, "0" * 64, components, True, MindboxSelectionConfig(**data["selection"]), "CANONICAL")
+
+
+def validate_interactions(name, directory, resolver, selection, *, cancelled=None, progress=None):
+    """Shared streaming validation for API and manual raw; never filter the stored file."""
+    from .adapters import adapt_order, adapt_action
+    from .adapters.actions import adapt_action_system_name
+    from .manual_import import check_cancel
+    from Application.interactions import classify_action_system_name
+    rules = selection.interaction_rules()
+    count = 0
+    for raw in iter_export(name, input_dir=directory):
+        check_cancel(cancelled)
+        if name == "orders":
+            adapt_order(raw, resolver, product_namespaces=selection.order_product_namespaces)
+        elif classify_action_system_name(adapt_action_system_name(raw), rules) is not None:
+            adapt_action(raw, resolver, product_namespaces=selection.action_product_namespaces)
+        count += 1
+        if progress and count % 10000 == 0:
+            progress(f"Проверка {name}: {count} записей")
+    if progress:
+        progress(f"Проверка {name} завершена: {count} записей")
 
 
 def publish(root, name, since, until, directory, *, source_kind="API", export_id=None,
@@ -128,16 +198,7 @@ def publish(root, name, since, until, directory, *, source_kind="API", export_id
     parts = part_files(directory, name)
     if name in ("actions", "orders"):
         from .canonical_customers import resolver_for
-        from .adapters import adapt_order, adapt_action
-        from .adapters.actions import adapt_action_system_name
-        from Application.interactions import classify_action_system_name
-        resolver = resolver_for(root)
-        rules = selection.interaction_rules()
-        for raw in iter_export(name, input_dir=directory):
-            if name == "orders":
-                adapt_order(raw, resolver, product_namespaces=selection.order_product_namespaces)
-            elif classify_action_system_name(adapt_action_system_name(raw), rules) is not None:
-                adapt_action(raw, resolver, product_namespaces=selection.action_product_namespaces)
+        validate_interactions(name, directory, resolver_for(root), selection)
     if name == "customer_merges":
         from .adapters import adapt_customer_merge
         from .identity import CustomerIdResolver
@@ -160,6 +221,7 @@ def publish(root, name, since, until, directory, *, source_kind="API", export_id
     else:
         data[name][since.date().isoformat()] = entry
     data["revision"] = uuid.uuid4().hex
+    data["schema_version"] = 2
     data["selection"] = asdict(selection)
     atomic_json(root / "canonical/training.json", {"schema_version": 5, "storage": "canonical"})
     atomic_json(root / "canonical/catalog.json", data)
@@ -179,12 +241,14 @@ def collect_unreferenced(root):
     live = {entry["directory"].split("/")[2] for name in ("actions", "orders") for entry in data[name].values()}
     if data["customer_merges"]:
         live.add(data["customer_merges"]["directory"].split("/")[2])
+    if data["manual_interactions"]:
+        live.add(data["manual_interactions"]["actions"]["directory"].split("/")[2])
     parent = Path(root).resolve() / "canonical/objects"
     for path in parent.glob("*"):
         if (path.name not in live and len(path.name) == 32 and all(c in "0123456789abcdef" for c in path.name)
                 and not path.is_symlink() and path.resolve().parent == parent):
             shutil.rmtree(path)
-    for path in (Path(root).resolve() / "canonical").glob(".transport-*"):
+    for path in (*parent.parent.glob(".transport-*"), *parent.parent.glob(".manual-interactions-*")):
         if path.is_dir() and not path.is_symlink() and path.resolve().parent == parent.parent:
             shutil.rmtree(path)
     for path in parent.parent.glob(".customers-*.sqlite*"):
@@ -199,12 +263,12 @@ def merge_target(root, since, until):
 
 def summary(root):
     data = catalog(root)
-    days = continuous_range(data)
+    pairs = continuous_range(data)
     result = {name: None for name in ("actions", "orders", "customer_merges", "customers")}
     for name in ("actions", "orders"):
-        if days:
-            result[name] = {"since": data[name][days[0]]["since"], "until": data[name][days[-1]]["until"],
-                            "updated": max(data[name][day]["updated"] for day in days)}
+        if pairs:
+            result[name] = {"since": pairs[0][name]["since"], "until": pairs[-1][name]["until"],
+                            "updated": max(pair[name]["updated"] for pair in pairs)}
     if data["customer_merges"]:
         result["customer_merges"] = {key: data["customer_merges"][key] for key in ("since", "until", "updated")}
     return result

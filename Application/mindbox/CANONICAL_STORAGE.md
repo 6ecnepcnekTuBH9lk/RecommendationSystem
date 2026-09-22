@@ -30,16 +30,55 @@ CustomerMerges — один текущий объект. При refresh диап
 старого и запрошенного: min(since), max(until). Покрытие не сужается. Ошибка новой
 выгрузки сохраняет старый объект. История версий не накапливается.
 
+## Ручная историческая база
+
+Первичная загрузка: получить через API CustomerMerges с достаточно ранним merge_since
+(для interactions можно выбрать только текущую неделю), затем вручную импортировать
+большую пару Actions + Orders и при необходимости полный Customers. В дальнейшем
+обновлять interactions и merges через API еженедельно, Customers — периодически.
+
+Catalog schema v2 добавляет одну current manual_interactions пару. Catalog v1 читается
+без изменения файла и нормализуется с manual_interactions=None; v2 записывается при
+следующей mutation. Legacy raw не мигрирует и не удаляется.
+
+Пара хранится в одном canonical/objects/<uuid> с подкаталогами actions и orders.
+В каждом один part; source_kind=MANUAL, export_id=null, operation=MANUAL.
+Период задаёт пользователь независимо от API-полей: UTC-midnight [since, until).
+Длительность не ограничена одним днём. JSON не дробится по timestamps, в частности
+firstAction.dateTimeUtc не определяет период Orders. Selection общий для каталога.
+
+Под storage_lock оба файла копируются в .manual-interactions-*, затем каждый полностью
+проверяется общими streaming reader/adapters и canonical CustomerIdResolver.
+Текущее canonical CustomerMerges должно целиком покрывать ручной период.
+Новый UUID object публикуется одной атомарной заменой catalog.json со всей парой.
+Старый manual object удаляется только после commit. При cancel/error до commit старая
+пара сохраняется; после гибели процесса confined staging и unreferenced objects
+собираются следующей безопасной canonical операцией. Исходники пользователя не меняются.
+Manual resume нет; pending API resume от независимой ручной операции не теряется.
+
+Подробнее: [ручной импорт](MANUAL_IMPORT.md).
+
 ## Current training dataset
 
 `canonical/training.json` — стабильная точка входа schema v5; содержит указатель
 на canonical storage, а не копию изменяемого списка partitions. Loader строит
 ChunkedTrainingBatch из согласованного catalog.json и сохраняет revision в batch_id.
 
-Выбирается самый длинный непрерывный диапазон общих дней Actions/Orders, покрытый
-CustomerMerges. При равной длине выбирается более поздний диапазон. Дни за дыркой
-остаются на диске и не включаются в заявленный период. Summary показывает именно
-этот диапазон. Дата обновления источника — максимум дат публикации используемых дней.
+Выбирается самый длинный непрерывный диапазон из одного manual interval и общих
+дневных API Actions/Orders, целиком покрытых CustomerMerges. При равной длительности
+выбирается более поздний диапазон. Дни за дыркой остаются на диске и не включаются
+в заявленный период.
+
+Внутри manual range приоритет MANUAL: перекрытые API partitions остаются на диске
+и в каталоге, но не читаются training pipeline. Смежные API дни до/после manual могут
+его продолжить. Например manual [01.01, 01.09) + API [01.09, 08.09) даёт [01.01, 08.09);
+API только с 03.09 не закрывает разрыв после 01.09.
+
+Manual Actions/Orders — одна длинная пара компонентов, без fake daily components.
+Общая preparation получает каждый manual directory ровно один раз и отдельные
+выбранные API directories. Диагностика дней учитывает длительность компонентов.
+Summary показывает фактический current range и максимум updated используемых
+источников отдельно для Actions и Orders.
 
 Подготовка проверяет revision и удерживает store lock до завершения чтения raw.
 Поэтому cleanup не удаляет файлы из-под training reader. Selection передаётся в
@@ -112,9 +151,11 @@ JSON нет: они не считаются canonical partitions без явно
 их не используют. Canonical profiles доступны существующему contact-index loader
 по пути `canonical/customers.sqlite` (metadata projection v3).
 
-По уточнению пользователя ручной Actions/Orders остаётся на прежнем пути. Его перенос
-в daily canonical storage отложен: период Orders нельзя вывести из firstAction.
-Ручной interaction manifest по-прежнему можно передать явно в training pipeline.
+Новые ручные Actions/Orders пишутся только в canonical storage одной interval-парой.
+Старый ручной interaction manifest по-прежнему можно передать явно в training pipeline.
+GUI имеет отдельный manual period; Customers к нему не привязан. Во время ручной
+загрузки interactions меняются только runtime-поля Actions/Orders, после любого исхода
+перечитывается persisted summary.
 
 ## Официальный контракт и ограничения
 

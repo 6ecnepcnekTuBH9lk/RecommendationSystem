@@ -1,10 +1,11 @@
-"""Offline transport. One directory rename commits raw parts and their manifest."""
+"""Offline canonical pair import and explicit legacy snapshot compatibility helpers."""
 
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import uuid
 
@@ -12,13 +13,11 @@ from .adapters import adapt_customer_merge
 from .adapters.customer_contacts import adapt_customer_contact_candidate
 from .customers_stream import iter_json_records
 from .customer_profile_snapshot import CustomerProfileSnapshot
-from .daily_training_batch import (
-    BatchComponent, ChunkedTrainingBatch, _atomic_write, load_chunked_training_batch,
-)
+from .daily_training_batch import load_chunked_training_batch
 from .identity import CustomerIdResolver
-from .raw_reader import EXPORT_ROOTS, iter_export, _unique_object
+from .raw_reader import EXPORT_ROOTS, iter_export, part_files, _unique_object
 from .selection import DEFAULT_SELECTION, MindboxSelectionConfig
-from .training_batch import TrainingBatchExport, TrainingBatchWindow
+from .training_batch import TrainingBatchWindow, TrainingBatchError
 
 
 class ManualImportError(ValueError):
@@ -69,7 +68,7 @@ def _resolver(source, root, cancelled=None):
     return CustomerIdResolver(records())
 
 
-def _copy_validate(source, staging, name, *, cancelled=None, progress=None, resolver=None):
+def _copy_validate(source, staging, name, *, cancelled=None, progress=None, resolver=None, validate=None):
     """Copy bytes in bounded chunks, validate one record at a time before commit."""
     directory = staging / name
     directory.mkdir()
@@ -89,6 +88,9 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
                     progress(f"Копирование {name}: {copied} / {total} bytes")
             outgoing.flush()
             os.fsync(outgoing.fileno())
+        if validate is not None:
+            validate(directory)
+            return
         count = 0
         for raw in iter_json_records(target, EXPORT_ROOTS[name]):
             check_cancel(cancelled)
@@ -107,30 +109,77 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
 
 def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_SELECTION,
                         cancelled=None, progress=None):
+    """Publish one canonical manual pair. Return the stable training entry path.
+
+    window.merge_since is retained for call compatibility; coverage is checked
+    against the current canonical merges using the explicit interaction interval.
+    """
+    from . import canonical_storage as store
     root = Path(raw_root).resolve()
     if not isinstance(selection, MindboxSelectionConfig) or not isinstance(window, TrainingBatchWindow):
         raise ManualImportError("Требуются корректные период и правила отбора.")
-    source = select_merges_source(root, window)
-    _resolver(source, root, cancelled)  # Validate the saved raw merges, not just their metadata.
-    if progress:
-        progress(merges_description(source))
-    batch_id = uuid.uuid4().hex
-    parent = root / "training_batches"
-    parent.mkdir(parents=True, exist_ok=True)
-    components = [source.components[0]]
-    with tempfile.TemporaryDirectory(prefix=".manual-", dir=parent) as temporary:
-        staging = Path(temporary)
-        for name, path in (("actions", actions), ("orders", orders)):
-            _copy_validate(path, staging, name, cancelled=cancelled, progress=progress)
-            entry = TrainingBatchExport(name, None, "MANUAL", f"training_batches/{batch_id}/{name}", 1, "MANUAL")
-            components.append(BatchComponent(name, window.interaction_since, window.interaction_until, "MANUAL", "READY", entry))
-        batch = ChunkedTrainingBatch(batch_id, datetime.now(timezone.utc), window, source.config_fingerprint,
-                                     tuple(components), True, selection, "MANUAL", source.batch_id)
-        _atomic_write(staging / "state.json", batch)
-        _atomic_write(staging / "manifest.json", batch)
+    since, until = window.interaction_since, window.interaction_until
+    with store.storage_lock(root):
         check_cancel(cancelled)
-        os.replace(staging, parent / batch_id)
-    return batch
+        data = store.catalog(root)
+        try:
+            merges = store.require_manual_merges(data, since, until)
+        except TrainingBatchError as exc:
+            raise ManualImportError(str(exc)) from None
+        directory = store.checked_directory(root, merges["directory"], "customer_merges")
+        def records():
+            for raw in iter_export("customer_merges", input_dir=directory):
+                check_cancel(cancelled)
+                yield adapt_customer_merge(raw)
+        try:
+            if len(part_files(directory, "customer_merges")) != merges["parts"]:
+                raise ManualImportError("Canonical CustomerMerges parts mismatch")
+            resolver = CustomerIdResolver(records())
+        except InterruptedError:
+            raise
+        except Exception:
+            raise ManualImportError("Не удалось проверить сохранённые объединения клиентов. Обновите их через API Mindbox.") from None
+        store.collect_unreferenced(root)
+        target = root / "canonical/objects" / uuid.uuid4().hex
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".manual-interactions-", dir=root / "canonical") as temporary:
+            staging = Path(temporary)
+            for name, path in (("actions", actions), ("orders", orders)):
+                _copy_validate(path, staging, name, cancelled=cancelled, progress=progress,
+                               validate=lambda directory: store.validate_interactions(
+                                   name, directory, resolver, selection, cancelled=cancelled, progress=progress))
+            check_cancel(cancelled)
+            store.require_manual_merges(data, since, until)
+            old = data["manual_interactions"]
+            pair = {"since": since.isoformat(), "until": until.isoformat(), "updated": store.stamp()}
+            for name in ("actions", "orders"):
+                pair[name] = {**{key: pair[key] for key in ("since", "until", "updated")},
+                              "directory": (target / name).relative_to(root).as_posix(), "parts": 1,
+                              "source_kind": "MANUAL", "export_id": None, "operation": "MANUAL"}
+            data.update(manual_interactions=pair, schema_version=2, revision=uuid.uuid4().hex, selection=asdict(selection))
+            os.replace(staging, target)
+            committed = False
+            try:
+                store.atomic_json(root / "canonical/training.json", {"schema_version": 5, "storage": "canonical"})
+                check_cancel(cancelled)
+                store.atomic_json(root / "canonical/catalog.json", data)
+                committed = True
+            finally:
+                if not committed:
+                    # An interrupt may arrive after os.replace(catalog), before it
+                    # returns. Never remove raw that is already referenced on disk.
+                    try:
+                        committed = store.catalog(root)["revision"] == data["revision"]
+                    except Exception:
+                        committed = True  # Uncertain outcome: leave cleanup to a later safe operation.
+                    if not committed:
+                        shutil.rmtree(store.checked_directory(root, pair["actions"]["directory"], "actions").parent)
+            if old:
+                try:
+                    shutil.rmtree(store.checked_directory(root, old["actions"]["directory"], "actions").parent)
+                except OSError:
+                    pass  # Collected by the next operation under the store lock.
+    return root / "canonical/training.json"
 
 
 def import_customers(customers, *, raw_root, cancelled=None, progress=None):

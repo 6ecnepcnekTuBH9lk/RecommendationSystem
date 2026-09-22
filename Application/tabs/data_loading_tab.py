@@ -2,7 +2,7 @@
 
 import codecs
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 import sys
@@ -83,6 +83,22 @@ def resume_arguments(state_path):
     return ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts" / script), "resume", "--state", str(state_path)]
 
 
+def manual_interactions_arguments(since, until, selection=DEFAULT_SELECTION):
+    if since >= until:
+        raise ValueError("Дата начала ручной выгрузки должна быть раньше даты окончания.")
+    args = ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/mindbox_manual_import.py"),
+            "interactions", "--since", since, "--until", until]
+    for field, option in SELECTION_OPTIONS.items():
+        for value in getattr(selection, field):
+            args.extend((option, value))
+    return args
+
+
+def _manual_preflight(dates):
+    from Application.mindbox.canonical_storage import catalog, require_manual_merges
+    require_manual_merges(catalog(RAW_ROOT), *(datetime.fromisoformat(value).replace(tzinfo=timezone.utc) for value in dates))
+
+
 def customers_arguments(since, until):
     if since >= until:
         raise ValueError("Дата начала периода клиентов должна быть раньше окончания.")
@@ -129,7 +145,8 @@ def _load_training_summary(path, complete=False):
         "period": f"{batch.window.interaction_since:%d.%m.%Y} — {batch.window.interaction_until:%d.%m.%Y}",
         "merges": batch.components[0].status,
         "sources": {name: {
-            "ready": sum(c.status == "READY" for c in batch.components if c.name == name),
+            "ready": sum((c.until - c.since).days if batch.source_kind == "CANONICAL" else 1
+                         for c in batch.components if c.name == name and c.status == "READY"),
             "failed": sum(c.status == "FAILED" for c in batch.components if c.name == name),
         } for name in ("actions", "orders")},
         **counts, "components_total": len(batch.components),
@@ -142,28 +159,6 @@ def _validate_snapshot(path, training_manifest):
     if snapshot.originating_training_batch_id != Path(training_manifest).parent.name:
         raise ValueError("Snapshot references another training batch")
     return str(path)
-
-
-def _manual_merges_info(dates):
-    from Application.mindbox.manual_import import select_merges_source, merges_description, ManualImportError
-    from Application.mindbox.training_batch import TrainingBatchWindow
-    from datetime import timezone
-
-    messages = []
-    for mode in ("Взаимодействия", "Customers"):
-        try:
-            if mode == "Customers":
-                from Application.mindbox.canonical_storage import catalog
-                entry = catalog(RAW_ROOT)["customer_merges"]
-                if entry:
-                    messages.append(mode + ": API — " + _summary_text(entry))
-                    continue
-            window = TrainingBatchWindow(*(datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
-                                           for value in dates)) if mode == "Взаимодействия" else None
-            messages.append(mode + ": " + merges_description(select_merges_source(RAW_ROOT, window)))
-        except (ManualImportError, ValueError):
-            messages.append(mode + ": нет подходящей сохранённой истории объединений клиентов.")
-    return dates, "\n".join(messages)
 
 
 def _validate_manual_result(path, stage):
@@ -604,15 +599,49 @@ def create_data_loading_widgets_tab(aboba):
 
     right.addLayout(manual)
 
-    # ---------------- CustomerMerges source ----------------
-    aboba.mb_manual_merges = QLabel(
-        "Проверка сохранённых объединений клиентов…"
-    )
-    aboba.mb_manual_merges.setWordWrap(True)
+    manual_period = QHBoxLayout()
+    manual_period.setContentsMargins(0, 0, 0, 0)
+    manual_period.setSpacing(8)
 
-    right.addWidget(
-        aboba.mb_manual_merges
+    manual_period_label = QLabel("Период выгрузки Действия + Заказы:")
+    manual_period_label.setSizePolicy(
+        QSizePolicy.Policy.Maximum,
+        QSizePolicy.Policy.Preferred,
     )
+
+    aboba.mb_manual_since = _date_widget(today.addDays(-7))
+    aboba.mb_manual_until = _date_widget(today)
+
+    aboba.mb_manual_since.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Preferred,
+    )
+    aboba.mb_manual_until.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Preferred,
+    )
+
+    manual_period.addWidget(manual_period_label)
+    manual_period.addWidget(QLabel("С"))
+    manual_period.addWidget(aboba.mb_manual_since, 1)
+    manual_period.addWidget(QLabel("По"))
+    manual_period.addWidget(aboba.mb_manual_until, 1)
+
+    aboba.mb_manual_controls.extend(
+        (aboba.mb_manual_since, aboba.mb_manual_until)
+    )
+
+    right.addLayout(manual_period)
+
+    manual_hint = QLabel(
+        "Укажите тот же период, что при выгрузке Actions и Orders в Mindbox. "
+        "Верхняя граница не включается (UTC)."
+    )
+    manual_hint.setProperty("class", "infoLabel")
+    manual_hint.setWordWrap(True)
+    manual_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    right.addWidget(manual_hint)
 
     # ---------------- Кнопки manual import ----------------
     manual_buttons = QHBoxLayout()
@@ -745,9 +774,6 @@ class _LoadingController(QObject):
         aboba.mb_resume_button.clicked.connect(self.resume)
         aboba.mb_manual_interactions_button.clicked.connect(lambda: self.start_manual("interactions"))
         aboba.mb_manual_customers_button.clicked.connect(lambda: self.start_manual("customers"))
-        for widget in (aboba.mb_interaction_since, aboba.mb_interaction_until, aboba.mb_merge_since):
-            widget.dateChanged.connect(self.refresh_merges)
-        QTimer.singleShot(0, self.refresh_merges)
         QTimer.singleShot(0, self.refresh_persisted)
         aboba.installEventFilter(self)
         self._update_controls()
@@ -839,11 +865,6 @@ class _LoadingController(QObject):
     def refresh_persisted(self):
         self._read_metadata("persisted", _persisted_summary)
 
-    def refresh_merges(self):
-        dates = tuple(w.date().toString("yyyy-MM-dd") for w in
-                      (self.ui.mb_interaction_since, self.ui.mb_interaction_until, self.ui.mb_merge_since))
-        self._read_metadata("merge_info", _manual_merges_info, dates)
-
     def start_reference(self, path, kind):
         if self.state == LoadingState.RUNNING:
             return
@@ -871,8 +892,8 @@ class _LoadingController(QObject):
                     for field, editor in a.mb_selection_fields.items()
                 })
                 dates = [w.date().toString("yyyy-MM-dd") for w in
-                         (a.mb_interaction_since, a.mb_interaction_until, a.mb_merge_since)]
-                args.extend(training_arguments(*dates, selection=selection)[5:])
+                         (a.mb_manual_since, a.mb_manual_until)]
+                args = manual_interactions_arguments(*dates, selection=selection)
             for name, path in paths.items():
                 args.extend(("--" + name, path))
         except ValueError as exc:
@@ -883,7 +904,14 @@ class _LoadingController(QObject):
         a.mb_current_state_path = None
         self._begin()
         a.mb_progress.setRange(0, 0)
-        self._launch("manual_" + kind, args)
+        if kind == "interactions":
+            self.stage = "manual_interactions"
+            self.manual_arguments = args
+            for name in ("actions", "orders"):
+                getattr(a, f"mb_{name}_status_label").setText("Выполняется...")
+            self._read_metadata("manual_preflight", _manual_preflight, tuple(dates))
+        else:
+            self._launch("manual_" + kind, args)
 
     def _launch(self, stage, arguments):
         self.stage = stage
@@ -903,6 +931,9 @@ class _LoadingController(QObject):
             self.ui.mb_state_timer.start()
         elif stage in ("customers", "manual_customers"):
             self.ui.mb_customers_status_label.setText("Выполняется")
+        elif stage == "manual_interactions":
+            for field in ("actions", "orders"):
+                getattr(self.ui, f"mb_{field}_status_label").setText("Выполняется...")
 
     def _read_output(self, process, final=False):
         if process is not self.ui.mb_process:
@@ -1038,7 +1069,6 @@ class _LoadingController(QObject):
             set_status_ok(self.ui, "Получение данных завершено.")
         schedule_status_reset(self.ui, 5)
         self.refresh_persisted()
-        self.refresh_merges()
         self._update_controls()
         if self.closing:
             QTimer.singleShot(0, self.ui.close)
@@ -1100,19 +1130,18 @@ class _LoadingController(QObject):
                     for field in ("actions", "orders", "merges", "customers"):
                         getattr(self.ui, f"mb_{field}_status_label").setText("Не удалось прочитать сохранённые данные")
             return
-        if kind == "merge_info":
-            if error is None:
-                dates, text = result
-                current = tuple(w.date().toString("yyyy-MM-dd") for w in
-                                (self.ui.mb_interaction_since, self.ui.mb_interaction_until, self.ui.mb_merge_since))
-                if dates == current:
-                    self.ui.mb_manual_merges.setText(text)
-            return
         if kind == "state":
             if error is None and self.stage == "training" and self.state == LoadingState.RUNNING:
                 self._show_summary(result)
             return
         if self.state != LoadingState.RUNNING or self.cancel_requested:
+            return
+        if kind == "manual_preflight":
+            if error is not None:
+                self._log("Нет подходящей сохранённой истории объединений клиентов. Сначала обновите объединения через API Mindbox.")
+                self._finish(LoadingState.FAILED)
+            else:
+                self._launch("manual_interactions", self.manual_arguments)
             return
         if error is not None:
             self._log("Не удалось проверить сохранённый результат.")

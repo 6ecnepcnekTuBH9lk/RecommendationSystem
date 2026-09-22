@@ -1,97 +1,121 @@
-# Ручной JSON fallback
+# Ручная загрузка Mindbox JSON
 
-Обновление 18.09.2026: ручной Customers через GUI/CLI теперь атомарно заменяет
-`canonical/customers.sqlite`, используя тот же store, что monthly API update.
-История Customers snapshots больше не создаётся этим маршрутом. Подробности:
-[canonical storage](CANONICAL_STORAGE.md). Описание profile schema v2 ниже относится
-к legacy manifests, которые остаются читаемыми. По уточнению пользователя ручной
-Actions/Orders пока сохраняет прежнюю модель; его перенос в daily storage отложен.
+## Первичная загрузка и дальнейшее обновление
 
-Основной путь — API. Ручной импорт использует сохранённую историю CustomerMerges
-из завершённого API batch, поэтому полностью автономным режимом не является.
+1. Получить CustomerMerges через API с достаточно ранним «Началом истории объединений».
+   Период API Actions/Orders при этом может быть только текущей неделей.
+2. Вручную выгрузить из Mindbox исторические Actions.json и Orders.json за одинаковый
+   большой период, например 01.01.2025 → 01.09.2026, и импортировать оба файла вместе.
+3. При необходимости импортировать полный Customers.json отдельной кнопкой.
 
-## Работа в GUI
+Далее получать новые Actions/Orders и актуализацию CustomerMerges через API, например
+раз в неделю, а Customers обновлять через API периодически. Новые API interactions
+по-прежнему сохраняются по UTC-дням. См. [canonical storage](CANONICAL_STORAGE.md).
 
-На вкладке «Получение данных» один набор selection controls используется для API
-и ручных Actions + Orders. Для ручной загрузки выберите оба JSON и задайте общий
-период в верхних полях. Границы UTC, верхняя граница исключительная. В интерфейсе
-Mindbox UTC+03 границы нужно сдвинуть на +3 часа: 00:00 UTC соответствует 03:00.
-Actions следует выгружать широко; точные VIEW/FAVORITE mappings применяет приложение.
-Период Orders не выводится из firstAction: старые даты создания заказов допустимы.
+## Период и GUI
 
-Customers импортируется отдельной кнопкой: полный snapshot без interaction dates.
-Обе операции выполняются через QProcess. Ход копирования в bytes и проверки в
-records отображается в журнале, общий progress остаётся indeterminate до публикации.
-Кнопка «Отменить» останавливает активную операцию. Manual import не имеет resume;
-повторный запуск читает выбранные исходные файлы заново.
+В блоке «Ручная загрузка из Mindbox» выберите оба JSON и укажите **отдельный**
+«Период выгрузки Actions + Orders». Он не связан с API interaction dates, началом
+истории объединений или периодом Customers. Один набор selection controls остаётся
+общим для API и manual.
 
-CSV-раздел содержит только Номенклатуру, Категории сайта и Координаты городов.
-Это полная замена справочника; append и interaction CSV routes удалены из UI.
-Парсинг, нормализация и запись CSV выполняются в отдельном процессе. GUI получает
-готовые списки видов/коллекций/городов, обновляет связанные controls и кэши, без
-пересчёта всей статистики взаимодействий. Внутренние legacy interaction processors
-пока сохранены для совместимости старых тестов; пользовательских маршрутов к ним нет.
+Период — доверенная metadata пользователя: [since 00:00 UTC, until 00:00 UTC).
+Укажите те же границы, с которыми формировали экспорт. Верхняя граница исключительная.
+В интерфейсе Mindbox UTC+03 полночь UTC соответствует 03:00.
+Ограничения в один день нет. Период не вычисляется из JSON, Orders не разбивается
+по firstAction.dateTimeUtc: дата создания заказа может быть вне периода экспорта.
 
-## Общий pipeline
+Требуется текущий **canonical** CustomerMerges, целиком покрывающий ручной период.
+Legacy API manifests не заменяют его для нового interaction import.
+Если покрытия нет, сначала обновите объединения через API; отдельной кнопки
+«только merges» нет. Предварительная проверка metadata работает в GUI worker,
+окончательная проверка повторяется в процессе импорта под блокировкой хранилища.
 
-API или manual transport → raw → strict streaming reader → selection → адаптеры
-→ CustomerIdResolver → interactions → ProductResolver → PreparedBprData → QC.
-Отдельных manual-адаптеров, selection rules и подготовки BPR нет. ProductResolver
-сохраняет prefix-6 и обязательное сопоставление с Номенклатура.csv.
+Во время manual interactions только поля «Действия» и «Заказы» показывают выполнение.
+После успеха, ошибки или отмены все persisted summaries перечитываются.
+Общий progress остаётся indeterminate; технические paths/markers не попадают в журнал.
+Незавершённый API resume сохраняется после независимой ручной операции.
 
-Customers использует общий потоковый reader и адаптер контактов. После импорта
-обычный CustomerProfileSnapshot читается через load_customer_contact_index.
-JSON не материализуется целиком: буфер копирования 1 MiB, парсера 64 KiB и один
-текущий raw record. Файл копируется, затем проверяется; требуется место для одной
-полной raw-копии. Память resolver/contact index зависит от числа идентификаторов.
+## Хранение и атомарность пары
 
-## Метаданные и публикация
+Новый импорт создаёт одну пару:
 
-Новые training manifests — schema v4. Загрузчик продолжает читать v2 (legacy
-selection defaults) и v3 (сохранённый selection). TrainingBatchExport содержит
-source_kind; API сохраняет настоящий export_id, MANUAL использует null.
-Manual batch содержит три компонента: ссылку на API CustomerMerges и Actions/Orders
-за явно заданный общий период, а также merge_source_training_batch_id.
+~~~text
+canonical/objects/<uuid>/actions/actions_part_001.json
+canonical/objects/<uuid>/orders/orders_part_001.json
+~~~
 
-Новые manual profile snapshots — schema v2; API snapshots v1 и старые v1 manifests
-без transport fields читаются. У manual Customers originating_training_batch_id
-равен null: отдельное поле merge_source_training_batch_id указывает только источник
-истории объединений. Время импорта хранится в created_at/created_at_utc.
-Абсолютный путь к выбранному исходному файлу в manifest не сохраняется.
+В catalog.json schema v2 поле manual_interactions содержит since/until/updated
+и metadata обоих источников: directory, parts=1, source_kind=MANUAL,
+export_id=null, operation=MANUAL. Selection остаётся общим полем каталога.
+Одновременно существует только одна текущая manual-пара. Стабильная точка входа
+training — canonical/training.json; новые training_batches не создаются.
 
-Manual raw находится внутри собственного training_batches/<uuid> либо
-customer_profile_snapshots/<uuid>. Raw и metadata сначала записываются в скрытый
-временный каталог; один rename публикует весь набор. Ошибка до rename не оставляет
-валидного published manifest. После принудительного завершения процесса возможен
-скрытый .manual-* каталог: selectors его игнорируют. Исходный файл не изменяется.
-Публикация уже завершена, если cancel пришёл после commit rename.
+Под storage_lock файлы копируются порциями по 1 MiB в .manual-interactions-*.
+Каждый файл полностью проверяется строгим потоковым reader и теми же adapters,
+что API. CustomerIdResolver строится по canonical CustomerMerges. Никакой физической
+фильтрации raw по selection нет. JSON не материализуется целиком: сохраняется
+одна текущая запись; память resolver зависит от числа идентификаторов объединений.
 
-CustomerMerges выбирается по максимальному created_at среди совместимых завершённых
-API batches. Для interactions merge_since источника должен быть не позже выбранного
-начала истории, а interaction_until — не раньше конца периода. Customers использует
-последний завершённый API source без требования interaction window. Повреждённый API
-final manifest блокирует выбор; скрытой подмены старым источником нет. Raw merges
-проверяются через существующий адаптер и resolver до копирования файлов.
-GUI показывает время создания source batch и coverage; произвольный TTL не вводится.
+После проверки обоих файлов каталог staging переносится в новый UUID object.
+**Единственный логический commit — атомарная замена catalog.json** со ссылками сразу
+на оба файла. Только после commit удаляется прежний manual object.
+Новый явно заданный диапазон может отличаться от старого, включая сужение.
 
-## Orders dedup
+Ошибка Orders, повреждённый JSON, ошибка commit или отмена до переключения каталога
+сохраняет прежнюю пару и metadata. Исходные пользовательские JSON только читаются,
+никогда не перемещаются и не изменяются. При обычной ошибке staging удаляется;
+после принудительного завершения процесса свои confined staging/unreferenced objects
+собираются при следующей безопасной canonical операции под той же блокировкой.
+После commit новая пара уже опубликована, даже если процесс не успел сообщить об успехе.
+Manual import не имеет resume: повторный запуск снова читает выбранные файлы.
 
-Общий preparation хранит order_id → SHA-256 семантического raw snapshot.
-Порядок ключей словаря не влияет на fingerprint; массивы сохраняют порядок,
-числа нормализуются без округления Decimal. Первое occurrence принимается,
-идентичное повторение пропускается. Отличающийся snapshot вызывает безопасную
-ошибку в strict mode, а в diagnose увеличивает conflict counter, устанавливает
-complete=False и даёт QC BLOCK (включая production preflight).
+На время замены требуется место под старую и новую пару. История больших manual
+снимков не накапливается. Пользовательские исходники и legacy directories не собираются.
 
-Диагностика: orders_raw, orders_unique, orders_duplicate_identical,
-orders_duplicate_conflicting. Order IDs и payload не выводятся.
+## Manual + API, перекрытия и разрывы
+
+Manual interval считается одним непрерывным источником. Внутри него приоритет manual:
+API partitions сохраняются, но исключаются из current training dataset.
+Смежные общие API Actions/Orders дни до или после manual range могут его продолжить.
+
+Пример: manual [01.01, 01.07) + API [01.07, 03.07) → current [01.01, 03.07).
+Если API начинается только 03.07, промежуток не считается покрытым.
+Выбирается самый длинный непрерывный диапазон, при равной длительности — более поздний.
+Компоненты вне покрытия CustomerMerges не используются.
+
+Preparation получает manual Actions directory один раз, manual Orders directory один раз
+и отдельные API directories выбранного диапазона. Виртуальных дневных manual components
+нет. Общие selection, order dedup, identity/product resolution, QC и BPR сохранены.
+Диагностика canonical batch считает длительность покрытия в днях, а не количество пар.
+Summary показывает выбранный непрерывный период и максимальное время публикации
+реально используемых источников отдельно для Actions и Orders.
+
+Общий order dedup сохраняет прежнюю семантику: идентичный повтор заказа пропускается;
+различающийся snapshot одного order_id вызывает strict error либо QC BLOCK в diagnose.
+Raw IDs и payload в журнал не выводятся.
+
+## Customers и совместимость
+
+Manual Customers использует canonical_customers.import_full(): отдельная SQLite-база
+строится и проверяется, затем атомарно заменяет canonical/customers.sqlite.
+Период полного ручного снимка неизвестен и не привязывается к manual interaction dates.
+Эта архитектура не меняется. Canonical merges предпочтительны; прежняя совместимость
+Customers с сохранёнными legacy источниками объединений остаётся.
+
+Canonical catalog v1 читается без записи на диск, с manual_interactions=None.
+Следующая mutation записывает v2. Старые training manifests v2/v3/v4 и customer profile
+snapshots v1/v2 остаются читаемыми; explicit legacy manifest можно передать в прежний
+training pipeline. Автомиграции и смешивания legacy с canonical нет.
 
 ## CLI без сети
 
-```text
-python scripts/mindbox_manual_import.py interactions --actions Actions.json --orders Orders.json --since 2026-08-01 --until 2026-08-04 --merge-since "2025-01-01 00:00"
+~~~text
+python scripts/mindbox_manual_import.py interactions --actions Actions.json --orders Orders.json --since 2025-01-01 --until 2026-09-01
 python scripts/mindbox_manual_import.py customers --customers Customers.json
-```
+~~~
 
-Для interactions доступны те же repeated selection arguments, что у export-daily.
-Оба режима поддерживают --raw-root. CLI не читает credentials и не обращается к API.
+Для interactions доступны те же repeated selection arguments, что у API export-daily.
+--merge-since больше не требуется и не принимается. Оба режима поддерживают --raw-root.
+CLI не загружает credentials и не обращается к API. После успеха interactions печатает
+Manifest: <raw-root>/canonical/training.json для существующего GUI protocol.

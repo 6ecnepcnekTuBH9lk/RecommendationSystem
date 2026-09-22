@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,11 @@ from Application.mindbox.training_batch import TrainingBatchWindow
 
 def utc(value):
     return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("No real network"))
 
 
 class Client:
@@ -73,7 +79,7 @@ def test_failure_and_resume_preserve_published_days(tmp_path):
 def test_gap_chooses_longest_then_latest(tmp_path):
     run(tmp_path, until="2026-09-03")
     run(tmp_path, "2026-09-05", "2026-09-07")
-    assert store.continuous_range(store.catalog(tmp_path)) == ("2026-09-05", "2026-09-06")
+    assert [pair["actions"]["since"][:10] for pair in store.continuous_range(store.catalog(tmp_path))] == ["2026-09-05", "2026-09-06"]
     run(tmp_path, "2026-09-03", "2026-09-05")
     assert len(store.continuous_range(store.catalog(tmp_path))) == 6
 
@@ -297,3 +303,90 @@ def test_current_manifest_uses_shared_preparation(tmp_path, monkeypatch):
     assert len(received["actions_export_dirs"]) == 3
     assert received["selection"] == batch.selection
     assert list(iter_export("orders", input_dir=received["orders_export_dirs"][0])) == []
+
+
+def manual_pair(root, since="2026-01-01", until="2026-07-01"):
+    from Application.mindbox.manual_import import import_interactions
+    paths = {}
+    for name in ("actions", "orders"):
+        paths[name] = root / f"{name}.json"
+        paths[name].write_text(json.dumps({EXPORT_ROOTS[name]: []}))
+    return import_interactions(**paths, raw_root=root,
+                               window=TrainingBatchWindow(utc(since), utc(until), utc(since)))
+
+
+def test_manual_overlap_extension_summary_and_single_preparation_source(tmp_path, monkeypatch):
+    from Application.mindbox.daily_training_batch import load_chunked_training_batch, prepare_training_data_from_chunked_batch
+    from Application.model import mindbox_training_preparation as preparation
+    run(tmp_path, "2026-06-20", "2026-07-04")
+    old = store.catalog(tmp_path)
+    manifest = manual_pair(tmp_path)
+    data = store.catalog(tmp_path)
+    assert data["actions"] == old["actions"] and data["orders"] == old["orders"]
+    assert all((tmp_path / entry["directory"]).is_dir() for name in ("actions", "orders") for entry in old[name].values())
+    batch = load_chunked_training_batch(manifest, raw_root=tmp_path, require_complete=True)
+    assert batch.window.interaction_since == utc("2026-01-01")
+    assert batch.window.interaction_until == utc("2026-07-04")
+    assert len(batch.components) == 9  # Merges + one long pair + three daily pairs.
+    assert batch.diagnostics["days_total"] == 184
+    received = {}
+    monkeypatch.setattr(preparation, "_prepare_training_data_from_mindbox_sources", lambda **kwargs: received.update(kwargs))
+    prepare_training_data_from_chunked_batch(batch, raw_root=tmp_path, catalog_path="unused", train_config=None)
+    for name in ("actions", "orders"):
+        expected = (tmp_path / data["manual_interactions"][name]["directory"],
+                    *(tmp_path / data[name][f"2026-07-0{day}"]["directory"] for day in (1, 2, 3)))
+        assert received[f"{name}_export_dirs"] == expected
+        assert len(set(received[f"{name}_export_dirs"])) == 4
+        assert store.summary(tmp_path)[name] == {"since": utc("2026-01-01").isoformat(),
+            "until": utc("2026-07-04").isoformat(), "updated": data["manual_interactions"]["updated"]}
+    # A later API refresh retains manual priority, raw and global selection policy.
+    from dataclasses import replace
+    from Application.mindbox.selection import DEFAULT_SELECTION
+    selection = replace(DEFAULT_SELECTION, view_action_system_names=("OtherView",))
+    jobs.create_job(Client(), raw_root=tmp_path,
+        window=TrainingBatchWindow(utc("2026-06-30"), utc("2026-07-02"), utc("2025-01-01")), selection=selection)
+    assert store.catalog(tmp_path)["manual_interactions"] == data["manual_interactions"]
+    assert store.current_batch(tmp_path).selection == selection
+    assert len(store.current_batch(tmp_path).components) == 9
+
+
+@pytest.mark.parametrize("manual_since,manual_until,api_since,api_until,expected_since,expected_until", [
+    ("2026-01-01", "2026-07-01", "2026-07-03", "2026-07-05", "2026-01-01", "2026-07-01"),
+    ("2026-06-01", "2026-06-03", "2026-07-01", "2026-07-04", "2026-07-01", "2026-07-04"),
+    ("2026-06-01", "2026-06-04", "2026-07-01", "2026-07-04", "2026-07-01", "2026-07-04"),
+    ("2026-07-01", "2026-07-04", "2026-06-01", "2026-06-04", "2026-07-01", "2026-07-04"),
+    ("2026-07-01", "2026-07-04", "2026-06-29", "2026-07-01", "2026-06-29", "2026-07-04"),
+])
+def test_manual_and_api_contiguous_range_rules(tmp_path, manual_since, manual_until, api_since, api_until, expected_since, expected_until):
+    # Get sufficiently broad merges without creating unrelated interaction days.
+    directory = tmp_path / "merges"
+    directory.mkdir()
+    (directory / "customer_merges_part_001.json").write_text('{"customerMerges": []}')
+    with store.storage_lock(tmp_path):
+        store.publish(tmp_path, "customer_merges", utc("2025-01-01"), utc("2027-01-01"), directory)
+    run(tmp_path, api_since, api_until)
+    manual_pair(tmp_path, manual_since, manual_until)
+    batch = store.current_batch(tmp_path)
+    assert (batch.window.interaction_since, batch.window.interaction_until) == (utc(expected_since), utc(expected_until))
+
+
+def test_manual_component_requires_full_merge_coverage_even_after_metadata_change(tmp_path):
+    run(tmp_path, "2026-07-01", "2026-07-04")
+    manual_pair(tmp_path)
+    data = store.catalog(tmp_path)
+    data["customer_merges"]["since"] = utc("2026-06-01").isoformat()
+    pairs = store.continuous_range(data)
+    assert len(pairs) == 3
+    assert all(pair["actions"]["source_kind"] == "API" for pair in pairs)
+
+
+def test_v1_api_mutation_upgrades_without_losing_partitions(tmp_path):
+    run(tmp_path)
+    data = store.catalog(tmp_path)
+    data.pop("manual_interactions")
+    data["schema_version"] = 1
+    store.atomic_json(tmp_path / "canonical/catalog.json", data)
+    run(tmp_path, "2026-09-04", "2026-09-05")
+    current = store.catalog(tmp_path)
+    assert current["schema_version"] == 2 and current["manual_interactions"] is None
+    assert current["orders"]["2026-09-01"] == data["orders"]["2026-09-01"]
