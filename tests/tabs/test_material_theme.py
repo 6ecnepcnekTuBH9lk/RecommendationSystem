@@ -52,7 +52,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("No network in theme tests"))
     window = MainWindow()
     try:
-        window.apply_theme(False)
+        window.apply_theme(True)
         assert window.minimumWidth() < window.maximumWidth()
         assert window.minimumHeight() < window.maximumHeight()
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
@@ -70,8 +70,12 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
             assert csv_fields.itemAtPosition(row, 1).widget() is window.reference_buttons[kind]
             assert window.reference_fields[kind].isReadOnly()
         layout = window.btn_load.parentWidget().layout()
-        assert layout.itemAt(2).widget() is window.btn_load
-        assert layout.itemAt(3).widget() is window.status_files_container
+
+        load_status_row = layout.itemAt(2).layout()
+        assert isinstance(load_status_row, QHBoxLayout)
+
+        assert load_status_row.itemAt(0).widget() is window.btn_load
+        assert load_status_row.itemAt(1).widget() is window.status_files_container
         assert isinstance(window.status_files_layout, QHBoxLayout)
         assert window.status_files_layout.itemAt(0).widget() is window.prefix
         acquisition, processing = window.tabs.widget(0), window.tabs.widget(1)
@@ -104,7 +108,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         photo = table.cellWidget(0, 0)
         resize_modes = [table.horizontalHeader().sectionResizeMode(i) for i in range(table.columnCount())]
         table.selectRow(0)
-        for dark in (True, False):
+        for dark in (False, True):
             QTest.mouseClick(window.theme_switch, Qt.MouseButton.LeftButton)
             assert window._current_is_dark is dark
             assert Path(os.environ["QTMATERIAL_THEME"]).name == (

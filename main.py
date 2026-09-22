@@ -238,7 +238,7 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
 
     window = MainWindow()
-    window.apply_theme(False)
+    window.apply_theme(True)
     window.show()
 
     QTimer.singleShot(0, lambda: print(f"[WINDOW SIZE] {window.width()} x {window.height()}"))

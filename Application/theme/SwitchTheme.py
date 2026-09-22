@@ -29,9 +29,9 @@ class ThemeSwitch(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # Knob position state
-        self._x = PADDING
+        self._x = SWITCH_W - KNOB_SIZE - PADDING
         self._y = PADDING
-        self._checked = False
+        self._checked = True
 
         # Knob container for PNG (do not stretch icon)
         self.knob = QLabel(self)
@@ -43,7 +43,7 @@ class ThemeSwitch(QWidget):
         # Icons
         self.sun_icon = QPixmap(SUN_ICON_PATH)
         self.moon_icon = QPixmap(MOON_ICON_PATH)
-        self.knob.setPixmap(self._center_icon(self.sun_icon))
+        self.knob.setPixmap(self._center_icon(self.moon_icon))
 
         # Animation
         self.anim = QPropertyAnimation(self, b"knob_pos", self)

@@ -552,10 +552,10 @@ def create_data_loading_widgets_tab(aboba):
     aboba.mb_manual_paths = {name: () for name in ("actions", "orders", "customers")}
     aboba.mb_manual_controls = []
 
-    for row, (name, icon_name) in enumerate((
-            ("Actions", "actions.png"),
-            ("Orders", "order.png"),
-            ("Customers", "customers.png"),
+    for row, (name, button_text, icon_name) in enumerate((
+            ("Actions", " Выбрать действия", "Actions.png"),
+            ("Orders", " Выбрать заказы", "Order.png"),
+            ("Customers", " Выбрать клиентов", "Customers.png"),
     )):
         editor = QLineEdit()
         editor.setReadOnly(True)
@@ -564,7 +564,7 @@ def create_data_loading_widgets_tab(aboba):
         )
 
         button = QPushButton(
-            " Выбрать " + name
+            " " + button_text
         )
 
         button.setIcon(
@@ -675,7 +675,7 @@ def create_data_loading_widgets_tab(aboba):
         QIcon(
             str(
                 ICONS_DIR
-                / "Plus.png"
+                / "plus.png"
             )
         )
     )

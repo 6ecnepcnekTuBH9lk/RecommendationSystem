@@ -47,60 +47,183 @@ def create_csv_loading_section(aboba):
     left_layout = QVBoxLayout(section)
     left_layout.setContentsMargins(0, 0, 0, 0)
     left_layout.setSpacing(12)
+
     # Заголовок CSV-раздела
     aboba.heading_load_data = QLabel("Загрузка справочников")
-    aboba.heading_load_data.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    aboba.heading_load_data.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
     aboba.heading_load_data.setAlignment(Qt.AlignmentFlag.AlignCenter)
     aboba.heading_load_data.setProperty("class", "sectionHeader")
-    left_layout.addWidget(aboba.heading_load_data, alignment=Qt.AlignmentFlag.AlignHCenter)
+    left_layout.addWidget(
+        aboba.heading_load_data,
+        alignment=Qt.AlignmentFlag.AlignHCenter,
+    )
 
-    aboba.reference_paths = {kind: None for kind in REFERENCE_TYPES}
+    aboba.reference_paths = {
+        kind: None
+        for kind in REFERENCE_TYPES
+    }
     aboba.reference_fields = {}
     aboba.reference_buttons = {}
     aboba.reference_controls = []
     aboba.reference_status_overrides = {}
+
     fields = QGridLayout()
     fields.setVerticalSpacing(10)
     fields.setHorizontalSpacing(12)
-    titles = ("Выбрать номенклатуру", "Выбрать категории", "Выбрать координаты")
-    for row, ((kind, (filename, *_)), title) in enumerate(zip(REFERENCE_TYPES.items(), titles)):
+
+    button_specs = (
+        (
+            " Выбрать номенклатуру",
+            "nomenclature.png",
+        ),
+        (
+            " Выбрать категории",
+            "categories.png",
+        ),
+        (
+            " Выбрать координаты",
+            "coordinates.png",
+        ),
+    )
+
+    for row, (
+        (kind, (filename, *_)),
+        (button_text, icon_name),
+    ) in enumerate(
+        zip(
+            REFERENCE_TYPES.items(),
+            button_specs,
+        )
+    ):
         editor = QLineEdit()
         editor.setReadOnly(True)
-        editor.setPlaceholderText(filename)
-        button = QPushButton(QIcon(str(ICONS_DIR / "load_file.png")), title)
-        button.setIconSize(QSize(17, 17))
-        def choose(_checked=False, kind=kind):
-            path, _ = QFileDialog.getOpenFileName(aboba, "Выберите CSV справочник", "", "CSV (*.csv)")
+        display_name = "".join(part.capitalize() for part in Path(filename).stem.split("_")) + Path(filename).suffix
+        editor.setPlaceholderText(display_name)
+
+        button = QPushButton(
+            QIcon(
+                str(
+                    ICONS_DIR
+                    / icon_name
+                )
+            ),
+            button_text,
+        )
+        button.setIconSize(
+            QSize(17, 17)
+        )
+
+        def choose(
+            _checked=False,
+            kind=kind,
+        ):
+            path, _ = QFileDialog.getOpenFileName(
+                aboba,
+                "Выберите CSV справочник",
+                "",
+                "CSV (*.csv)",
+            )
+
             if path:
                 selected = Path(path).resolve()
                 aboba.reference_paths[kind] = selected
-                aboba.reference_fields[kind].setText(selected.name)
-                aboba.reference_fields[kind].setToolTip(str(selected))
+
+                aboba.reference_fields[kind].setText(
+                    selected.name
+                )
+                aboba.reference_fields[kind].setToolTip(
+                    str(selected)
+                )
+
         button.clicked.connect(choose)
+
         aboba.reference_fields[kind] = editor
         aboba.reference_buttons[kind] = button
-        aboba.reference_controls.extend((editor, button))
-        fields.addWidget(editor, row, 0)
-        fields.addWidget(button, row, 1)
+        aboba.reference_controls.extend(
+            (editor, button)
+        )
+
+        fields.addWidget(
+            editor,
+            row,
+            0,
+        )
+        fields.addWidget(
+            button,
+            row,
+            1,
+        )
+
     fields.setColumnStretch(0, 1)
+
     left_layout.addLayout(fields)
 
-    aboba.btn_load = QPushButton(QIcon(str(ICONS_DIR / "load_file.png")), "Загрузить справочники")
-    aboba.btn_load.setIconSize(QSize(17, 17))
-    aboba.btn_load.clicked.connect(lambda: load_csv_file(aboba))
-    left_layout.addWidget(aboba.btn_load, alignment=Qt.AlignmentFlag.AlignHCenter)
+    # ----------------------------------------------------------
+    # Общая кнопка + статус на одной строке
+    # ----------------------------------------------------------
+
+    aboba.btn_load = QPushButton(
+        QIcon(
+            str(
+                ICONS_DIR
+                / "load_file.png"
+            )
+        ),
+        " Загрузить справочники",
+    )
+    aboba.btn_load.setIconSize(
+        QSize(17, 17)
+    )
+    aboba.btn_load.clicked.connect(
+        lambda: load_csv_file(aboba)
+    )
 
     # Статус загрузки файлов
     aboba.status_files_layout = QHBoxLayout()
-    aboba.status_files_layout.setContentsMargins(0, 0, 0, 0)
+    aboba.status_files_layout.setContentsMargins(
+        0,
+        0,
+        0,
+        0,
+    )
     aboba.status_files_layout.setSpacing(0)
 
     aboba.status_files_container = QWidget()
-    aboba.status_files_container.setLayout(aboba.status_files_layout)
+    aboba.status_files_container.setLayout(
+        aboba.status_files_layout
+    )
 
-    left_layout.addWidget(aboba.status_files_container)
+    # Кнопка и статус — одна строка
+    load_status_row = QHBoxLayout()
+    load_status_row.setContentsMargins(
+        0,
+        0,
+        0,
+        0,
+    )
+    load_status_row.setSpacing(12)
+
+    load_status_row.addWidget(
+        aboba.btn_load,
+        0,
+        Qt.AlignmentFlag.AlignVCenter,
+    )
+
+    load_status_row.addWidget(
+        aboba.status_files_container,
+        1,
+        Qt.AlignmentFlag.AlignVCenter,
+    )
+
+    left_layout.addLayout(
+        load_status_row
+    )
 
     update_file_status(aboba)
+
     return section
 
 
@@ -498,8 +621,8 @@ def update_file_status(aboba):
 
     files = {
         "Номенклатура": "nomenclature.csv",
-        "Категории": "site_categories.csv",
-        "Координаты": "city_coordinates.csv"
+        "Категории сайта  ": "site_categories.csv",
+        "Координаты городов  ": "city_coordinates.csv"
     }
 
     # Очистка старых виджетов
