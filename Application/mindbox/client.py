@@ -113,19 +113,62 @@ class MindboxClient:
         return result
 
     def wait_for_export(
-        self, operation: str, export_id: str, *, poll_interval: float = 5.0,
-        timeout: float = 600.0,
+            self,
+            operation: str,
+            export_id: str,
+            *,
+            poll_interval: float = 5.0,
+            timeout: float = 600.0,
+            on_heartbeat: Callable[[], None] | None = None,
+            heartbeat_interval: float = 300.0,
     ) -> list[str]:
         self._positive(poll_interval)
         self._positive(timeout)
+
+        if on_heartbeat is not None:
+            self._positive(heartbeat_interval)
+
         deadline = time.monotonic() + timeout
+        next_heartbeat = (
+            time.monotonic() + heartbeat_interval
+            if on_heartbeat is not None
+            else None
+        )
+
         while True:
-            self._remaining(deadline, MindboxExportTimeoutError)
-            result = self.get_export_status(operation, export_id, deadline=deadline)
-            self._remaining(deadline, MindboxExportTimeoutError)
+            self._remaining(
+                deadline,
+                MindboxExportTimeoutError,
+            )
+
+            result = self.get_export_status(
+                operation,
+                export_id,
+                deadline=deadline,
+            )
+
+            self._remaining(
+                deadline,
+                MindboxExportTimeoutError,
+            )
+
             if result["processingStatus"] == "Ready":
                 return list(result["urls"])
-            self._sleep(poll_interval, deadline, MindboxExportTimeoutError)
+
+            if on_heartbeat is not None:
+                now = time.monotonic()
+
+                if now >= next_heartbeat:
+                    on_heartbeat()
+
+                    while next_heartbeat <= now:
+                        next_heartbeat += heartbeat_interval
+
+            self._sleep(
+                poll_interval,
+                deadline,
+                MindboxExportTimeoutError,
+            )
 
     def download_export(
         self, export_name: str, urls: Sequence[str], *, storage: RawExportStorage | None = None,

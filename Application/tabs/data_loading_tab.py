@@ -29,6 +29,89 @@ from Application.settings.set_status import (set_status_error, set_status_ok,
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_ROOT = INPUT_DATA_DIR / "MindboxRaw"
 
+STATUS_RESET_SECONDS = 5
+
+JOURNAL_SOURCE_TITLES = {
+    "actions": "Действия",
+    "orders": "Заказы",
+    "customers": "Клиенты",
+    "customer_merges": "Объединения клиентов",
+}
+
+REFERENCE_JOURNAL_TITLES = {
+    "Номенклатура из 1С": "Номенклатура",
+    "Категории сайта из 1С": "Категории сайта",
+    "Координаты городов и погода": "Координаты городов",
+}
+
+OPERATION_UI = {
+    "api_interactions": {
+        "running": "Идёт получение данных из Mindbox...",
+        "success_status": "Данные Mindbox успешно обновлены",
+        "failure_status": "Ошибка получения данных из Mindbox",
+        "cancel_status": "Получение данных из Mindbox отменено",
+        "success_log": "Получение данных из Mindbox → завершено успешно",
+        "failure_log": "Получение данных из Mindbox → завершено с ошибкой",
+        "cancel_log": "Получение данных из Mindbox → отменено",
+    },
+    "api_customers": {
+        "running": "Идёт обновление клиентов из Mindbox...",
+        "success_status": "Клиенты Mindbox успешно обновлены",
+        "failure_status": "Ошибка обновления клиентов из Mindbox",
+        "cancel_status": "Обновление клиентов из Mindbox отменено",
+        "success_log": "Обновление клиентов из Mindbox → завершено успешно",
+        "failure_log": "Обновление клиентов из Mindbox → завершено с ошибкой",
+        "cancel_log": "Обновление клиентов из Mindbox → отменено",
+    },
+    "manual_interactions": {
+        "running": "Идёт ручной импорт действий и заказов...",
+        "success_status": "Действия и заказы успешно импортированы",
+        "failure_status": "Ошибка ручного импорта действий и заказов",
+        "cancel_status": "Ручной импорт действий и заказов отменён",
+        "success_log": "Ручной импорт действий и заказов → завершён успешно",
+        "failure_log": "Ручной импорт действий и заказов → завершён с ошибкой",
+        "cancel_log": "Ручной импорт действий и заказов → отменён",
+    },
+    "manual_customers": {
+        "running": "Идёт ручной импорт клиентов...",
+        "success_status": "Клиенты успешно импортированы",
+        "failure_status": "Ошибка ручного импорта клиентов",
+        "cancel_status": "Ручной импорт клиентов отменён",
+        "success_log": "Ручной импорт клиентов → завершён успешно",
+        "failure_log": "Ручной импорт клиентов → завершён с ошибкой",
+        "cancel_log": "Ручной импорт клиентов → отменён",
+    },
+    "references": {
+        "running": "Идёт загрузка справочников...",
+        "success_status": "Справочники успешно загружены",
+        "failure_status": "Ошибка загрузки справочников",
+        "cancel_status": "Загрузка справочников отменена",
+        "success_log": "Загрузка справочников → завершена успешно",
+        "failure_log": "Загрузка справочников → завершена с ошибкой",
+        "cancel_log": "Загрузка справочников → отменена",
+    },
+}
+
+def _formatted_count(value):
+    return f"{value:,}".replace(",", " ")
+
+
+def _record_word(value):
+    tail = value % 100
+
+    if 11 <= tail <= 14:
+        return "записей"
+
+    tail = value % 10
+
+    if tail == 1:
+        return "запись"
+
+    if 2 <= tail <= 4:
+        return "записи"
+
+    return "записей"
+
 
 def set_manual_files(ui, name, sources):
     paths = normalize_sources(sources)
@@ -809,6 +892,8 @@ class _LoadingController(QObject):
         self.reference_kind = None
         self.tasks = {}
         self._task_number = 0
+        self.operation = "api_interactions"
+        self.manual_journal_source = None
         aboba.mb_process = None
         aboba.mb_current_state_path = None
         aboba.mb_state_timer = QTimer(self)
@@ -853,26 +938,61 @@ class _LoadingController(QObject):
         self.ui.mb_log.ensureCursorVisible()
 
     def _error(self, message):
-        self._report_error(safe_message(message))
-        set_status_error(self.ui, safe_message(message))
+        message = safe_message(message)
+
+        self._report_error(message)
+        set_status_error(
+            self.ui,
+            message,
+        )
+
+        if self.state != LoadingState.RUNNING:
+            schedule_status_reset(
+                self.ui,
+                STATUS_RESET_SECONDS,
+            )
 
     def _report_error(self, message):
-        if self.state == LoadingState.RUNNING and self.stage == "reference_csv" and self.reference_kind:
-            message = f"{self.reference_kind}: {message}"
+        if (
+                self.state == LoadingState.RUNNING
+                and self.stage == "reference_csv"
+                and self.reference_kind
+        ):
+            title = REFERENCE_JOURNAL_TITLES.get(
+                self.reference_kind,
+                self.reference_kind,
+            )
+
+            message = f"{title} → {message}"
         self.error_reported = True
         self._log(message)
 
-    def _begin(self):
+    def _begin(self, operation="api_interactions"):
         self.generation += 1
+        self.operation = operation
+        self.manual_journal_source = None
         self.error_reported = False
         self.cancel_requested = False
         self.state = LoadingState.RUNNING
-        reset_timer = getattr(self.ui, "_status_reset_timer", None)
+
+        reset_timer = getattr(
+            self.ui,
+            "_status_reset_timer",
+            None,
+        )
+
         if reset_timer is not None:
             reset_timer.stop()
-        set_status_processing(self.ui, "Идёт получение данных из Mindbox...")
+
+        set_status_processing(
+            self.ui,
+            OPERATION_UI[operation]["running"],
+        )
+
         self.ui.mb_progress.setRange(0, 0)
-        self.ui.mb_progress.setFormat("Идёт загрузка...")
+        self.ui.mb_progress.setFormat(
+            "Идёт загрузка..."
+        )
         self.ui.mb_log.clear()
         self._update_controls()
 
@@ -894,12 +1014,32 @@ class _LoadingController(QObject):
         self.resume_path = None
         a.mb_current_state_path = None
         self.manifest_path = self.snapshot_path = None
-        self._begin()
+        self._begin("api_interactions")
+
         for name in ("merges", "actions", "orders"):
-            getattr(a, f"mb_{name}_status_label").setText("Выполняется...")
-        self._log("Запуск получения данных")
-        self._log(f"Период: {a.mb_interaction_since.text()} — {a.mb_interaction_until.text()}")
-        self._launch("training", args)
+            getattr(
+                a,
+                f"mb_{name}_status_label",
+            ).setText("Выполняется...")
+
+        self._log(
+            "Получение данных из Mindbox → начато"
+        )
+        self._log(
+            f"Период взаимодействий → "
+            f"{a.mb_interaction_since.text()} — "
+            f"{a.mb_interaction_until.text()}"
+        )
+        self._log(
+            f"История объединений клиентов → "
+            f"с {a.mb_merge_since.text()}"
+        )
+        self._log("", timestamp=False)
+
+        self._launch(
+            "training",
+            args,
+        )
 
     def start_customers(self):
         if self.state == LoadingState.RUNNING:
@@ -915,9 +1055,22 @@ class _LoadingController(QObject):
         self.snapshot_path = None
         self.ui.mb_current_state_path = None
         self._begin()
-        self._log("Запуск обновления клиентов")
-        self._log(f"Период: {self.ui.mb_customers_since.text()} — {self.ui.mb_customers_until.text()}")
-        self._launch("customers", args)
+        self._begin("api_customers")
+
+        self._log(
+            "Обновление клиентов из Mindbox → начато"
+        )
+        self._log(
+            f"Период клиентов → "
+            f"{self.ui.mb_customers_since.text()} — "
+            f"{self.ui.mb_customers_until.text()}"
+        )
+        self._log("", timestamp=False)
+
+        self._launch(
+            "customers",
+            args,
+        )
 
     def refresh_persisted(self):
         self._read_metadata("persisted", _persisted_summary)
@@ -944,7 +1097,13 @@ class _LoadingController(QObject):
         self.reference_queue = list(selected)
         self.reference_failures = []
         self.previous_resume_path = self.resume_path
-        self._begin()
+        self._begin("references")
+
+        self._log(
+            "Загрузка справочников → начата"
+        )
+        self._log("", timestamp=False)
+
         self.ui.mb_progress.setRange(0, 0)
         self._next_reference()
 
@@ -953,7 +1112,14 @@ class _LoadingController(QObject):
         self.reference_kind = kind
         self.reference_result = None
         self.error_reported = False
-        self._log(f"Загрузка справочника: {kind}")
+        title = REFERENCE_JOURNAL_TITLES.get(
+            kind,
+            kind,
+        )
+
+        self._log(
+            f"{title} → обработка файла"
+        )
         self._launch("reference_csv", ["-u", "-X", "utf8", str(PROJECT_ROOT / "scripts/import_reference_csv.py"),
                                        "--file", str(path), "--kind", kind])
 
@@ -963,14 +1129,27 @@ class _LoadingController(QObject):
         failed = code != 0 or status != QProcess.ExitStatus.NormalExit or self.error_reported
         if failed:
             if not self.error_reported:
-                self._report_error(f"Ошибка импорта справочника: процесс завершился с кодом {code}.")
+                self._report_error(
+                    f"Ошибка импорта справочника → "
+                    f"процесс завершился с кодом {code}."
+                )
         elif self.reference_result is None:
-            self._report_error("Ошибка импорта справочника: процесс не передал результат импорта.")
+            self._report_error(
+                "Ошибка импорта справочника → "
+                "процесс не передал результат импорта."
+            )
             failed = True
         else:
             try:
                 apply_reference_result(self.ui, self.reference_result)
-                self._log(f"Справочник загружен: {kind}")
+                title = REFERENCE_JOURNAL_TITLES.get(
+                    kind,
+                    kind,
+                )
+
+                self._log(
+                    f"{title} → загрузка завершена"
+                )
             except Exception as exc:
                 self._report_error(format_error(error_record(exc), context="Ошибка применения справочника"))
                 failed = True
@@ -983,7 +1162,10 @@ class _LoadingController(QObject):
         else:
             if self.reference_failures:
                 self.error_reported = True
-                self._log("Не загружены справочники: " + ", ".join(self.reference_failures))
+                self._log(
+                    "Не загружены справочники → "
+                    + ", ".join(self.reference_failures)
+                )
             self._finish(LoadingState.FAILED if self.reference_failures else LoadingState.SUCCESS)
 
     def start_manual(self, kind):
@@ -1015,7 +1197,32 @@ class _LoadingController(QObject):
         self.previous_resume_path = self.resume_path
         self.manifest_path = self.snapshot_path = self.resume_path = None
         a.mb_current_state_path = None
-        self._begin()
+        if kind == "interactions":
+            self._begin(
+                "manual_interactions"
+            )
+
+            self._log(
+                "Ручной импорт действий и заказов → начат"
+            )
+            self._log(
+                f"Период данных → "
+                f"{a.mb_manual_since.text()} — "
+                f"{a.mb_manual_until.text()}"
+            )
+            self._log("", timestamp=False)
+
+        else:
+            self._begin(
+                "manual_customers"
+            )
+
+            self._log(
+                "Ручной импорт клиентов → начат"
+            )
+            self._log("", timestamp=False)
+
+        a.mb_progress.setRange(0, 0)
         a.mb_progress.setRange(0, 0)
         if kind == "interactions":
             self.stage = "manual_interactions"
@@ -1062,16 +1269,172 @@ class _LoadingController(QObject):
 
     def _consume_line(self, line):
         # Manual progress is a closed grammar: no paths, record values or arbitrary stdout.
-        if self.stage in ("manual_interactions", "manual_customers"):
-            match = re.fullmatch(r"(Копирование|Проверка) (actions|orders|customers): файл ([0-9]{1,9}) из ([0-9]{1,9})", line)
+        if self.stage in (
+                "manual_interactions",
+                "manual_customers",
+        ):
+            match = re.fullmatch(
+                r"(?:Копирование|Загрузка|Проверка) "
+                r"(actions|orders|customers): "
+                r"файл ([0-9]{1,9}) из ([0-9]{1,9})",
+                line,
+            )
+
             if match:
-                part, total = int(match[3]), int(match[4])
+                source = match[1]
+                part = int(match[2])
+                total = int(match[3])
+
                 if 1 <= part <= total:
-                    self._log(f"{match[1]} {match[2]}: файл {part} из {total}")
+                    if (
+                            self.manual_journal_source is not None
+                            and self.manual_journal_source != source
+                    ):
+                        self._log(
+                            "",
+                            timestamp=False,
+                        )
+
+                    self.manual_journal_source = source
+
+                    title = JOURNAL_SOURCE_TITLES[
+                        source
+                    ]
+
+                    self._log(
+                        f"{title} → загрузка файлов — "
+                        f"{part} из {total}"
+                    )
+
                 return
-            if line in ("Проверка actions ...", "Проверка orders ..."):
-                self._log(line)
+
+            match = re.fullmatch(
+                r"Проверка "
+                r"(actions|orders|customers) "
+                r"\.\.\.",
+                line,
+            )
+
+            if match:
+                source = match[1]
+                title = JOURNAL_SOURCE_TITLES[
+                    source
+                ]
+
+                self._log(
+                    f"{title} → "
+                    f"проверка структуры данных"
+                )
                 return
+
+            match = re.fullmatch(
+                r"Проверка "
+                r"(actions|orders|customers): "
+                r"([0-9]{1,18}) записей",
+                line,
+            )
+
+            if match:
+                source = match[1]
+                count = int(match[2])
+
+                title = JOURNAL_SOURCE_TITLES[
+                    source
+                ]
+
+                self._log(
+                    f"{title} → проверено "
+                    f"{_formatted_count(count)} "
+                    f"{_record_word(count)}"
+                )
+                return
+
+            match = re.fullmatch(
+                r"Проверка "
+                r"(actions|orders|customers) "
+                r"завершена: "
+                r"([0-9]{1,18}) записей",
+                line,
+            )
+
+            if match:
+                source = match[1]
+                count = int(match[2])
+
+                title = JOURNAL_SOURCE_TITLES[
+                    source
+                ]
+
+                self._log(
+                    f"{title} → проверка завершена — "
+                    f"{_formatted_count(count)} "
+                    f"{_record_word(count)}"
+                )
+                return
+
+        if line.startswith("Phase: "):
+            try:
+                event = json.loads(
+                    line[len("Phase: "):]
+                )
+
+                source = event["source"]
+                phase = event["phase"]
+
+                if source not in JOURNAL_SOURCE_TITLES:
+                    return
+
+                messages = {
+                    "started": "экспорт запущен",
+                    "waiting": (
+                        "ожидается формирование "
+                        "выгрузки в Mindbox"
+                    ),
+                    "forming": "экспорт формируется",
+                    "ready": "экспорт готов",
+                    "downloading": "скачивание",
+                }
+
+                status_messages = {
+                    "started": "Экспорт запущен",
+                    "waiting": "Ожидается Mindbox...",
+                    "forming": "Формируется в Mindbox...",
+                    "ready": "Экспорт готов",
+                    "downloading": "Скачивание...",
+                }
+
+                if phase not in messages:
+                    return
+
+                title = JOURNAL_SOURCE_TITLES[
+                    source
+                ]
+
+                self._log(
+                    f"{title} → {messages[phase]}"
+                )
+
+                field = (
+                    "merges"
+                    if source == "customer_merges"
+                    else source
+                )
+
+                getattr(
+                    self.ui,
+                    f"mb_{field}_status_label",
+                ).setText(
+                    status_messages[phase]
+                )
+
+            except (
+                    ValueError,
+                    KeyError,
+                    TypeError,
+            ):
+                pass
+
+            return
         if self.stage == "reference_csv" and line.startswith("Reference: "):
             try:
                 self.reference_result = json.loads(line[len("Reference: "):])
@@ -1080,19 +1443,86 @@ class _LoadingController(QObject):
             return
         if line.startswith("Event: "):
             try:
-                event = json.loads(line[7:])
-                source, ready, total = event["source"], event["ready"], event["total"]
-                labels = {"actions": ("actions", "Действия", "дней"), "orders": ("orders", "Заказы", "дней"),
-                          "customer_merges": ("merges", "Объединения клиентов", ""), "customers": ("customers", "Клиенты", "месяцев")}
-                field, title, unit = labels[source]
-                if type(ready) is not int or type(total) is not int or not 0 <= ready <= total:
+                event = json.loads(
+                    line[len("Event: "):]
+                )
+
+                source = event["source"]
+                ready = event["ready"]
+                total = event["total"]
+
+                labels = {
+                    "actions": (
+                        "actions",
+                        "Действия",
+                        "дней",
+                    ),
+                    "orders": (
+                        "orders",
+                        "Заказы",
+                        "дней",
+                    ),
+                    "customer_merges": (
+                        "merges",
+                        "Объединения клиентов",
+                        None,
+                    ),
+                    "customers": (
+                        "customers",
+                        "Клиенты",
+                        "месяцев",
+                    ),
+                }
+
+                field, title, unit = labels[
+                    source
+                ]
+
+                if (
+                        type(ready) is not int
+                        or type(total) is not int
+                        or not 0 <= ready <= total
+                ):
                     return
-                text = f"Загружено {unit}: {ready} из {total}" if unit else "Получены"
-                getattr(self.ui, f"mb_{field}_status_label").setText(text)
-                if source == "customers" or source == "customer_merges" or ready % 5 == 0 or ready == total:
-                    self._log(f"{title}: {text.lower()}")
-            except (ValueError, KeyError, TypeError):
+
+                if source == "customer_merges":
+                    status_text = "Сохранены"
+
+                else:
+                    status_text = (
+                        f"Загружено {unit}: "
+                        f"{ready} из {total}"
+                    )
+
+                getattr(
+                    self.ui,
+                    f"mb_{field}_status_label",
+                ).setText(status_text)
+
+                if source == "customer_merges":
+                    self._log(
+                        "Объединения клиентов → сохранены"
+                    )
+
+                elif source == "customers":
+                    self._log(
+                        f"Клиенты → сохранено "
+                        f"{ready} из {total} месяцев"
+                    )
+
+                elif ready % 5 == 0 or ready == total:
+                    self._log(
+                        f"{title} → сохранено "
+                        f"{ready} из {total} дней"
+                    )
+
+            except (
+                    ValueError,
+                    KeyError,
+                    TypeError,
+            ):
                 pass
+
             return
         if line.startswith("Error: "):
             if self.cancel_requested:
@@ -1152,12 +1582,20 @@ class _LoadingController(QObject):
         elif self.stage == "training":
             self.stage = "training_validation"
             if self.manifest_path is None:
-                self._report_error("Ошибка выгрузки: процесс не передал подтверждение сохранённого результата.")
+                self._report_error(
+                    "Ошибка выгрузки → "
+                    "процесс не передал подтверждение "
+                    "сохранённого результата."
+                )
                 self._finish(LoadingState.FAILED)
             else:
                 self._read_metadata("training_manifest", _load_training_summary, self.manifest_path, True)
         elif self.snapshot_path is None:
-            self._report_error("Ошибка выгрузки клиентов: процесс не передал подтверждение сохранённого результата.")
+            self._report_error(
+                "Ошибка выгрузки клиентов → "
+                "процесс не передал подтверждение "
+                "сохранённого результата."
+            )
             self._finish(LoadingState.FAILED)
         else:
             self.stage = "snapshot_validation"
@@ -1180,28 +1618,80 @@ class _LoadingController(QObject):
         self.ui.mb_progress.setRange(0, 1)
         self.ui.mb_progress.setValue(0)
         self.ui.mb_progress.setFormat("Прогресс загрузки")
+        messages = OPERATION_UI.get(
+            self.operation,
+            OPERATION_UI["api_interactions"],
+        )
+
         if state == LoadingState.CANCELLED:
-            self._log("Операция отменена. Уже сохранённые данные остаются доступны.")
-            set_status_ok(self.ui, "Получение данных отменено")
+            self._log(
+                messages["cancel_log"]
+            )
+
+            if self.resume_path is not None:
+                self._log(
+                    "Состояние загрузки → сохранено, "
+                    "операцию можно продолжить позже"
+                )
+            else:
+                self._log(
+                    "Ранее сохранённые данные → "
+                    "не изменены"
+                )
+
+            set_status_ok(
+                self.ui,
+                messages["cancel_status"],
+            )
+
         elif state == LoadingState.FAILED:
             if not self.error_reported:
-                self._report_error("Ошибка: процесс завершился без дополнительного описания причины.")
-            self._log("Операция завершилась с ошибкой. Ранее сохранённые данные остаются доступны.")
-            set_status_error(self.ui, "Операция завершилась с ошибкой.")
+                self._report_error(
+                    "Ошибка операции → "
+                    "процесс завершился без "
+                    "дополнительного описания причины."
+                )
+
+            self._log(
+                messages["failure_log"]
+            )
+
+            set_status_error(
+                self.ui,
+                messages["failure_status"],
+            )
+
         else:
-            self._log("Клиенты успешно обновлены" if self.stage in ("customers", "snapshot_validation", "manual_customers") else "Данные успешно обновлены")
-            set_status_ok(self.ui, "Получение данных завершено.")
-        schedule_status_reset(self.ui, 5)
+            self._log(
+                messages["success_log"]
+            )
+
+            set_status_ok(
+                self.ui,
+                messages["success_status"],
+            )
+
+        schedule_status_reset(
+            self.ui,
+            STATUS_RESET_SECONDS,
+        )
+
         self.refresh_persisted()
         self._update_controls()
+
         if self.closing:
-            QTimer.singleShot(0, self.ui.close)
+            QTimer.singleShot(
+                0,
+                self.ui.close,
+            )
 
     def cancel(self):
         if self.state != LoadingState.RUNNING or self.cancel_requested:
             return
         self.cancel_requested = True
-        self._log("Остановка операции…")
+        self._log(
+            "Отмена операции → запрос принят"
+        )
         self._update_controls()
         process = self.ui.mb_process
         if process is None:
@@ -1221,9 +1711,23 @@ class _LoadingController(QObject):
         self.ui.mb_current_state_path = self.resume_path
         self.manifest_path = None
         self.snapshot_path = None
-        self._begin()
-        self._log("Продолжение незавершённой загрузки")
-        self._launch(self.resume_stage, resume_arguments(self.resume_path))
+        operation = (
+            "api_customers"
+            if self.resume_stage == "customers"
+            else "api_interactions"
+        )
+
+        self._begin(operation)
+
+        self._log(
+            "Продолжение загрузки → начато"
+        )
+        self._log("", timestamp=False)
+
+        self._launch(
+            self.resume_stage,
+            resume_arguments(self.resume_path),
+        )
 
     def _poll_state(self):
         path = self.ui.mb_current_state_path

@@ -179,7 +179,11 @@ def test_default_mappings_are_confirmed_and_disjoint():
         "DobavlenieProduktaVSpisokVOperaciiDobavlenie",
         "DobavlenieProduktaVSpisokVOperaciiDobavlenieTovara",
     })
-    assert rules.view_action_system_names == frozenset({"ProsmotrProdukta", "ProsmotrProduktaVApiMethod"})
+    assert rules.view_action_system_names == frozenset({
+        "ProsmotrProdukta",
+        "ProsmotrProduktaVApiMethod",
+        "ProsmotrProduktaVOperaciiKz",
+    })
     assert rules.purchase_line_statuses == frozenset({"CP", "delivering", "F"})
     assert rules.view_action_system_names.isdisjoint(rules.favorite_action_system_names)
 

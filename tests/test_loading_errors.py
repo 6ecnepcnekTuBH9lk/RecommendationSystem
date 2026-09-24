@@ -35,19 +35,68 @@ def test_safe_reasons_preserved(value):
 def test_structured_exception_details_preserved(value):
     assert safe_message("  " + value + "  ") == value
     assert error_record(ValueError(value))["message"] == value
-    assert format_error({"error_type": "ValueError", "message": value}, context="Ошибка") == "Ошибка: ValueError: " + value
+    assert (
+            format_error(
+                {
+                    "error_type": "ValueError",
+                    "message": value,
+                },
+                context="Ошибка",
+            )
+            == "Ошибка → ValueError → " + value
+    )
 
 
-@pytest.mark.parametrize("kind,message,expected", [
-    ("AttributeError", "'Foo' object has no attribute 'bar'", "AttributeError: 'Foo' object has no attribute 'bar'"),
-    ("KeyError", "'ids'", "KeyError: 'ids'"),
-    ("ValueError", "  ", "ValueError"),
-    (None, "Missing column 'Город'", "Missing column 'Город'"),
-    (None, None, "Неизвестная ошибка."),
-    ("", "", "Неизвестная ошибка."),
-])
-def test_error_type_and_message_fallbacks(kind, message, expected):
-    assert format_error({"error_type": kind, "message": message}, context="Ошибка") == "Ошибка: " + expected
+@pytest.mark.parametrize(
+    "kind,message,expected",
+    [
+        (
+            "AttributeError",
+            "'Foo' object has no attribute 'bar'",
+            "AttributeError → 'Foo' object has no attribute 'bar'",
+        ),
+        (
+            "KeyError",
+            "'ids'",
+            "KeyError → 'ids'",
+        ),
+        (
+            "ValueError",
+            "  ",
+            "ValueError",
+        ),
+        (
+            None,
+            "Missing column 'Город'",
+            "Missing column 'Город'",
+        ),
+        (
+            None,
+            None,
+            "Неизвестная ошибка.",
+        ),
+        (
+            "",
+            "",
+            "Неизвестная ошибка.",
+        ),
+    ],
+)
+def test_error_type_and_message_fallbacks(
+    kind,
+    message,
+    expected,
+):
+    assert (
+        format_error(
+            {
+                "error_type": kind,
+                "message": message,
+            },
+            context="Ошибка",
+        )
+        == "Ошибка → " + expected
+    )
 
 
 def test_empty_and_invalid_error_records():

@@ -7,6 +7,7 @@ import json
 import socket
 import sys
 import time
+from pathlib import Path
 from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -42,7 +43,10 @@ def test_structured_error_context_and_reason(window, stage, source, context):
         "since": "2026-09-01", "error_type": "ValueError", "message": "Не найдена обязательная колонка"}) + "\n")
     window.mb_process.finish(1)
     text = window.mb_log.toPlainText()
-    assert context + ": ValueError: Не найдена обязательная колонка" in text
+    assert (
+                   context
+                   + " → ValueError → Не найдена обязательная колонка"
+           ) in text
     assert "без дополнительного описания" not in text
     assert "Error: {" not in text and "Подробности —" not in text
 
@@ -87,7 +91,10 @@ def test_successful_subprocess_with_failed_validation_reports_reason(window, tmp
     window.mb_process.finish(0)
     wait_until(lambda: not controller.tasks)
     assert controller.state == ui.LoadingState.FAILED
-    assert "Ошибка проверки сохранённого результата: ValueError: Не совпадает число сохранённых частей" in window.mb_log.toPlainText()
+    assert (
+               "Ошибка проверки сохранённого результата → "
+               "ValueError → Не совпадает число сохранённых частей"
+           ) in window.mb_log.toPlainText()
 
 
 def test_polling_error_is_silent_and_next_poll_succeeds(window):
@@ -114,7 +121,10 @@ def test_apply_reference_failure_reports_reason(window, monkeypatch):
     controller._launch("reference_csv", [])
     window.mb_process.feed('Reference: {}\n')
     window.mb_process.finish()
-    assert "Ошибка применения справочника: ValueError: Отсутствует список категорий" in window.mb_log.toPlainText()
+    assert (
+               "Ошибка применения справочника → "
+               "ValueError → Отсутствует список категорий"
+           ) in window.mb_log.toPlainText()
 
 
 def test_failed_start_cancel_and_error_flag_reset(window):
@@ -144,7 +154,7 @@ def test_structured_errors_preserve_exception_details(window, kind, message):
     window.mb_process.feed("Error: " + json.dumps({"message": message, "error_type": kind, "source": "customers"}) + "\n")
     window.mb_process.feed("Traceback PRIVATE\nunknown PRIVATE stdout\nState: C:/PRIVATE/state.json\nBatch: PRIVATE\nManifest: C:/PRIVATE/manifest.json\n")
     text = window.mb_log.toPlainText()
-    assert kind + ": " + message in text
+    assert kind + " → " + message in text
     assert "[значение скрыто]" not in text
     assert "PRIVATE" not in text and "Traceback" not in text
 
@@ -316,33 +326,128 @@ def test_source_summary_accepts_legacy_single_kind(kind, label):
     assert ui._source_text({"source_kind": kind}) == label
 
 
-def test_reference_selectors_replace_only_their_path(window, tmp_path, monkeypatch):
+def test_reference_selectors_replace_only_their_path(
+    window,
+    tmp_path,
+    monkeypatch,
+):
     from Application.tabs import data_processing_tab as csv_ui
+
     assert not hasattr(window, "combo_box_types")
     assert len(window.reference_fields) == len(window.reference_buttons) == 3
-    first, second = tmp_path / "first.csv", tmp_path / "second.csv"
+
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+
     first.write_text("synthetic")
     second.write_text("synthetic")
+
     kinds = list(csv_ui.REFERENCE_TYPES)
+
     for kind, button in window.reference_buttons.items():
         assert window.reference_fields[kind].isReadOnly()
-        assert window.reference_fields[kind].placeholderText() == csv_ui.REFERENCE_TYPES[kind][0]
-        monkeypatch.setattr(csv_ui.QFileDialog, "getOpenFileName", lambda *a: (str(first), ""))
+
+        filename = csv_ui.REFERENCE_TYPES[kind][0]
+        path = Path(filename)
+
+        expected_placeholder = (
+            "".join(
+                part.capitalize()
+                for part in path.stem.split("_")
+            )
+            + path.suffix
+        )
+
+        assert (
+            window.reference_fields[kind].placeholderText()
+            == expected_placeholder
+        )
+
+        monkeypatch.setattr(
+            csv_ui.QFileDialog,
+            "getOpenFileName",
+            lambda *a: (str(first), ""),
+        )
+
         button.click()
-        assert window.reference_paths[kind] == first
-    monkeypatch.setattr(csv_ui.QFileDialog, "getOpenFileName", lambda *a: (str(second), ""))
-    window.reference_buttons[kinds[1]].click()
-    assert list(window.reference_paths.values()) == [first, second, first]
-    assert window.reference_fields[kinds[1]].text() == second.name
-    assert window.reference_fields[kinds[1]].toolTip() == str(second)
+
+        assert (
+            window.reference_paths[kind]
+            == first
+        )
+
+    monkeypatch.setattr(
+        csv_ui.QFileDialog,
+        "getOpenFileName",
+        lambda *a: (str(second), ""),
+    )
+
+    window.reference_buttons[
+        kinds[1]
+    ].click()
+
+    assert list(
+        window.reference_paths.values()
+    ) == [
+        first,
+        second,
+        first,
+    ]
+
+    assert (
+        window.reference_fields[
+            kinds[1]
+        ].text()
+        == second.name
+    )
+
+    assert (
+        window.reference_fields[
+            kinds[1]
+        ].toolTip()
+        == str(second)
+    )
+
     assert not FakeProcess.instances
-    layout = window.btn_load.parentWidget().layout()
+
+    layout = (
+        window.btn_load
+        .parentWidget()
+        .layout()
+    )
+
     grid = layout.itemAt(1).layout()
+
     for row, kind in enumerate(kinds):
-        assert grid.itemAtPosition(row, 0).widget() is window.reference_fields[kind]
-        assert grid.itemAtPosition(row, 1).widget() is window.reference_buttons[kind]
-    assert layout.itemAt(2).widget() is window.btn_load
-    assert layout.itemAt(3).widget() is window.status_files_container
+        assert (
+            grid.itemAtPosition(
+                row,
+                0,
+            ).widget()
+            is window.reference_fields[kind]
+        )
+
+        assert (
+            grid.itemAtPosition(
+                row,
+                1,
+            ).widget()
+            is window.reference_buttons[kind]
+        )
+
+    load_status_row = layout.itemAt(2).layout()
+
+    assert load_status_row is not None
+
+    assert (
+            load_status_row.itemAt(0).widget()
+            is window.btn_load
+    )
+
+    assert (
+            load_status_row.itemAt(1).widget()
+            is window.status_files_container
+    )
 
 
 def select_references(window, root, indexes):
@@ -419,7 +524,10 @@ def test_reference_failure_does_not_stop_remaining_queue(window, tmp_path, monke
     assert window.mb_controller.state == ui.LoadingState.FAILED
     assert window.reference_status_overrides == {kinds[0]: True, kinds[1]: False, kinds[2]: True}
     assert kinds[1] in window.mb_log.toPlainText()
-    assert "Не загружены справочники:" in window.mb_log.toPlainText()
+    assert (
+            "Не загружены справочники →"
+            in window.mb_log.toPlainText()
+    )
 
 
 def test_reference_cancel_stops_queue_and_retains_success(window, tmp_path, monkeypatch):
@@ -459,8 +567,19 @@ def test_reference_partial_failure_keeps_real_snapshots_and_refreshes_ui(window,
                "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа", "ТитульнаяФотография", "Остаток"]
     pd.DataFrame([{**dict.fromkeys(columns, "Synthetic"), "КодНоменклатуры": "123456", "Остаток": 5}]).to_csv(
         window.reference_paths[kinds[0]], sep="|", index=False, encoding="utf-8-sig")
-    window.reference_paths[kinds[1]].write_text("broken\nvalue\n")
-    window.reference_paths[kinds[2]].write_text("Город,Широта,Долгота\nSynthetic,55,37\n", encoding="utf-8-sig")
+    window.reference_paths[
+        kinds[1]
+    ].write_text(
+        "broken\nvalue\n"
+    )
+
+    window.reference_paths[
+        kinds[2]
+    ].write_text(
+        "Город|Широта|Долгота\n"
+        "Synthetic|55|37\n",
+        encoding="utf-8-sig",
+    )
     output = tmp_path / "input_data"
     output.mkdir()
     old_categories = output / REFERENCE_TYPES[kinds[1]][0]
@@ -554,7 +673,10 @@ def test_journal_excludes_technical_output_and_formats_timeout(window):
     window.mb_process.feed('State: C:/private/state.json\nBatch: secret-id\nTraceback secret\nhttps://signed.invalid/?token=secret\n')
     window.mb_process.feed('Error: {"category":"timeout","source":"customers","since":"2026-03-01"}\n')
     text = window.mb_log.toPlainText()
-    assert "Превышено время ожидания выгрузки клиентов за 03.2026: Неизвестная ошибка." in text
+    assert (
+               "Превышено время ожидания выгрузки "
+               "клиентов за 03.2026 → Неизвестная ошибка."
+           ) in text
     assert not any(value in text for value in ("C:/", "secret", "Traceback", "https://"))
 
 
@@ -887,7 +1009,10 @@ def test_resume_only_for_interrupted_transport(window, tmp_path, validation, can
         controller.resume()
         assert len(FakeProcess.instances) == count
         if not cancelled:
-            assert "Операция завершилась с ошибкой" in window.status_label.text()
+            assert (
+                    window.status_label.text()
+                    == "Ошибка получения данных из Mindbox"
+            )
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new_export", "resume"])
@@ -906,36 +1031,131 @@ def test_new_job_resets_component_progress_format(window, tmp_path, resume):
     assert (window.mb_progress.minimum(), window.mb_progress.maximum(), window.mb_progress.value()) == (0, 0, 0)
 
 
-@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
-def test_global_status_lifecycle_and_scheduled_reset(window, tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "failure", "cancel"],
+)
+def test_global_status_lifecycle_and_scheduled_reset(
+    window,
+    tmp_path,
+    monkeypatch,
+    outcome,
+):
     spies = {}
-    for name in ("set_status_processing", "set_status_ok", "set_status_error", "schedule_status_reset"):
-        spy = Mock(wraps=getattr(ui, name))
-        monkeypatch.setattr(ui, name, spy)
+
+    for name in (
+        "set_status_processing",
+        "set_status_ok",
+        "set_status_error",
+        "schedule_status_reset",
+    ):
+        spy = Mock(
+            wraps=getattr(ui, name)
+        )
+        monkeypatch.setattr(
+            ui,
+            name,
+            spy,
+        )
         spies[name] = spy
+
     state = synthetic_batch(tmp_path)
     controller = window.mb_controller
+
     controller.start()
-    spies["set_status_processing"].assert_called_once_with(window, "Идёт получение данных из Mindbox...")
-    assert window.status_label.text() == "Идёт получение данных из Mindbox..."
+
+    spies[
+        "set_status_processing"
+    ].assert_called_once_with(
+        window,
+        "Идёт получение данных из Mindbox...",
+    )
+
+    assert (
+        window.status_label.text()
+        == "Идёт получение данных из Mindbox..."
+    )
+
     if outcome == "success":
-        finish_training(window, state)
-        wait_until(lambda: controller.state == ui.LoadingState.SUCCESS)
-        status_function, message = "set_status_ok", "Получение данных завершено."
-    else:
-        if outcome == "cancel":
-            controller.cancel()
+        finish_training(
+            window,
+            state,
+        )
+
+        wait_until(
+            lambda:
+            controller.state
+            == ui.LoadingState.SUCCESS
+        )
+
+        status_function = "set_status_ok"
+        message = "Данные Mindbox успешно обновлены"
+
+    elif outcome == "cancel":
+        controller.cancel()
+
         window.mb_process.finish(1)
-        status_function = "set_status_ok" if outcome == "cancel" else "set_status_error"
-        message = "Получение данных отменено" if outcome == "cancel" else "Операция завершилась с ошибкой."
-    spies[status_function].assert_called_once_with(window, message)
-    assert window.status_label.text() == message
-    spies["schedule_status_reset"].assert_called_once_with(window, 5)
-    assert window._status_reset_timer.isActive()
-    assert window._status_reset_timer.interval() == 5000
+
+        wait_until(
+            lambda:
+            controller.state
+            == ui.LoadingState.CANCELLED
+        )
+
+        status_function = "set_status_ok"
+        message = (
+            "Получение данных из Mindbox отменено"
+        )
+
+    else:
+        window.mb_process.finish(1)
+
+        wait_until(
+            lambda:
+            controller.state
+            == ui.LoadingState.FAILED
+        )
+
+        status_function = "set_status_error"
+        message = (
+            "Ошибка получения данных из Mindbox"
+        )
+
+    spies[
+        status_function
+    ].assert_called_once_with(
+        window,
+        message,
+    )
+
+    assert (
+        window.status_label.text()
+        == message
+    )
+
+    spies[
+        "schedule_status_reset"
+    ].assert_called_once_with(
+        window,
+        ui.STATUS_RESET_SECONDS,
+    )
+
+    assert (
+        window._status_reset_timer.interval()
+        == 5000
+    )
+
     window._status_reset_timer.start(1)
-    wait_until(lambda: not window._status_reset_timer.isActive())
-    assert window.status_label.text() == "Готов к работе"
+
+    wait_until(
+        lambda:
+        not window._status_reset_timer.isActive()
+    )
+
+    assert (
+        window.status_label.text()
+        == "Готов к работе"
+    )
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new_export", "resume"])
@@ -1220,7 +1440,14 @@ def test_manual_multipart_cli_arguments_and_safe_progress(window, tmp_path, monk
     window.mb_process.feed("Копирование actions: файл 2 из 4\nПроверка orders ...\nПроверка customers: файл 2 из 3\n")
     window.mb_process.feed("Копирование actions: файл 2 из 4 PRIVATE\nПроверка PRIVATE\nTraceback PRIVATE\n")
     text = window.mb_log.toPlainText()
-    assert "файл 2 из 4" in text and "файл 2 из 3" in text
+    assert (
+            "Действия → загрузка файлов — 2 из 4"
+            in text
+    )
+    assert (
+            "Клиенты → загрузка файлов — 2 из 3"
+            in text
+    )
     assert "PRIVATE" not in text
     window.mb_process.finish(1)
     wait_until(lambda: not window.mb_controller.tasks)

@@ -45,22 +45,81 @@ def monthly_windows(since, until):
     return result
 
 
-def download(client, name, since, until, root, timeout, poll_interval):
+def download(
+    client,
+    name,
+    since,
+    until,
+    root,
+    timeout,
+    poll_interval,
+    *,
+    phase=None,
+):
     operation = client.config.operations[name]
-    payload = {"sinceDateTimeUtc": since.strftime("%Y-%m-%d %H:%M"), "tillDateTimeUtc": until.strftime("%Y-%m-%d %H:%M")}
-    export_id = client.start_export(operation, payload)
-    urls = client.wait_for_export(operation, export_id, timeout=timeout, poll_interval=poll_interval)
-    parts = client.download_export(name, urls, storage=RawExportStorage(root))
-    if not parts or len({Path(p).resolve().parent for p in parts}) != 1:
-        raise TrainingBatchError("Invalid downloaded parts")
-    directory = Path(parts[0]).resolve().parent
-    if not directory.is_relative_to(Path(root).resolve()):
-        raise TrainingBatchError("Downloaded parts outside staging")
+
+    payload = {
+        "sinceDateTimeUtc": since.strftime("%Y-%m-%d %H:%M"),
+        "tillDateTimeUtc": until.strftime("%Y-%m-%d %H:%M"),
+    }
+
+    export_id = client.start_export(
+        operation,
+        payload,
+    )
+
+    if phase:
+        phase(name, "started")
+        phase(name, "waiting")
+
+    urls = client.wait_for_export(
+        operation,
+        export_id,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        heartbeat_interval=300.0,
+        on_heartbeat=(
+            lambda: phase(name, "forming")
+        ) if phase else None,
+    )
+
+    if phase:
+        phase(name, "ready")
+        phase(name, "downloading")
+
+    parts = client.download_export(
+        name,
+        urls,
+        storage=RawExportStorage(root),
+    )
+
+    if (
+        not parts
+        or len({
+            Path(p).resolve().parent
+            for p in parts
+        }) != 1
+    ):
+        raise TrainingBatchError(
+            "Invalid downloaded parts"
+        )
+
+    directory = Path(
+        parts[0]
+    ).resolve().parent
+
+    if not directory.is_relative_to(
+        Path(root).resolve()
+    ):
+        raise TrainingBatchError(
+            "Downloaded parts outside staging"
+        )
+
     return directory, export_id, operation
 
 
 def create_job(client, *, raw_root, window=None, since=None, until=None, selection=DEFAULT_SELECTION,
-               customers=False, on_state_created=None, progress=None, timeout=14400., poll_interval=5.):
+               customers=False, on_state_created=None, progress=None, phase=None, timeout=14400., poll_interval=5.):
     _poll_settings(poll_interval, timeout)
     root = Path(raw_root).resolve()
     with storage_lock(root):
@@ -80,7 +139,15 @@ def create_job(client, *, raw_root, window=None, since=None, until=None, selecti
         atomic_json(path, job)
     if on_state_created:
         on_state_created(path)
-    return resume_job(client, raw_root=root, state_path=path, timeout=timeout, poll_interval=poll_interval, progress=progress)
+    return resume_job(
+        client,
+        raw_root=root,
+        state_path=path,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        progress=progress,
+        phase=phase,
+    )
 
 
 def load_job(path, root):
@@ -99,7 +166,16 @@ def load_job(path, root):
     return job
 
 
-def resume_job(client, *, raw_root, state_path, timeout=14400., poll_interval=5., progress=None):
+def resume_job(
+    client,
+    *,
+    raw_root,
+    state_path,
+    timeout=14400.,
+    poll_interval=5.,
+    progress=None,
+    phase=None,
+):
     _poll_settings(poll_interval, timeout)
     root = Path(raw_root).resolve()
     with storage_lock(root):
@@ -127,7 +203,16 @@ def resume_job(client, *, raw_root, state_path, timeout=14400., poll_interval=5.
                 if progress:
                     progress(name, -1, a.date().isoformat())
                 with tempfile.TemporaryDirectory(prefix=".transport-", dir=root / "canonical") as temporary:
-                    directory, export_id, operation = download(client, name, a, b, temporary, timeout, poll_interval)
+                    directory, export_id, operation = download(
+                        client,
+                        name,
+                        a,
+                        b,
+                        temporary,
+                        timeout,
+                        poll_interval,
+                        phase=phase,
+                    )
                     if name == "customers":
                         apply_month(root, directory, a, b, job=job["id"], index=index)
                     else:

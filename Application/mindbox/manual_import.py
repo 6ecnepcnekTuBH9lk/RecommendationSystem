@@ -19,6 +19,8 @@ from .manual_sources import ManualImportError, normalize_sources
 from .selection import DEFAULT_SELECTION, MindboxSelectionConfig
 from .training_batch import TrainingBatchWindow, TrainingBatchError
 
+VALIDATION_PROGRESS_EVERY = 50_000
+
 
 def check_cancel(cancelled):
     if cancelled is not None and cancelled():
@@ -73,7 +75,9 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
         for number, path in enumerate(sources, 1):
             check_cancel(cancelled)
             if progress:
-                progress(f"Копирование {name}: файл {number} из {len(sources)}")
+                progress(
+                    f"Копирование {name}: файл {number} из {len(sources)}"
+                )
             target = directory / f"{name}_part_{number:03d}.json"
             with path.open("rb") as incoming, target.open("xb") as outgoing:
                 while True:
@@ -96,10 +100,17 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
             if resolver is not None:
                 adapt_customer_contact_candidate(raw, resolver)
             count += 1
-            if progress and count % 10000 == 0:
-                progress(f"Проверка {name}: {count} записей")
+            if (
+                    progress
+                    and count % VALIDATION_PROGRESS_EVERY == 0
+            ):
+                progress(
+                    f"Проверка {name}: {count} записей"
+                )
         if progress:
-            progress(f"Проверка {name} завершена: {count} записей")
+            progress(
+                f"Проверка {name} завершена: {count} записей"
+            )
         check_cancel(cancelled)
         return len(sources)
     except InterruptedError:

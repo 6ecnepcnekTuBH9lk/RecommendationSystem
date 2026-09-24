@@ -173,7 +173,7 @@ def validate_interactions(name, directory, resolver, selection, *, cancelled=Non
     """Shared streaming validation for API and manual raw; never filter the stored file."""
     from .adapters import adapt_order, adapt_action
     from .adapters.actions import adapt_action_system_name
-    from .manual_import import check_cancel
+    from .manual_import import check_cancel, VALIDATION_PROGRESS_EVERY
     from Application.interactions import classify_action_system_name
     rules = selection.interaction_rules()
     count = 0
@@ -184,10 +184,10 @@ def validate_interactions(name, directory, resolver, selection, *, cancelled=Non
         elif classify_action_system_name(adapt_action_system_name(raw), rules) is not None:
             adapt_action(raw, resolver, product_namespaces=selection.action_product_namespaces)
         count += 1
-        if progress and count % 10000 == 0:
+        if progress and count % VALIDATION_PROGRESS_EVERY == 0:
             progress(f"Проверка {name}: {count} записей")
     if progress:
-        progress(f"Проверка {name} завершена: {count} записей")
+        progress(f"Проверка {name} завершена → {count} записей")
 
 
 def publish(root, name, since, until, directory, *, source_kind="API", export_id=None,

@@ -8,7 +8,10 @@ from Application.mindbox.selection import DEFAULT_SELECTION, MindboxSelectionCon
 
 def test_legacy_defaults_and_ordered_normalization():
     assert DEFAULT_SELECTION.interaction_rules() == DEFAULT_RULES
-    assert DEFAULT_SELECTION.action_product_namespaces == ("offline1C",)
+    assert DEFAULT_SELECTION.action_product_namespaces == (
+        "offline1C",
+        "kanzlerKz",
+    )
     assert DEFAULT_SELECTION.order_product_namespaces == ("offline1C", "kanzlerKz")
     assert DEFAULT_SELECTION.purchase_line_statuses == ("CP", "delivering", "F")
     selection = replace(DEFAULT_SELECTION, view_action_system_names=[" second ", "first", "second"])

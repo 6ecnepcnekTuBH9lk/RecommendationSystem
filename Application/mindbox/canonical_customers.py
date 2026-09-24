@@ -146,38 +146,98 @@ def apply_month(root, directory, since, until, *, job, index):
 
 def import_full(root, source, *, cancelled=None, progress=None):
     """Manual full snapshot: build a separate DB, then atomically replace the current DB."""
-    from .manual_import import check_cancel
+    from .manual_import import check_cancel, VALIDATION_PROGRESS_EVERY
+
     root = Path(root).resolve()
     sources = normalize_sources(source)
+
     with storage_lock(root):
         from .canonical_storage import collect_unreferenced
+
         collect_unreferenced(root)
         resolver = resolver_for(root, required=True)
+
         if database(root).exists():
             with connect(database(root)) as previous:
                 previous.execute("SELECT id FROM profiles LIMIT 1").fetchone()
-        fd, temporary = tempfile.mkstemp(prefix=".customers-", suffix=".sqlite", dir=database(root).parent)
+
+        fd, temporary = tempfile.mkstemp(
+            prefix=".customers-",
+            suffix=".sqlite",
+            dir=database(root).parent,
+        )
         os.close(fd)
+
         try:
+            processed = 0
+
             with connect(temporary, create=True) as connection, connection:
+                if progress:
+                    progress("Проверка клиентов...")
+
                 for number, path in enumerate(sources, 1):
                     check_cancel(cancelled)
+
                     if progress:
-                        progress(f"Проверка customers: файл {number} из {len(sources)}")
-                    check_cancel(cancelled)
+                        progress(
+                            f"Проверка customers: файл "
+                            f"{number} из {len(sources)}"
+                        )
+
                     for raw in iter_json_records(path, "customers"):
                         check_cancel(cancelled)
-                        _upsert(connection, raw, resolver)
-                count = connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
-                connection.execute("INSERT INTO metadata VALUES ('summary', ?)", (json.dumps(
-                    {"updated": stamp(), "intervals": [], "count": count, "source_kind": "MANUAL",
-                     "source_kinds": ["MANUAL"]}),))
+
+                        _upsert(
+                            connection,
+                            raw,
+                            resolver,
+                        )
+
+                        processed += 1
+
+                        if (
+                            progress
+                            and processed % VALIDATION_PROGRESS_EVERY == 0
+                        ):
+                            progress(
+                                f"Проверка customers: "
+                                f"{processed} записей"
+                            )
+
+                if progress:
+                    progress(
+                        f"Проверка customers завершена: "
+                        f"{processed} записей"
+                    )
+
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM profiles"
+                ).fetchone()[0]
+
+                connection.execute(
+                    "INSERT INTO metadata VALUES ('summary', ?)",
+                    (
+                        json.dumps({
+                            "updated": stamp(),
+                            "intervals": [],
+                            "count": count,
+                            "source_kind": "MANUAL",
+                            "source_kinds": ["MANUAL"],
+                        }),
+                    ),
+                )
+
             check_cancel(cancelled)
-            os.replace(temporary, database(root))
-            if progress:
-                progress("Клиенты успешно обновлены")
+            os.replace(
+                temporary,
+                database(root),
+            )
+
         finally:
-            Path(temporary).unlink(missing_ok=True)
+            Path(temporary).unlink(
+                missing_ok=True
+            )
+
         return database(root)
 
 

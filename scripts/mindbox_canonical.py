@@ -33,6 +33,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = None
     active = {"source": "customers" if args.command == "customers" else "data"}
+
     def progress(name, ready, total):
         if ready == -1:
             active.update(source=name, since=total)
@@ -47,7 +48,13 @@ def main(argv=None):
                     progress(name, sum(c["done"] for c in items), len(items))
             return 0
         selection = MindboxSelectionConfig(**{field: getattr(args, field) for field in SELECTION_OPTIONS if getattr(args, field) is not None})
-        kwargs = dict(raw_root=args.raw_root, timeout=args.timeout, poll_interval=args.poll_interval, progress=progress)
+        kwargs = dict(
+            raw_root=args.raw_root,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+            progress=progress,
+            phase=phase,
+        )
         config = MindboxConfig.from_env(args.env_file)
         with MindboxClient(config) as client:
             if args.command == "resume":
@@ -70,6 +77,18 @@ def main(argv=None):
         category = "timeout" if isinstance(exc, (TimeoutError, MindboxExportTimeoutError)) else "failed"
         emit_error(exc, category=category, secrets=(getattr(config, "secret_key", ""),), **active)
         return 1
+
+
+def phase(name, value):
+    print(
+        "Phase: " + json.dumps(
+            {
+                "source": name,
+                "phase": value,
+            }
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

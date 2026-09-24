@@ -31,7 +31,7 @@ def emit_error(exc, **context):
 def format_error(record, stage=None, *, context=None):
     """Validate even structured subprocess output; unknown stdout stays invisible."""
     if not isinstance(record, dict):
-        return "Ошибка: некорректное описание причины от процесса."
+        return "Ошибка → некорректное описание причины от процесса."
     source = record.get("source")
     if (source is None or source == "data") and stage in ("customers", "snapshot_validation"):
         source = "customers"
@@ -52,5 +52,11 @@ def format_error(record, stage=None, *, context=None):
                 pass
     kind = safe_message(record.get("error_type"))
     message = safe_message(record.get("message"))
-    detail = f"{kind}: {message}" if kind and message else message or kind or "Неизвестная ошибка."
-    return context + ": " + detail
+
+    detail = (
+        f"{kind} → {message}"
+        if kind and message
+        else message or kind or "Неизвестная ошибка."
+    )
+
+    return context + " → " + detail

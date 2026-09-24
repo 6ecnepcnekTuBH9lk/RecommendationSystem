@@ -22,7 +22,11 @@ def test_coordinate_endpoints_valid(latitude, longitude):
 @pytest.mark.parametrize("failure", [None, "schema", "replace"])
 def test_reference_snapshot_atomic_replace(tmp_path, monkeypatch, failure):
     source = tmp_path / "source.csv"
-    source.write_text("Город,Широта,Долгота\nSynthetic,55.75,37.61\n", encoding="utf-8-sig")
+    source.write_text(
+        "Город|Широта|Долгота\n"
+        "Synthetic|55.75|37.61\n",
+        encoding="utf-8-sig",
+    )
     output = tmp_path / "out"
     output.mkdir()
     destination = output / "city_coordinates.csv"

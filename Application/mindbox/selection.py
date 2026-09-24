@@ -3,13 +3,20 @@
 from dataclasses import dataclass, fields
 
 
-DEFAULT_VIEW_ACTIONS = ("ProsmotrProdukta", "ProsmotrProduktaVApiMethod")
+DEFAULT_VIEW_ACTIONS = (
+    "ProsmotrProdukta",
+    "ProsmotrProduktaVApiMethod",
+    "ProsmotrProduktaVOperaciiKz",
+)
 DEFAULT_FAVORITE_ACTIONS = (
     "DobavlenieProduktaVSpisokVOperaciiDobavlenie",
     "DobavlenieProduktaVSpisokVOperaciiDobavlenieTovara",
 )
 DEFAULT_PURCHASE_STATUSES = ("CP", "delivering", "F")
-DEFAULT_ACTION_NAMESPACES = ("offline1C",)
+DEFAULT_ACTION_NAMESPACES = (
+    "offline1C",
+    "kanzlerKz",
+)
 DEFAULT_ORDER_NAMESPACES = ("offline1C", "kanzlerKz")
 SUPPORTED_NAMESPACES = frozenset(DEFAULT_ORDER_NAMESPACES)
 

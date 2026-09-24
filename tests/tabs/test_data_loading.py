@@ -78,7 +78,11 @@ def test_nomenclature_publication_and_cache_invalidation(tmp_path, monkeypatch, 
 
 def test_cleanup_failure_preserves_primary_error(tmp_path, monkeypatch, caplog):
     source = tmp_path / "source.csv"
-    source.write_text("Город,Широта,Долгота\nSynthetic,55,37\n", encoding="utf-8-sig")
+    source.write_text(
+        "Город|Широта|Долгота\n"
+        "Synthetic|55|37\n",
+        encoding="utf-8-sig",
+    )
     def fail_write(self, stream, *a, **kw):
         raise OSError("primary write failure")
     monkeypatch.setattr(api.pd.DataFrame, "to_csv", fail_write)
