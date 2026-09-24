@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR
 import os
 import numpy as np
 import pandas as pd
@@ -114,7 +115,7 @@ def process_orders_file(aboba, df):
     if missing:
         show_custom_message(aboba, title="Ошибка",
                             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-                            image_path="Картинки/Неудача.png")
+                            image_path=str(ICONS_DIR / "failure.png"))
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
 
@@ -222,13 +223,13 @@ def process_orders_file(aboba, df):
                           "СамаяПросматриваемаяДочерняяКатегория"])
 
     # --- Подтягиваем данные из Номенклатуры.csv ---
-    nom_path = "ВходныеДанные/Номенклатура.csv"
+    nom_path = "input_data/nomenclature.csv"
 
     if not os.path.isfile(nom_path):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="Для корректной загрузки необходимо сначала загрузить файл Номенклатура.csv",
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствует файл Номенклатура.csv")
         schedule_status_reset(aboba, 5)
@@ -245,7 +246,7 @@ def process_orders_file(aboba, df):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="В файле Номенклатура.csv отсутствуют колонки:\n" + "\n".join(missing_nom),
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
@@ -306,7 +307,7 @@ def process_views_file(aboba, df):
     if missing:
         show_custom_message(aboba, title="Ошибка",
                             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-                            image_path="Картинки/Неудача.png")
+                            image_path=str(ICONS_DIR / "failure.png"))
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
 
@@ -396,13 +397,13 @@ def process_views_file(aboba, df):
     df = df.drop(columns=["КодКатегории", "КодНоменклатурыПервый"])
 
     # --- Подтягиваем данные из Номенклатуры.csv ---
-    nom_path = "ВходныеДанные/Номенклатура.csv"
+    nom_path = "input_data/nomenclature.csv"
 
     if not os.path.isfile(nom_path):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="Для корректной загрузки необходимо сначала загрузить файл Номенклатура.csv",
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствует файл Номенклатура.csv")
         schedule_status_reset(aboba, 5)
@@ -419,7 +420,7 @@ def process_views_file(aboba, df):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="В файле Номенклатура.csv отсутствуют колонки:\n" + "\n".join(missing_nom),
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
@@ -433,13 +434,13 @@ def process_views_file(aboba, df):
     df = df.merge(nom_df, on="КодНоменклатуры", how="left")
 
     # --- Подтягиваем данные из КатегорииСайта.csv ---
-    cat_path = "ВходныеДанные/КатегорииСайта.csv"
+    cat_path = "input_data/site_categories.csv"
 
     if not os.path.isfile(cat_path):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="Для корректной загрузки необходимо сначала загрузить файл КатегорииСайта.csv",
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствует файл КатегорииСайта.csv")
         schedule_status_reset(aboba, 5)
@@ -456,7 +457,7 @@ def process_views_file(aboba, df):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="В файле КатегорииСайта.csv отсутствуют колонки:\n" + "\n".join(missing_cat),
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
@@ -514,7 +515,7 @@ def process_favorites_file(aboba, df):
     if missing:
         show_custom_message(aboba, title="Ошибка",
                             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-                            image_path="Картинки/Неудача.png")
+                            image_path=str(ICONS_DIR / "failure.png"))
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
 
@@ -593,13 +594,13 @@ def process_favorites_file(aboba, df):
                           "СамаяПросматриваемаяДочерняяКатегория"])
 
     # --- Подтягиваем данные из Номенклатуры.csv ---
-    fav_path = "ВходныеДанные/Номенклатура.csv"
+    fav_path = "input_data/nomenclature.csv"
 
     if not os.path.isfile(fav_path):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="Для корректной загрузки необходимо сначала загрузить файл Номенклатура.csv",
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствует файл Номенклатура.csv")
         schedule_status_reset(aboba, 5)
@@ -616,7 +617,7 @@ def process_favorites_file(aboba, df):
         show_custom_message(aboba,
                             title="Ошибка",
                             text="В файле Номенклатура.csv отсутствуют колонки:\n" + "\n".join(missing_fav),
-                            image_path="Картинки/Неудача.png"
+                            image_path=str(ICONS_DIR / "failure.png")
                             )
         set_status_error(aboba, "Отсутствуют необходимые колонки")
         schedule_status_reset(aboba, 5)
@@ -649,6 +650,12 @@ def process_favorites_file(aboba, df):
 
 
 # -------------------------------------------ОБРАБОТКА НОМНЕКЛАТУРЫ-----------------------------------------------------
+def _reference_message(aboba, **kwargs):
+    if aboba is None:
+        raise ValueError(kwargs["text"])
+    show_custom_message(aboba, **kwargs)
+
+
 def process_nomenclature_file(aboba, df):
     # Список нужных колонок
     required_columns = [
@@ -661,14 +668,15 @@ def process_nomenclature_file(aboba, df):
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(
+        _reference_message(
             aboba,
             title="Ошибка",
             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-            image_path="Картинки/Неудача.png"
+            image_path=str(ICONS_DIR / "failure.png")
         )
-        set_status_error(aboba, "Отсутствуют необходимые колонки")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Отсутствуют необходимые колонки")
+            schedule_status_reset(aboba, 5)
 
         return None
 
@@ -718,8 +726,9 @@ def process_nomenclature_file(aboba, df):
 
     df = df.sort_values(by="КодНоменклатуры", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    if aboba is not None:
+        set_status_ok(aboba, "Обработка завершена")
+        schedule_status_reset(aboba, 5)
 
     # возвращаем обработанный DataFrame
     return df
@@ -735,11 +744,12 @@ def process_categories_file(aboba, df):
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(aboba, title="Ошибка",
+        _reference_message(aboba, title="Ошибка",
                             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-                            image_path="Картинки/Неудача.png")
-        set_status_error(aboba, "Отсутствуют необходимые колонки")
-        schedule_status_reset(aboba, 5)
+                            image_path=str(ICONS_DIR / "failure.png"))
+        if aboba is not None:
+            set_status_error(aboba, "Отсутствуют необходимые колонки")
+            schedule_status_reset(aboba, 5)
 
         return None
 
@@ -766,8 +776,9 @@ def process_categories_file(aboba, df):
 
     df = df.sort_values(by="КодКатегории", ascending=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    if aboba is not None:
+        set_status_ok(aboba, "Обработка завершена")
+        schedule_status_reset(aboba, 5)
 
     # возвращаем обработанный DataFrame
     return df
@@ -784,18 +795,20 @@ def process_coordinates_file(aboba, df):
     missing = [col for col in required_columns if col not in df.columns]
 
     if missing:
-        show_custom_message(
+        _reference_message(
             aboba,
             title="Ошибка",
             text="В загруженном файле отсутствуют необходимые колонки:\n" + "\n".join(missing),
-            image_path="Картинки/Неудача.png"
+            image_path=str(ICONS_DIR / "failure.png")
         )
-        set_status_error(aboba, "Отсутствуют необходимые колонки")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Отсутствуют необходимые колонки")
+            schedule_status_reset(aboba, 5)
 
         return None
 
-    set_status_processing(aboba, "Обработка координат городов...")
+    if aboba is not None:
+        set_status_processing(aboba, "Обработка координат городов...")
 
     # 3) Очистка / нормализация
     df = df.copy()
@@ -823,6 +836,12 @@ def process_coordinates_file(aboba, df):
     df["Широта"] = pd.to_numeric(df["Широта"], errors="coerce")
     df["Долгота"] = pd.to_numeric(df["Долгота"], errors="coerce")
 
+    invalid = ((df["Широта"].notna() & ~df["Широта"].between(-90, 90))
+               | (df["Долгота"].notna() & ~df["Долгота"].between(-180, 180)))
+    if invalid.any():
+        _reference_message(aboba, title="Ошибка", text="Координаты вне диапазона: широта [-90, 90], долгота [-180, 180].")
+        return None
+
     # Удаляем строки без города/координат
     df = df[df["Город"].notna() & df["Широта"].notna() & df["Долгота"].notna()].copy()
     df["Город"] = df["Город"].astype(str).str.strip()
@@ -832,14 +851,15 @@ def process_coordinates_file(aboba, df):
     df = df.drop_duplicates(subset=["Город", "Широта", "Долгота"], keep="first")
 
     if df.empty:
-        show_custom_message(
+        _reference_message(
             aboba,
             title="Ошибка",
             text="После очистки файла не осталось строк с корректными городами и координатами",
-            image_path="Картинки/Неудача.png"
+            image_path=str(ICONS_DIR / "failure.png")
         )
-        set_status_error(aboba, "Нет корректных координат")
-        schedule_status_reset(aboba, 5)
+        if aboba is not None:
+            set_status_error(aboba, "Нет корректных координат")
+            schedule_status_reset(aboba, 5)
         return None
 
     # Упорядочиваем колонки
@@ -849,8 +869,9 @@ def process_coordinates_file(aboba, df):
     # Сортировка
     df = df.sort_values(by="Город", ascending=True).reset_index(drop=True)
 
-    set_status_ok(aboba, "Обработка завершена")
-    schedule_status_reset(aboba, 5)
+    if aboba is not None:
+        set_status_ok(aboba, "Обработка завершена")
+        schedule_status_reset(aboba, 5)
 
     return df
 
@@ -883,7 +904,7 @@ def _get_weather_period_from_filter(aboba):
             aboba,
             title="Ошибка",
             text="Перед загрузкой координат городов и погоды необходимо заполнить период.",
-            image_path="Картинки/Неудача.png"
+            image_path=str(ICONS_DIR / "failure.png")
         )
         return None
 
@@ -901,7 +922,7 @@ def _get_weather_period_from_filter(aboba):
             aboba,
             title="Ошибка",
             text="Период заполнен некорректно. Ожидаемый формат даты: дд.мм.гггг.",
-            image_path="Картинки/Неудача.png"
+            image_path=str(ICONS_DIR / "failure.png")
         )
         return None
 
@@ -913,7 +934,7 @@ def _get_weather_period_from_filter(aboba):
             aboba,
             title="Ошибка",
             text="Дата начала периода не может быть больше даты окончания периода.",
-            image_path="Картинки/Неудача.png"
+            image_path=str(ICONS_DIR / "failure.png")
         )
         return None
 
@@ -1102,7 +1123,7 @@ def _download_weather_for_coordinates_file(aboba, coords_df: pd.DataFrame, start
     weather_df["Дата"] = pd.to_datetime(weather_df["Дата"], errors="coerce").dt.normalize()
     weather_df = weather_df.sort_values(by=["Город", "Дата"], ascending=True)
 
-    out_path = os.path.join(os.getcwd(), "ВходныеДанные", "Погода.csv")
+    out_path = os.path.join(os.getcwd(), "input_data", "weather.csv")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     weather_df.to_csv(out_path, index=False, sep="|", encoding="utf-8-sig")
@@ -1119,7 +1140,7 @@ def _download_weather_for_coordinates_file(aboba, coords_df: pd.DataFrame, start
 
 # -------------------------------------------ПОЛУЧАЕМ КООРДИНАТЫ ИЗ ФАЙЛА-----------------------------------------------
 def generate_weather_for_saved_coordinates(aboba, start_date: str, end_date: str) -> pd.DataFrame:
-    coords_path = os.path.join(os.getcwd(), "ВходныеДанные", "КоординатыГородов.csv")
+    coords_path = os.path.join(os.getcwd(), "input_data", "city_coordinates.csv")
     if not os.path.isfile(coords_path):
         raise FileNotFoundError("Не найден файл КоординатыГородов.csv")
 

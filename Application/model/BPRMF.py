@@ -24,6 +24,17 @@ import csv
 import re
 from difflib import SequenceMatcher
 
+if __package__:
+    from .interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
+    from .seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
+    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics
+    from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
+    from interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
+    from seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
+    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics
+    from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+
 # --- make CPU BLAS usage predictable (often important for UI apps on Windows) ---
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -37,7 +48,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 @dataclass
 class TrainConfig:
     # processed csv folder (created in your "dataset processing" tab)
-    data_dir: str = "ВходныеДанные"
+    data_dir: str = "input_data"
 
     # implicit feedback weights
     w_view_item: float = 0.1
@@ -105,7 +116,8 @@ def _ensure_dir(path: str) -> None:
 
 
 def _path_csv(data_dir: str, name: str) -> str:
-    return os.path.join(data_dir, f"{name}.csv")
+    names = {"Заказы": "orders", "Просмотры": "views", "Избранное": "favorites", "Номенклатура": "nomenclature"}
+    return os.path.join(data_dir, f"{names.get(name, name)}.csv")
 
 
 class _MissingInteractionSourcesError(FileNotFoundError):
@@ -183,23 +195,6 @@ def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 # ============================= Data prep =============================
-
-@dataclass
-class Mappings:
-    user2idx: Dict[str, int]
-    idx2user: List[str]
-    item2idx: Dict[str, int]
-    idx2item: List[str]
-
-
-@dataclass
-class Splits:
-    train_pairs: np.ndarray  # [N,2] (u,i)
-    train_weights: np.ndarray  # [N]
-    eval_users: np.ndarray  # [M]
-    eval_items: np.ndarray  # [M]
-    user_pos_train: List[set]  # per user: set(items)
-
 
 def _build_mappings(orders: pd.DataFrame, views: pd.DataFrame, fav: pd.DataFrame) -> Mappings:
     users = pd.concat(
@@ -392,7 +387,7 @@ def _build_item_feature_matrix(
     if not bool(getattr(cfg, "use_item_features", True)):
         return {}, item_feat_mat
 
-    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    nom_path = os.path.join(data_dir, "nomenclature.csv")
     if not os.path.isfile(nom_path):
         return {}, item_feat_mat
 
@@ -609,13 +604,33 @@ def _eval_bprmf_recall_ndcg(
 
 
 def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: torch.device) -> Tuple[BPRMF, Splits]:
+    """Compatibility wrapper for existing callers supplying event-level data."""
+    prepared = PreparedBprData(maps, _train_test_split_last_per_user(events, cfg, len(maps.idx2user)))
+    return train_prepared_data(cfg, prepared, device)
+
+
+def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device) -> Tuple[BPRMF, Splits]:
+    """Compatibility API returning the original model/splits pair."""
+    model, splits, _metrics = _train_prepared_data_impl(cfg, prepared_data, device)
+    return model, splits
+
+
+def train_prepared_data_with_metrics(
+    cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
+) -> Tuple[BPRMF, Splits, TrainingRunMetrics]:
+    return _train_prepared_data_impl(cfg, prepared_data, device)
+
+
+def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device):
+    """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
+    validate_prepared_data(prepared_data)
+    maps, splits = prepared_data.mappings, prepared_data.splits
     # keep PyTorch thread usage stable (important for desktop apps)
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
 
     num_users = len(maps.idx2user)
     num_items = len(maps.idx2item)
-    splits = _train_test_split_last_per_user(events, cfg, num_users)
 
     # build item side-features from Номенклатура.csv (no cold-start)
     feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
@@ -710,6 +725,8 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
 
     best = {"metric": -1e9, "RECALL": -1.0, "NDCG": -1.0, "epoch": -1, "state": None}
     bad_epochs = 0
+    history = []
+    early_stopped = False
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -748,6 +765,7 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
 
         model.eval()
         recall, ndcg = _eval_bprmf_recall_ndcg(model, splits, num_items, cfg.topk, device)
+        history.append(TrainingEpochMetrics(epoch, total_loss / steps, float(recall), float(ndcg)))
 
         print(
             f"[{_now()}] Итерация {epoch} из {cfg.epochs}: "
@@ -766,6 +784,7 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
             if use_early_stop and epoch >= min_epochs:
                 bad_epochs += 1
                 if bad_epochs >= patience:
+                    early_stopped = True
                     print(
                         f"[{_now()}] Преждевременная остановка на итерации {epoch}: {metric_name}@{cfg.topk} не улучшается "
                         f"{patience} итерации подряд (лучший показатель = {best['metric']:.4f})"
@@ -779,7 +798,9 @@ def train_bprmf(maps: Mappings, events: pd.DataFrame, cfg: TrainConfig, device: 
         f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
         f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
     )
-    return model, splits
+    metrics = TrainingRunMetrics(len(history), best["epoch"], best["RECALL"], best["NDCG"],
+                                 metric_name, early_stopped, tuple(history))
+    return model, splits, metrics
 
 
 # ============================= Saving / Loading =============================
@@ -818,6 +839,8 @@ def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
         raise ValueError(
             "Model artifact mismatch: len(idx2item) does not equal num_items"
         )
+    seen_items_from_checkpoint(checkpoint)
+    analytics_from_checkpoint(checkpoint)
 
 
 def _resolve_model_artifact_paths(model_dir: str) -> Tuple[str, str]:
@@ -856,9 +879,20 @@ def _diagnose_artifact_cleanup_error(path: str, error: OSError) -> None:
         pass
 
 
-def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
+def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_items: SeenItemsIndex | None = None,
+                    analytics=None, model_dir="model", _before_commit=None, _publication_state=None) -> str:
+    # Internal hooks let production orchestration guard the final switch and
+    # observe an interrupted commit without duplicating serialization.
+    receipt = _publication_state if _publication_state is not None else {}
+    receipt.update(published=False, disk_validated=False, cleanup_failed=False)
 
-    out_dir = os.path.join(os.getcwd(), "Модель")
+    if seen_items is not None and (not isinstance(seen_items, SeenItemsIndex)
+            or seen_items.num_users != len(maps.idx2user) or seen_items.num_items != len(maps.idx2item)):
+        raise SeenItemsError("Seen dimensions do not match mappings")
+    if analytics is not None and (analytics.num_users != len(maps.idx2user) or analytics.num_items != len(maps.idx2item)):
+        raise AnalyticsError("Analytics dimensions do not match mappings")
+
+    out_dir = os.path.abspath(model_dir)
     _ensure_dir(out_dir)
     staging_root = os.path.join(out_dir, ".staging")
     runs_dir = os.path.join(out_dir, "runs")
@@ -866,6 +900,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
     _ensure_dir(runs_dir)
 
     generation = uuid.uuid4().hex
+    receipt["generation"] = generation
     staging_dir = os.path.join(staging_root, generation)
     generation_dir = os.path.join(runs_dir, generation)
     current_path = os.path.join(out_dir, "current.json")
@@ -875,7 +910,6 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
     )
 
     staging_created = False
-    generation_finalized = False
     manifest_temp_created = False
 
     try:
@@ -890,6 +924,8 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
                 f,
                 ensure_ascii=False,
             )
+            f.flush()
+            os.fsync(f.fileno())
 
         ckpt = {
             "model_type": "bprmf",
@@ -898,6 +934,11 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
             "num_items": len(maps.idx2item),
             "state_dict": model.state_dict(),
         }
+        if seen_items is not None:
+            ckpt["seen_items_indptr"] = seen_items.indptr.copy()
+            ckpt["seen_items_indices"] = seen_items.indices.copy()
+        if analytics is not None:
+            ckpt["interaction_analytics"] = analytics.to_checkpoint()
 
         # save item features for consistent inference/evaluation
         feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
@@ -909,7 +950,7 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
         # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
         # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
         train_item_meta: Dict[str, Dict[str, str]] = {}
-        nom_path = os.path.join(cfg.data_dir, "Номенклатура.csv")
+        nom_path = os.path.join(cfg.data_dir, "nomenclature.csv")
         if os.path.isfile(nom_path):
             nom = _read_csv_pipe(nom_path)
             nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
@@ -953,8 +994,21 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
         if not os.path.isfile(checkpoint_path) or os.path.getsize(checkpoint_path) <= 0:
             raise OSError("Failed to create a complete bprmf.pt checkpoint")
 
+        # Validate actual serialized bytes before a generation can become current.
+        with open(mappings_path, "r", encoding="utf-8") as f:
+            disk_mappings = json.load(f)
+        disk_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        _validate_model_artifacts(disk_mappings, disk_checkpoint)
+        if disk_mappings != saved_mappings:
+            raise ValueError("Serialized mappings differ from training mappings")
+        if seen_items is not None and seen_items_from_checkpoint(disk_checkpoint) is None:
+            raise ValueError("Serialized checkpoint lost embedded seen items")
+        if analytics is not None and analytics_from_checkpoint(disk_checkpoint) is None:
+            raise ValueError("Serialized checkpoint lost embedded analytics")
+        receipt["disk_validated"] = True
+        del disk_checkpoint
+
         os.rename(staging_dir, generation_dir)
-        generation_finalized = True
 
         with open(manifest_temp_path, "w", encoding="utf-8") as f:
             manifest_temp_created = True
@@ -962,30 +1016,41 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF) -> None:
             f.flush()
             os.fsync(f.fileno())
 
-        os.replace(manifest_temp_path, current_path)
+        if _before_commit is not None:
+            _before_commit()
+        os.replace(manifest_temp_path, current_path)  # The sole activation point.
+        receipt["published"] = True
         manifest_temp_created = False
-    except Exception:
-        if (
-            staging_created
-            and not generation_finalized
-            and os.path.isdir(staging_dir)
-        ):
-            try:
-                shutil.rmtree(staging_dir)
-            except OSError as cleanup_error:
-                _diagnose_artifact_cleanup_error(staging_dir, cleanup_error)
-
+        return generation
+    except BaseException:
+        # os.replace may have completed just before KeyboardInterrupt delivery.
+        # Never delete a generation that the current manifest references.
+        current_known = True
+        try:
+            with open(current_path, encoding="utf-8") as f:
+                receipt["published"] = receipt["published"] or json.load(f).get("generation") == generation
+        except FileNotFoundError:
+            pass
+        except (Exception, KeyboardInterrupt):
+            current_known = False
+            receipt["cleanup_failed"] = True
+        paths = []
+        if staging_created and os.path.isdir(staging_dir):
+            paths.append((staging_dir, shutil.rmtree))
+        if current_known and not receipt["published"] and os.path.isdir(generation_dir):
+            paths.append((generation_dir, shutil.rmtree))
         if manifest_temp_created and os.path.exists(manifest_temp_path):
+            paths.append((manifest_temp_path, os.remove))
+        for path, remove in paths:
             try:
-                os.remove(manifest_temp_path)
-            except OSError as cleanup_error:
-                _diagnose_artifact_cleanup_error(
-                    manifest_temp_path, cleanup_error
-                )
+                remove(path)
+            except (Exception, KeyboardInterrupt) as cleanup_error:
+                receipt["cleanup_failed"] = True
+                _diagnose_artifact_cleanup_error(path, cleanup_error)
         raise
 
 
-def _load_artifacts(model_dir: str = "Модель") -> Tuple[Dict[str, List[str]], dict]:
+def _load_artifacts(model_dir: str = "model") -> Tuple[Dict[str, List[str]], dict]:
     mappings_path, ckpt_path = _resolve_model_artifact_paths(model_dir)
 
     if not (os.path.isfile(mappings_path) and os.path.isfile(ckpt_path)):
@@ -1042,10 +1107,10 @@ def _parse_season_base_and_year(coll: str) -> Tuple[Optional[str], Optional[int]
 
 def _load_selected_collections_from_settings() -> List[str]:
     """
-    Берём выбранные пользователем актуальные коллекции из Настройки/filter_settings.json.
+    Берём выбранные пользователем актуальные коллекции из user_settings/filter_settings.json.
     Ключ: collections_selected (или старый seasons_selected).
     """
-    path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
+    path = os.path.join(os.getcwd(), "user_settings", "filter_settings.json")
     if not os.path.isfile(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -1086,7 +1151,7 @@ def _similarity_score(old_meta: Dict[str, str], new_meta: Dict[str, str]) -> flo
 
 
 def _load_item_names(data_dir: str) -> Dict[str, str]:
-    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    nom_path = os.path.join(data_dir, "nomenclature.csv")
     if not os.path.isfile(nom_path):
         return {}
     nom = _read_csv_pipe(nom_path)
@@ -1161,10 +1226,10 @@ def _format_stock_value(v) -> str:
 
 def _load_item_stocks(data_dir: str) -> Dict[str, str]:
     """
-    Загружает остатки из ВходныеДанные/Номенклатура.csv:
+    Загружает остатки из input_data/nomenclature.csv:
       КодНоменклатуры -> Остаток
     """
-    nom_path = os.path.join(data_dir, "Номенклатура.csv")
+    nom_path = os.path.join(data_dir, "nomenclature.csv")
     if not os.path.isfile(nom_path):
         return {}
 
@@ -1242,14 +1307,17 @@ def _user_seen_items_from_processed(data_dir: str, mindbox_id: str, item2idx: Di
     return np.fromiter(seen, dtype=np.int64)
 
 
+@torch.no_grad()
 def print_recommendations(mindbox_id: str, k: int = 20) -> None:
     """
     Prints top-K recommendations to console using saved artifacts (BPR-MF only).
     """
     cfg = TrainConfig()
-    _require_interaction_sources(cfg.data_dir)
-    _validate_interaction_source_schemas(cfg.data_dir)
     maps_json, ckpt = _load_artifacts()
+    embedded_seen = seen_items_from_checkpoint(ckpt)
+    if embedded_seen is None:
+        _require_interaction_sources(cfg.data_dir)
+        _validate_interaction_source_schemas(cfg.data_dir)
 
     idx2user = maps_json["idx2user"]
     idx2item = maps_json["idx2item"]
@@ -1260,7 +1328,8 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
         print(f"[{_now()}] User {mindbox_id} not found in mappings.json.")
         return
 
-    seen_idx = _user_seen_items_from_processed(cfg.data_dir, mindbox_id, item2idx, cfg)
+    seen_idx = (embedded_seen.items_for_user(user2idx[str(mindbox_id)]) if embedded_seen is not None
+                else _user_seen_items_from_processed(cfg.data_dir, mindbox_id, item2idx, cfg))
     try:
         names = _load_item_names(cfg.data_dir)
     except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
@@ -1304,6 +1373,8 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
 
     top = np.argpartition(-scores, min(k, len(scores) - 1))[:k]
     top = top[np.argsort(-scores[top])]
+    if embedded_seen is not None:
+        top = top[~np.isin(top, seen_idx)]
 
     print(f"[{_now()}] Recommendations (BPR-MF) for MindboxID={mindbox_id} top{k}:")
     for rank, ii in enumerate(top, start=1):
@@ -1317,29 +1388,14 @@ def print_recommendations(mindbox_id: str, k: int = 20) -> None:
 
 # ============================= Training entry point (UI button) =============================
 
-def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
-    cfg = cfg or TrainConfig()
-    _set_seed(cfg.seed)
-
+def prepare_training_data_from_csv(cfg: TrainConfig) -> PreparedBprData:
     data_dir = cfg.data_dir
     orders_path = _path_csv(data_dir, "Заказы")
     views_path = _path_csv(data_dir, "Просмотры")
     fav_path = _path_csv(data_dir, "Избранное")
 
-    required = [orders_path, views_path, fav_path]
-    missing = [p for p in required if not os.path.isfile(p)]
-    if missing:
-        print(f"[{_now()}] Отсутствуют следующие необходимые файлы для обучения:")
-        for p in missing:
-            print(f"  - {p}")
-        print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
-        return False
-
-    try:
-        _validate_interaction_source_schemas(data_dir)
-    except _InvalidInteractionSchemaError as exc:
-        print(f"[{_now()}] {exc}")
-        return False
+    _require_interaction_sources(data_dir)
+    _validate_interaction_source_schemas(data_dir)
 
     orders = _read_csv_pipe(orders_path)
     views = _read_csv_pipe(views_path)
@@ -1356,15 +1412,44 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
 
     events = _collect_user_item_events(orders, views, fav, maps, cfg)
     if len(events) == 0:
-        print(f"[{_now()}] Не найдено взаимодействий пользователь-товар.")
+        raise PreparedDataError("Не найдено взаимодействий пользователь-товар.")
+    collector = AnalyticsCollector()
+    for frame, kind in ((views, "VIEW"), (fav, "FAVORITE"), (orders, "PURCHASE")):
+        if kind == "VIEW":
+            frame = frame.loc[frame["ТипТовара"] == "Номенклатура"]
+        dates = _parse_date_col(frame, "Дата")
+        quantities = pd.to_numeric(frame.get("Количество", pd.Series(1., index=frame.index)), errors="coerce").fillna(1).clip(1, 10)
+        for user, item, date, quantity in zip(frame["MindboxID"], frame["КодНоменклатуры"], dates, quantities):
+            if pd.isna(user) or pd.isna(item) or str(user) not in maps.user2idx or str(item) not in maps.item2idx:
+                continue
+            collector.add(str(user), str(item), kind, None if pd.isna(date) else date, quantity)
+    analytics = collector.finalize(maps, load_catalog_kinds(_path_csv(cfg.data_dir, "Номенклатура")))
+    return PreparedBprData(maps, _train_test_split_last_per_user(events, cfg, len(maps.idx2user)), analytics=analytics)
+
+
+def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
+    cfg = cfg or TrainConfig()
+    _set_seed(cfg.seed)
+    try:
+        prepared = prepare_training_data_from_csv(cfg)
+    except _MissingInteractionSourcesError:
+        print(f"[{_now()}] Отсутствуют следующие необходимые файлы для обучения:")
+        for name in ("Заказы", "Просмотры", "Избранное"):
+            path = _path_csv(cfg.data_dir, name)
+            if not os.path.isfile(path):
+                print(f"  - {path}")
+        print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
+        return False
+    except (_InvalidInteractionSchemaError, PreparedDataError) as exc:
+        print(f"[{_now()}] {exc}")
         return False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device_label = "GPU (графический процессор, видеокарта)" if device.type == "cuda" else "CPU (центральный процессор)"
     print(f"[{_now()}] Устройство для обучения: {device_label}\n")
 
-    model, _splits = train_bprmf(maps, events, cfg, device)
-    _save_artifacts(cfg, maps, model)
+    model, _splits = train_prepared_data(cfg, prepared, device)
+    _save_artifacts(cfg, prepared.mappings, model, seen_items=build_seen_items_index(prepared), analytics=prepared.analytics)
     return True
 
 
@@ -1451,6 +1536,9 @@ def _load_train_config_from_json(path: str) -> TrainConfig:
         ):
             raise TypeError(f"Train config field '{key}' must be a list of strings")
 
+        if key == "data_dir":
+            # Legacy config compatibility only; preserve separators and all other path components.
+            value = re.sub(r"(^|[/\\])ВходныеДанные(?=[/\\]|$)", r"\1input_data", value)
         setattr(cfg, key, value)
 
     return cfg
@@ -1980,9 +2068,9 @@ def _validate_export_xlsx(path: str) -> None:
 # -------------------------------------------ВЫГРУЗКА В ЭКСЕЛЬ----------------------------------------------------------
 @torch.no_grad()
 def export_recommendations_excel(
-    out_xlsx: str = "Модель/Рекомендации.xlsx",
+    out_xlsx: str = "model/recommendations.xlsx",
     k: Optional[int] = None,
-    model_dir: str = "Модель",
+    model_dir: str = "model",
     include_item_names: bool = True,
     include_scores: bool = True,
     include_discount_card: bool = True,
@@ -1991,11 +2079,12 @@ def export_recommendations_excel(
     filter_seen: bool = True,
     batch_users: int = 1024,
     chunksize_seen: int = 500_000,
-    out_csv_format1: Optional[str] = "Модель/Рекомендации_format1.csv",
-    out_csv_kanzler_ml: Optional[str] = "Модель/Kanzler.ML.csv",
+    out_csv_format1: Optional[str] = "model/recommendations_format1.csv",
+    out_csv_kanzler_ml: Optional[str] = "model/Kanzler.ML.csv",
     export_item_kinds: Optional[List[str]] = None,
     max_export_users: Optional[int] = 1000,
     device_str: str = "cuda",
+    customer_contacts=None,
 ) -> str:
 
     # Обработка колонок в нормальный вид
@@ -2087,6 +2176,7 @@ def export_recommendations_excel(
             phones: Dict[str, str],
             chunksize: int = 500_000,
             require_phone: bool = True,
+            analytics=None,
     ) -> List[int]:
         """
         Возвращает индексы пользователей, отсортированные от наиболее
@@ -2200,22 +2290,14 @@ def export_recommendations_excel(
                 target[grouped_indices] += grouped_values
 
         # Покупки имеют наибольший приоритет.
-        _accumulate_activity(
-            file_name="Заказы",
-            target=purchase_activity,
-            use_quantity=True,
-        )
-
-        _accumulate_activity(
-            file_name="Избранное",
-            target=favorite_activity,
-        )
-
-        _accumulate_activity(
-            file_name="Просмотры",
-            target=view_activity,
-            only_nomenclature_views=True,
-        )
+        if analytics is None:
+            _accumulate_activity(file_name="Заказы", target=purchase_activity, use_quantity=True)
+            _accumulate_activity(file_name="Избранное", target=favorite_activity)
+            _accumulate_activity(file_name="Просмотры", target=view_activity, only_nomenclature_views=True)
+        else:
+            purchase_activity = analytics.purchase_activity
+            favorite_activity = analytics.favorite_activity
+            view_activity = analytics.view_activity
 
         purchase_weight = float(getattr(cfg, "w_purchase", 10.0))
         favorite_weight = float(getattr(cfg, "w_favorite", 2.0))
@@ -2291,14 +2373,21 @@ def export_recommendations_excel(
 
     idx2user: List[str] = maps_json["idx2user"]
     idx2item: List[str] = maps_json["idx2item"]
+    if customer_contacts is not None:
+        from Application.customer_profiles import CustomerContactIndex, CustomerContactError
+        if not isinstance(customer_contacts, CustomerContactIndex):
+            raise CustomerContactError("CustomerContactIndex required")
+        customer_contacts.validate_alignment(idx2user)
     user2idx = {u: i for i, u in enumerate(idx2user)}
     item2idx = {it: i for i, it in enumerate(idx2item)}
 
     device = torch.device(device_str if (device_str == "cpu" or torch.cuda.is_available()) else "cpu")
     model, cfg, num_users, num_items = _build_model_from_ckpt(ckpt, device)
-    data_dir = getattr(cfg, "data_dir", "ВходныеДанные")
-    _require_interaction_sources(data_dir)
-    _validate_interaction_source_schemas(data_dir)
+    data_dir = getattr(cfg, "data_dir", "input_data")
+    embedded_analytics = analytics_from_checkpoint(ckpt)
+    if embedded_analytics is None or (filter_seen and seen_items_from_checkpoint(ckpt) is None):
+        _require_interaction_sources(data_dir)
+        _validate_interaction_source_schemas(data_dir)
 
     # --------- подготовка данных для сезонного маппинга ---------
     train_item_meta: Dict[str, Dict[str, str]] = ckpt.get("train_item_meta", {}) or {}
@@ -2315,8 +2404,8 @@ def export_recommendations_excel(
             if prev is None or year > prev[1]:
                 active_by_base[base] = (coll, year)
 
-    # читаем актуальную номенклатуру (текущая ВходныеДанные)
-    catalog_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    # читаем актуальную номенклатуру (текущая input_data)
+    catalog_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
     new_meta_by_code: Dict[str, Dict[str, str]] = {}
     codes_by_collection: Dict[str, List[str]] = {}
     index_by_collection_key: Dict[str, Dict[Tuple[str, str, str], List[str]]] = {}
@@ -2526,10 +2615,10 @@ def export_recommendations_excel(
 
     # Остатки берём из текущей номенклатуры, потому что после сезонного сопоставления
     # код товара может быть заменён на товар из актуальной коллекции.
-    current_data_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+    current_data_dir = os.path.join(os.getcwd(), "input_data")
     current_nomenclature_path = os.path.join(
         current_data_dir,
-        "Номенклатура.csv",
+        "nomenclature.csv",
     )
     if os.path.isfile(current_nomenclature_path):
         item_stocks: Dict[str, str] = _load_item_stocks(current_data_dir)
@@ -2560,19 +2649,20 @@ def export_recommendations_excel(
     conversion_data_dir = current_data_dir
     current_views_path = _path_csv(conversion_data_dir, "Просмотры")
     current_orders_path = _path_csv(conversion_data_dir, "Заказы")
-    if not (
+    if embedded_analytics is None and not (
         _current_conversion_source_exists(current_views_path)
         and _current_conversion_source_exists(current_orders_path)
     ):
         conversion_data_dir = data_dir
 
-    historical_conversion_by_code, historical_conversion_global = _load_historical_item_conversion(
+    historical_conversion_by_code, historical_conversion_global = (embedded_analytics.conversion(idx2item, item_kind_by_code)
+        if embedded_analytics is not None else _load_historical_item_conversion(
         data_dir=conversion_data_dir,
         item_kind_by_code=item_kind_by_code,
         window_days=30,
         prior_strength=20.0,
         chunksize=chunksize_seen,
-    )
+    ))
 
     discount_cards: Dict[str, str] = {}
     emails: Dict[str, str] = {}
@@ -2580,7 +2670,16 @@ def export_recommendations_excel(
     need_csv = bool(out_csv_format1) or bool(out_csv_kanzler_ml)
 
     if include_discount_card or include_email or include_phone or need_csv:
-        discount_cards, emails, phones = _load_user_fields(data_dir)
+        if customer_contacts is None:
+            discount_cards, emails, phones = _load_user_fields(data_dir)
+        else:
+            for user, contact in zip(idx2user, customer_contacts.contacts):
+                if contact.discount_card is not None:
+                    discount_cards[user] = contact.discount_card
+                if contact.email is not None:
+                    emails[user] = contact.email
+                if contact.mobile_phone is not None:
+                    phones[user] = contact.mobile_phone
 
     # Ограничение количества клиентов в итоговой выгрузке.
     # None или значение <= 0 означает выгрузку всех подходящих клиентов.
@@ -2604,6 +2703,7 @@ def export_recommendations_excel(
         phones=phones,
         chunksize=chunksize_seen,
         require_phone=bool(out_csv_format1),
+        analytics=embedded_analytics,
     )
 
     if not ranked_user_indices:
@@ -2612,9 +2712,10 @@ def export_recommendations_excel(
             "и корректным номером телефона."
         )
 
-    user_seen: Optional[List[set]] = None
+    user_seen = None
+    embedded_seen = seen_items_from_checkpoint(ckpt)
 
-    if filter_seen:
+    if filter_seen and embedded_seen is None:
         user_seen = _build_user_seen_sets(
             data_dir=data_dir,
             user2idx=user2idx,
@@ -2781,11 +2882,11 @@ def export_recommendations_excel(
             u_emb = model.user_emb(u_idx)  # [B, d]
             scores = u_emb @ item_vec.t()  # [B, I]
 
-            if filter_seen and user_seen is not None:
+            if filter_seen and (embedded_seen is not None or user_seen is not None):
                 for bi, uu in enumerate(batch_user_indices):
-                    seen_items = user_seen[uu]
+                    seen_items = embedded_seen.items_for_user(uu) if embedded_seen is not None else user_seen[uu]
 
-                    if seen_items:
+                    if len(seen_items):
                         scores[
                             bi,
                             torch.tensor(

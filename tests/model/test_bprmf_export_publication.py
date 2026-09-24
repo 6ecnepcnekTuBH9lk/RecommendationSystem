@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 import pytest
 import torch
 from openpyxl import load_workbook
@@ -13,13 +14,13 @@ from Application.model import BPRMF
 
 
 _INVALID_INTERACTION_SCHEMA_CASES = [
-    ("Заказы.csv", "MindboxID"),
-    ("Заказы.csv", "КодНоменклатуры"),
-    ("Просмотры.csv", "MindboxID"),
-    ("Просмотры.csv", "КодНоменклатуры"),
-    ("Просмотры.csv", "ТипТовара"),
-    ("Избранное.csv", "MindboxID"),
-    ("Избранное.csv", "КодНоменклатуры"),
+    ("orders.csv", "MindboxID"),
+    ("orders.csv", "КодНоменклатуры"),
+    ("views.csv", "MindboxID"),
+    ("views.csv", "КодНоменклатуры"),
+    ("views.csv", "ТипТовара"),
+    ("favorites.csv", "MindboxID"),
+    ("favorites.csv", "КодНоменклатуры"),
 ]
 
 
@@ -58,7 +59,7 @@ def _write_historical_conversion_sources(data_dir):
             },
         ]
     ).to_csv(
-        data_dir / "Просмотры.csv",
+        data_dir / "views.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -72,13 +73,13 @@ def _write_historical_conversion_sources(data_dir):
             }
         ]
     ).to_csv(
-        data_dir / "Заказы.csv",
+        data_dir / "orders.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
     )
     pd.DataFrame(columns=["КодНоменклатуры", "ВидНоменклатуры"]).to_csv(
-        data_dir / "Номенклатура.csv",
+        data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -137,7 +138,7 @@ def test_historical_conversion_cache_reuses_same_semantic_inputs(
     )
 
     assert second_result == first_result
-    assert read_paths == ["Просмотры.csv", "Заказы.csv"]
+    assert read_paths == ["views.csv", "orders.csv"]
 
 
 @pytest.mark.parametrize(
@@ -172,7 +173,7 @@ def test_historical_conversion_stat_error_is_not_treated_as_cache_version(
         return
 
     pd.DataFrame(columns=["MindboxID", "КодНоменклатуры", "Дата"]).to_csv(
-        data_dir / "Заказы.csv",
+        data_dir / "orders.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -225,7 +226,7 @@ def test_historical_conversion_stat_failure_preserves_previous_cache_without_usi
     assert BPRMF._load_historical_item_conversion._cache is previous_cache
 
 
-@pytest.mark.parametrize("missing_filename", ["Просмотры.csv", "Заказы.csv"])
+@pytest.mark.parametrize("missing_filename", ["views.csv", "orders.csv"])
 def test_historical_conversion_missing_source_keeps_existing_fallback(
     tmp_path,
     isolated_historical_conversion_cache,
@@ -251,7 +252,7 @@ def test_historical_conversion_missing_nomenclature_keeps_calculation_available(
 ):
     data_dir = tmp_path / "historical-data"
     _write_historical_conversion_sources(data_dir)
-    (data_dir / "Номенклатура.csv").unlink()
+    (data_dir / "nomenclature.csv").unlink()
 
     values, global_value = BPRMF._load_historical_item_conversion(
         str(data_dir),
@@ -306,7 +307,7 @@ def _prepare_synthetic_export(
             }
         ]
     ).to_csv(
-        data_dir / "Заказы.csv",
+        data_dir / "orders.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -314,13 +315,13 @@ def _prepare_synthetic_export(
     pd.DataFrame(
         columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
     ).to_csv(
-        data_dir / "Просмотры.csv",
+        data_dir / "views.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
     )
     pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
-        data_dir / "Избранное.csv",
+        data_dir / "favorites.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -337,7 +338,7 @@ def _prepare_synthetic_export(
     monkeypatch.setattr(
         BPRMF,
         "_load_artifacts",
-        lambda model_dir="Модель": (mappings, checkpoint),
+        lambda model_dir="model": (mappings, checkpoint),
     )
     monkeypatch.setattr(
         BPRMF,
@@ -365,7 +366,7 @@ def _prepare_synthetic_export(
     output_dir = tmp_path / "outputs"
     output_dir.mkdir()
     return {
-        "xlsx": output_dir / "Рекомендации.xlsx",
+        "xlsx": output_dir / "recommendations.xlsx",
         "csv1": output_dir / "InternetMagazin.csv",
         "csv2": output_dir / "Mindbox.csv",
     }
@@ -385,6 +386,133 @@ def _run_export(paths, **overrides):
     return BPRMF.export_recommendations_excel(
         **arguments,
     )
+
+
+@pytest.mark.parametrize("filter_seen,expected", [(True, "item-2"), (False, "item-1")])
+def test_embedded_seen_export_bypasses_legacy_seen(tmp_path, monkeypatch, filter_seen, expected):
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch, model=_SyntheticRecommendationImpactModel(),
+                                      idx2item=["item-1", "item-2"])
+    mappings, checkpoint = BPRMF._load_artifacts()
+    checkpoint.update(num_users=1, num_items=2, seen_items_indptr=np.array([0, 1], dtype=np.int64),
+                      seen_items_indices=np.array([0], dtype=np.int64))
+    def forbidden(*args, **kwargs):
+        pytest.fail("Embedded seen filtering must not use CSV seen helpers")
+    monkeypatch.setattr(BPRMF, "_build_user_seen_sets", forbidden)
+    monkeypatch.setattr(BPRMF, "_user_seen_items_from_processed", forbidden)
+    monkeypatch.setattr(BPRMF, "_load_item_stocks", lambda *a: {"item-1": "150", "item-2": "150"})
+    _run_export(paths, filter_seen=filter_seen)
+    rows = list(csv.reader(paths["csv1"].open(encoding="utf-8-sig"), delimiter=";"))
+    assert any(expected in cell for row in rows[1:] for cell in row)
+
+
+def test_embedded_analytics_export_only_reads_contacts_and_ranking_parity(tmp_path, monkeypatch):
+    from datetime import datetime
+    from Application.model.interaction_analytics import AnalyticsCollector
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    mappings, checkpoint = BPRMF._load_artifacts()
+    mappings["idx2user"] = ["user-1", "user-2", "user-3"]
+    cfg = BPRMF.TrainConfig(data_dir=str(tmp_path / "synthetic-data"))
+    monkeypatch.setattr(BPRMF, "_build_model_from_ckpt", lambda *a: (_SyntheticExportModel(), cfg, 3, 1))
+    c = AnalyticsCollector()
+    rows = []
+    for user, quantity in (("user-1", 1), ("user-2", 5), ("user-3", 5)):
+        rows.append({"MindboxID": user, "КодНоменклатуры": "item-1", "Количество": quantity,
+                     "Телефон": "+79001234567"})
+        c.add(user, "item-1", "PURCHASE", datetime(2026, 1, 1), quantity)
+    pd.DataFrame(rows).to_csv(Path(cfg.data_dir) / "orders.csv", sep="|", encoding="utf-8-sig", index=False)
+    _run_export(paths, max_export_users=0)
+    old_order = [row[0] for row in _read_xlsx_rows(paths["xlsx"])[1:]]
+    assert old_order == ["user-2", "user-3", "user-1"]
+    maps = BPRMF.Mappings({u: i for i, u in enumerate(mappings["idx2user"])}, mappings["idx2user"],
+                          {"item-1": 0}, ["item-1"])
+    a = c.finalize(maps, {})
+    checkpoint.update(num_users=3, num_items=1, interaction_analytics=a.to_checkpoint(),
+                      seen_items_indptr=np.zeros(4, dtype=np.int64), seen_items_indices=np.array([], dtype=np.int64))
+    for name in ("views.csv", "favorites.csv"):
+        (Path(cfg.data_dir) / name).unlink()
+    def forbidden(*args, **kwargs):
+        pytest.fail("New analytics must not use legacy interaction helpers")
+    for name in ("_load_historical_item_conversion", "_build_user_seen_sets", "_require_interaction_sources",
+                 "_validate_interaction_source_schemas"):
+        monkeypatch.setattr(BPRMF, name, forbidden)
+    read_csv = pd.read_csv
+    reads = []
+    def read(path, *args, **kwargs):
+        if str(path).endswith(("orders.csv", "views.csv", "favorites.csv")):
+            assert str(path).endswith("orders.csv")
+            assert "chunksize" not in kwargs  # Activity/conversion readers are chunked.
+            reads.append(Path(path).name)
+        return read_csv(path, *args, **kwargs)
+    monkeypatch.setattr(pd, "read_csv", read)
+    _run_export(paths, max_export_users=0, filter_seen=True)
+    assert reads == ["orders.csv"]  # Existing contact loader only.
+    assert [row[0] for row in _read_xlsx_rows(paths["xlsx"])[1:]] == old_order
+    assert a.rank_users(cfg) == [1, 2, 0]
+
+
+@pytest.mark.parametrize("phone,eligible", [("+7 (900) 123-45-67", True), ("8 900 123-45-67", True),
+                                          ("9001234567", True), (None, False)])
+def test_customers_snapshot_export_zero_interaction_csv_and_output_parity(tmp_path, monkeypatch, phone, eligible):
+    import inspect
+    from datetime import datetime, timezone
+    from Application.mindbox.customer_profile_snapshot import CustomerProfileSnapshot, _publish_snapshot, load_customer_contact_index
+    from Application.model.interaction_analytics import AnalyticsCollector
+    paths = _prepare_synthetic_export(tmp_path, monkeypatch)
+    if phone is not None:
+        orders_path = tmp_path / "synthetic-data" / "orders.csv"
+        orders = pd.read_csv(orders_path, sep="|", dtype=str)
+        orders["Телефон"] = phone
+        orders.to_csv(orders_path, sep="|", encoding="utf-8-sig", index=False)
+    _run_export(paths)
+    expected_csv = paths["csv1"].read_bytes(), paths["csv2"].read_bytes()
+    expected_xlsx = _read_xlsx_rows(paths["xlsx"])
+    mappings, checkpoint = BPRMF._load_artifacts()
+    c = AnalyticsCollector()
+    c.add("user-1", "item-1", "PURCHASE", datetime(2026, 1, 1), 1)
+    a = c.finalize(BPRMF.Mappings({"user-1": 0}, ["user-1"], {"item-1": 0}, ["item-1"]), {})
+    checkpoint.update(num_users=1, num_items=1, interaction_analytics=a.to_checkpoint(),
+                      seen_items_indptr=np.zeros(2, dtype=np.int64), seen_items_indices=np.array([], dtype=np.int64))
+    root = tmp_path / "raw"
+    profile = {"ids": {"mindboxId": "user-1"}, "email": "user-1@example.test", "mobilePhone": phone,
+               "lastActivatedCard": {"ids": {"number": "card-1"}}}
+    for name, payload in (("customers", {"customers": [profile]}), ("customer_merges", {"customerMerges": []})):
+        directory = root / name / "20260101_000000"
+        directory.mkdir(parents=True)
+        (directory / f"{name}_part_001.json").write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = CustomerProfileSnapshot("e" * 32, datetime.now(timezone.utc).isoformat(),
+                                      "customers/20260101_000000", 1, "customer_merges/20260101_000000", 1)
+    manifest = _publish_snapshot(snapshot, root)
+    index = load_customer_contact_index(manifest, mappings, raw_root=root)
+    for name in ("orders.csv", "views.csv", "favorites.csv"):
+        (tmp_path / "synthetic-data" / name).unlink()
+    def forbidden(*args, **kwargs):
+        pytest.fail("New pathway must not access interaction CSV")
+    for name in ("_require_interaction_sources", "_validate_interaction_source_schemas", "_build_user_seen_sets",
+                 "_load_historical_item_conversion", "_read_csv_pipe_chunks", "_read_csv_pipe"):
+        monkeypatch.setattr(BPRMF, name, forbidden)
+    original_open = Path.open
+    def safe_open(path, *args, **kwargs):
+        assert path.name not in ("orders.csv", "views.csv", "favorites.csv")
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", safe_open)
+    original_csv = pd.read_csv
+    def safe_read(path, *args, **kwargs):
+        assert Path(path).name not in ("orders.csv", "views.csv", "favorites.csv")
+        return original_csv(path, *args, **kwargs)
+    monkeypatch.setattr(pd, "read_csv", safe_read)
+    if eligible:
+        _run_export(paths, customer_contacts=index, filter_seen=True)
+        assert (paths["csv1"].read_bytes(), paths["csv2"].read_bytes()) == expected_csv
+        assert b"79001234567" in expected_csv[0]
+        # Conversion source intentionally differs from the fixture's stub (12.34).
+        actual = _read_xlsx_rows(paths["xlsx"])
+        for header in ("ДисконтнаяКарта", "Почта", "Телефон"):
+            column = expected_xlsx[0].index(header)
+            assert actual[1][column] == expected_xlsx[1][column]
+    else:
+        with pytest.raises(ValueError, match="телефона"):
+            _run_export(paths, customer_contacts=index, filter_seen=True)
+    assert "customer_contacts" not in inspect.signature(BPRMF._save_artifacts).parameters
 
 
 def _write_old_outputs(paths):
@@ -415,7 +543,7 @@ def _write_interaction_source_without_column(
     missing_column,
 ):
     rows = {
-        "Заказы.csv": {
+        "orders.csv": {
             "MindboxID": "user-1",
             "КодНоменклатуры": "item-1",
             "Количество": "1",
@@ -423,12 +551,12 @@ def _write_interaction_source_without_column(
             "ДисконтнаяКарта": "card-1",
             "Почта": "user-1@example.test",
         },
-        "Просмотры.csv": {
+        "views.csv": {
             "MindboxID": "user-1",
             "КодНоменклатуры": "item-1",
             "ТипТовара": "Номенклатура",
         },
-        "Избранное.csv": {
+        "favorites.csv": {
             "MindboxID": "user-1",
             "КодНоменклатуры": "item-1",
         },
@@ -488,7 +616,7 @@ def test_export_current_conversion_stat_error_does_not_use_historical_fallback(
 ):
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
     old_bytes = _write_old_outputs(paths)
-    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir = tmp_path / "input_data"
     _write_historical_conversion_sources(current_data_dir)
 
     def fail_if_historical_loader_is_reached(**kwargs):
@@ -503,7 +631,7 @@ def test_export_current_conversion_stat_error_does_not_use_historical_fallback(
         fail_if_historical_loader_is_reached,
     )
     real_stat = BPRMF.os.stat
-    failing_path = current_data_dir / "Просмотры.csv"
+    failing_path = current_data_dir / "views.csv"
 
     def fail_current_conversion_stat(path, *args, **kwargs):
         if Path(path) == failing_path:
@@ -525,11 +653,11 @@ def test_export_current_conversion_directory_is_technical_error(
 ):
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
     old_bytes = _write_old_outputs(paths)
-    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir = tmp_path / "input_data"
     current_data_dir.mkdir()
-    (current_data_dir / "Просмотры.csv").mkdir()
-    (current_data_dir / "Заказы.csv").write_bytes(
-        (tmp_path / "synthetic-data" / "Заказы.csv").read_bytes()
+    (current_data_dir / "views.csv").mkdir()
+    (current_data_dir / "orders.csv").write_bytes(
+        (tmp_path / "synthetic-data" / "orders.csv").read_bytes()
     )
 
     def fail_if_historical_loader_is_reached(**kwargs):
@@ -578,7 +706,7 @@ def test_export_missing_current_conversion_source_keeps_historical_fallback(
 
 @pytest.mark.parametrize(
     "missing_filename",
-    ["Заказы.csv", "Просмотры.csv", "Избранное.csv"],
+    ["orders.csv", "views.csv", "favorites.csv"],
 )
 def test_export_missing_required_interaction_source_aborts_and_preserves_outputs(
     tmp_path,
@@ -597,7 +725,7 @@ def test_export_missing_required_interaction_source_aborts_and_preserves_outputs
     _assert_no_export_temps(tmp_path)
 
 
-@pytest.mark.parametrize("empty_filename", ["Просмотры.csv", "Избранное.csv"])
+@pytest.mark.parametrize("empty_filename", ["views.csv", "favorites.csv"])
 def test_export_accepts_schema_valid_empty_required_interaction_source(
     tmp_path,
     monkeypatch,
@@ -631,7 +759,7 @@ def test_missing_views_does_not_publish_incomplete_seen_recommendation(
             }
         ]
     ).to_csv(
-        data_dir / "Просмотры.csv",
+        data_dir / "views.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -654,11 +782,11 @@ def test_missing_views_does_not_publish_incomplete_seen_recommendation(
         for name, path in paths.items()
     }
 
-    (data_dir / "Просмотры.csv").unlink()
+    (data_dir / "views.csv").unlink()
     with pytest.raises(FileNotFoundError) as exc_info:
         _run_export(paths, filter_seen=True)
 
-    assert "Просмотры.csv" in str(exc_info.value)
+    assert "views.csv" in str(exc_info.value)
     _assert_old_outputs(paths, published_bytes)
     assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
     _assert_no_export_temps(tmp_path)
@@ -712,7 +840,7 @@ def test_invalid_views_schema_does_not_publish_incomplete_seen_recommendation(
             }
         ]
     ).to_csv(
-        data_dir / "Просмотры.csv",
+        data_dir / "views.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -737,14 +865,14 @@ def test_invalid_views_schema_does_not_publish_incomplete_seen_recommendation(
 
     _write_interaction_source_without_column(
         data_dir,
-        "Просмотры.csv",
+        "views.csv",
         "КодНоменклатуры",
     )
     with pytest.raises(ValueError) as exc_info:
         _run_export(paths, filter_seen=True)
 
     diagnostic = str(exc_info.value)
-    assert "Просмотры.csv" in diagnostic
+    assert "views.csv" in diagnostic
     assert "КодНоменклатуры" in diagnostic
     _assert_old_outputs(paths, published_bytes)
     assert _read_xlsx_rows(paths["xlsx"])[1][4] == "item-b"
@@ -933,7 +1061,7 @@ def test_export_name_failure_uses_current_name_for_seasonally_mapped_item(
     monkeypatch.setattr(
         BPRMF,
         "_load_artifacts",
-        lambda model_dir="Модель": (mappings, checkpoint),
+        lambda model_dir="model": (mappings, checkpoint),
     )
     monkeypatch.setattr(
         BPRMF,
@@ -950,7 +1078,7 @@ def test_export_name_failure_uses_current_name_for_seasonally_mapped_item(
         "_load_selected_collections_from_settings",
         lambda: ["Весна-Лето 2026"],
     )
-    current_dir = tmp_path / "ВходныеДанные"
+    current_dir = tmp_path / "input_data"
     current_dir.mkdir()
     pd.DataFrame(
         [
@@ -963,7 +1091,7 @@ def test_export_name_failure_uses_current_name_for_seasonally_mapped_item(
             }
         ]
     ).to_csv(
-        current_dir / "Номенклатура.csv",
+        current_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -995,7 +1123,7 @@ def test_broken_selected_collection_settings_preserve_existing_outputs(
     real_settings_loader = BPRMF._load_selected_collections_from_settings
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
     old_bytes = _write_old_outputs(paths)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     (settings_dir / "filter_settings.json").write_text(
         '{"seasons_selected": [',
@@ -1033,7 +1161,7 @@ def test_valid_empty_selected_collection_settings_still_allow_export(
 ):
     real_settings_loader = BPRMF._load_selected_collections_from_settings
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     (settings_dir / "filter_settings.json").write_text(
         json.dumps({"seasons_selected": []}),
@@ -1056,10 +1184,10 @@ def test_current_stock_read_error_does_not_fallback_or_publish(
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
     old_bytes = _write_old_outputs(paths)
 
-    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir = tmp_path / "input_data"
     current_data_dir.mkdir()
-    current_path = current_data_dir / "Номенклатура.csv"
-    historical_path = tmp_path / "synthetic-data" / "Номенклатура.csv"
+    current_path = current_data_dir / "nomenclature.csv"
+    historical_path = tmp_path / "synthetic-data" / "nomenclature.csv"
     pd.DataFrame(
         [{"КодНоменклатуры": "item-1", "Остаток": "200"}]
     ).to_csv(
@@ -1113,10 +1241,10 @@ def test_valid_empty_current_stocks_do_not_use_historical_fallback(
     real_stock_loader = BPRMF._load_item_stocks
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
 
-    current_data_dir = tmp_path / "ВходныеДанные"
+    current_data_dir = tmp_path / "input_data"
     current_data_dir.mkdir()
     pd.DataFrame(columns=["КодНоменклатуры", "Остаток"]).to_csv(
-        current_data_dir / "Номенклатура.csv",
+        current_data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -1124,7 +1252,7 @@ def test_valid_empty_current_stocks_do_not_use_historical_fallback(
     pd.DataFrame(
         [{"КодНоменклатуры": "item-1", "Остаток": "150"}]
     ).to_csv(
-        tmp_path / "synthetic-data" / "Номенклатура.csv",
+        tmp_path / "synthetic-data" / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -1157,7 +1285,7 @@ def test_missing_current_stocks_use_historical_fallback(tmp_path, monkeypatch):
     pd.DataFrame(
         [{"КодНоменклатуры": "item-1", "Остаток": "150"}]
     ).to_csv(
-        historical_data_dir / "Номенклатура.csv",
+        historical_data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -1184,7 +1312,7 @@ def test_broken_historical_stock_fallback_propagates_and_preserves_outputs(
     real_read_csv_pipe = BPRMF._read_csv_pipe
     paths = _prepare_synthetic_export(tmp_path, monkeypatch)
     old_bytes = _write_old_outputs(paths)
-    historical_path = tmp_path / "synthetic-data" / "Номенклатура.csv"
+    historical_path = tmp_path / "synthetic-data" / "nomenclature.csv"
     historical_path.write_text(
         "КодНоменклатуры|Остаток\nitem-1|150\n",
         encoding="utf-8-sig",
@@ -1544,7 +1672,7 @@ def test_replace_failure_preserves_file_level_invariant(
     assert [path.name for path in replace_destinations] == [
         "InternetMagazin.csv",
         "Mindbox.csv",
-        "Рекомендации.xlsx",
+        "recommendations.xlsx",
     ][:failed_replace_number]
     if failed_replace_number == 1:
         _assert_old_outputs(paths, old_bytes)

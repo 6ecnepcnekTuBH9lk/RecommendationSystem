@@ -25,3 +25,15 @@ venv/
 
 .DS_Store
 Thumbs.db
+
+# Mindbox API
+.env
+.env.*
+!.env.example
+
+# Local user data, exports, reports and settings
+input_data/
+user_settings/
+# Generated training datasets and model exports
+filtered_data/
+model/

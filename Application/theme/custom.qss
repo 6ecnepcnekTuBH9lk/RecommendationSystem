@@ -1,0 +1,187 @@
+/* Palette: Material window background / secondary surface / primary accent.
+   Borders and muted text use the same foreground with shared opacity levels. */
+/* Typography: point sizes stay readable independently of Material density. */
+* {{
+    font-family: "{APP_FONT}";
+    font-size: 10pt;
+}}
+QPushButton, QLineEdit, QComboBox, QAbstractSpinBox {{ font-size: 10.5pt; }}
+
+/* Section headers */
+QLabel[class="sectionHeader"] {{
+    font-size: 11pt;
+    font-weight: 600;
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+    padding: 8px 32px;
+    margin: 8px 0px;
+}}
+
+/* Buttons: one shared appearance for ordinary actions. */
+QPushButton {{
+    text-transform: none;
+    font-weight: 600;
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: 1px solid {QTMATERIAL_PRIMARYCOLOR};
+    border-radius: 8px;
+    height: 30px;
+    padding: 2px 14px;
+}}
+QPushButton:focus:enabled {{
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border-color: {QTMATERIAL_PRIMARYCOLOR};
+}}
+QPushButton:hover:enabled {{ background-color: rgba({APP_PRIMARY_RGB}, 28); }}
+QPushButton:pressed:enabled, QPushButton:checked:enabled {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: rgba({APP_PRIMARY_RGB}, 55);
+}}
+
+/* Inputs */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+    height: 24px;
+    padding: 0px 10px;
+}}
+QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit {{ padding-right: 24px; }}
+QLineEdit:hover:enabled, QComboBox:hover:enabled, QSpinBox:hover:enabled,
+QDoubleSpinBox:hover:enabled, QDateEdit:hover:enabled {{ border-color: rgba({APP_TEXT_RGB}, 110); }}
+QLineEdit:focus:enabled, QComboBox:focus:enabled, QSpinBox:focus:enabled,
+QDoubleSpinBox:focus:enabled, QDateEdit:focus:enabled {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    border: 1px solid {QTMATERIAL_PRIMARYCOLOR};
+    border-radius: 8px;
+}}
+QListWidget {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+}}
+QListWidget:focus {{ border-color: {QTMATERIAL_PRIMARYCOLOR}; }}
+QLineEdit, QTextEdit, QPlainTextEdit {{ placeholder-text-color: rgba({APP_TEXT_RGB}, 170); }}
+QCheckBox::indicator:unchecked {{
+    image: none;
+    width: 14px;
+    height: 14px;
+    margin: 2px;
+    border: 1px solid rgba({APP_TEXT_RGB}, 110);
+    border-radius: 3px;
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+}}
+QCheckBox::indicator:unchecked:focus {{ border-color: {QTMATERIAL_PRIMARYCOLOR}; }}
+QCheckBox::indicator:unchecked:disabled {{ border-color: rgba({APP_TEXT_RGB}, 55); }}
+
+/* Logs */
+QTextEdit, QPlainTextEdit {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+    padding: 8px;
+}}
+QTextEdit:focus:enabled, QPlainTextEdit:focus:enabled {{ border-color: {QTMATERIAL_PRIMARYCOLOR}; }}
+
+/* Tabs */
+QTabBar::tab, QTabBar::tab:top {{
+    font-size: 10.5pt;
+    font-weight: 600;
+    text-transform: none;
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0px 22px;
+    height: 36px;
+}}
+QTabBar::tab:top:hover {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    border-bottom: 2px solid rgba({APP_TEXT_RGB}, 55);
+}}
+QTabBar::tab:top:selected {{
+    color: {QTMATERIAL_PRIMARYCOLOR};
+    border-bottom: 2px solid {QTMATERIAL_PRIMARYCOLOR};
+}}
+
+/* Tables: retain column sizing; a subtle grid and selection. */
+QTableWidget {{
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 2px;
+    gridline-color: rgba({APP_TEXT_RGB}, 55);
+    selection-background-color: rgba({APP_PRIMARY_RGB}, 32);
+    selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+}}
+QHeaderView::section {{
+    font-weight: 600;
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: none;
+    border-bottom: 1px solid rgba({APP_TEXT_RGB}, 55);
+    padding: 0px 8px;
+}}
+QTableWidget::item:selected, QTableWidget::item:selected:focus,
+QListWidget::item:selected, QListWidget::item:selected:focus {{
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    background-color: rgba({APP_PRIMARY_RGB}, 32);
+    selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    selection-background-color: rgba({APP_PRIMARY_RGB}, 32);
+}}
+
+/* Informational text on the window background. */
+QLabel[class="infoLabel"] {{
+    background-color: transparent;
+    border: none;
+    padding: 6px 0px;
+    font-style: italic;
+}}
+
+/* Progress: readable percentages plus component counts in the label. */
+QProgressBar {{
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: none;
+    border-radius: 6px;
+    min-height: 24px;
+    max-height: 24px;
+    color: {QTMATERIAL_PRIMARYTEXTCOLOR};
+    text-align: center;
+    font-weight: 600;
+}}
+QProgressBar::chunk {{ background-color: {QTMATERIAL_PRIMARYCOLOR}; border-radius: 6px; }}
+
+/* Disabled states: keep neutral text readable in both palettes. */
+QLineEdit:disabled, QComboBox:disabled, QListWidget:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QDateEdit:disabled,
+QPushButton:disabled, QPushButton:checked:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
+    color: rgba({APP_TEXT_RGB}, 170);
+    background-color: {QTMATERIAL_SECONDARYDARKCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+}}
+QListWidget::item:disabled, QListWidget::item:selected:disabled,
+QListWidget::item:selected:focus:disabled {{
+    color: rgba({APP_TEXT_RGB}, 170);
+    selection-color: rgba({APP_TEXT_RGB}, 170);
+}}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled,
+QDoubleSpinBox:disabled, QDateEdit:disabled {{ height: 24px; }}
+
+/* Separators */
+QFrame#vSeparator, QFrame#hSeparator {{
+    background-color: rgba({APP_TEXT_RGB}, 55);
+    border: none;
+}}
+/* Text selection */
+QLineEdit,
+QTextEdit,
+QPlainTextEdit,
+QSpinBox,
+QDoubleSpinBox,
+QDateEdit {{
+    selection-background-color: rgba({APP_PRIMARY_RGB}, 110);
+    selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+}}

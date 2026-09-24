@@ -1,3 +1,4 @@
+from Application.paths import ICONS_DIR, INPUT_DATA_DIR, USER_SETTINGS_DIR
 import os
 import sys
 import json
@@ -51,18 +52,9 @@ def create_train_model_widgets_tab(aboba):
 
     # Заголовок
     aboba.heading_enter_parameter = QLabel("Входные параметры")
-    aboba.heading_enter_parameter.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                                aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
+    aboba.heading_enter_parameter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.heading_enter_parameter.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.heading_enter_parameter.setStyleSheet("""
-        QLabel {
-            background-color: #FAFAFA;
-            padding: 7px 65px;
-            border-radius: 10px;
-            border: 1px solid #C8C8C8;
-            margin: 10px 0px;
-        }
-    """)
+    aboba.heading_enter_parameter.setProperty("class", "sectionHeader")
     left_layout.addWidget(aboba.heading_enter_parameter, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # -------------------- ПАРАМЕТРЫ --------------------
@@ -73,8 +65,6 @@ def create_train_model_widgets_tab(aboba):
     form_layout.setContentsMargins(0, 0, 0, 0)
     form_layout.setSpacing(7)
 
-    LABEL_W = 400  # можно подобрать (чтобы все поля начинались по одной вертикали)
-
     def add_param(label_text: str, widget, stretch_after: bool = True):
         # строка: [Label][Widget]
         row_w = QWidget()
@@ -83,12 +73,13 @@ def create_train_model_widgets_tab(aboba):
         row_l.setSpacing(0)
 
         lbl = QLabel(label_text)
-        lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        lbl.setFixedWidth(LABEL_W)
+        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        lbl.setMinimumWidth(200)
+        lbl.setToolTip(label_text)
 
         widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        row_l.addWidget(lbl)
+        row_l.addWidget(lbl, 1)
         row_l.addWidget(widget, 1)
 
         form_layout.addWidget(row_w)
@@ -303,12 +294,12 @@ def create_train_model_widgets_tab(aboba):
     btns = QHBoxLayout()
     btns.setSpacing(10)
 
-    aboba.btn_settings = QPushButton(QIcon("Картинки/СтандартныеНастройки.png"), " Стандартные настройки")
+    aboba.btn_settings = QPushButton(QIcon(str(ICONS_DIR / "default_settings.png")), " Стандартные настройки")
     aboba.btn_settings.setIconSize(QSize(17, 17))
     aboba.btn_settings.clicked.connect(lambda: standart_settigs(aboba))
     aboba.btn_settings.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
 
-    aboba.start_train = QPushButton(QIcon("Картинки/НачатьОбучение.png"), " Начать обучение")
+    aboba.start_train = QPushButton(QIcon(str(ICONS_DIR / "start_training.png")), " Начать обучение")
     aboba.start_train.setIconSize(QSize(17, 17))
     aboba.start_train.clicked.connect(lambda: start_training_process(aboba))
     aboba.start_train.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
@@ -321,18 +312,9 @@ def create_train_model_widgets_tab(aboba):
     # -------------------- ПРАВАЯ ЧАСТЬ --------------------
     # Заголовок (новый текст)
     aboba.label_69 = QLabel("Процесс обучения")
-    aboba.label_69.setSizePolicy(aboba.heading_load_data.sizePolicy().Policy.Fixed,  # Фиксируем размер
-                                 aboba.heading_load_data.sizePolicy().Policy.Fixed)  # по ширине и высоте
+    aboba.label_69.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     aboba.label_69.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    aboba.label_69.setStyleSheet("""
-                QLabel {
-                    background-color: #FAFAFA;
-                    padding: 7px 65px;
-                    border-radius: 10px;
-                    border: 1px solid #C8C8C8;
-                    margin: 10px 0px 10px 0px;
-                }
-            """)
+    aboba.label_69.setProperty("class", "sectionHeader")
     right_layout.addWidget(aboba.label_69, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     # Поле для логов обучения (пока просто вывод)
@@ -497,7 +479,7 @@ def start_training_process(aboba):
             "feat_reg_mult": float(aboba.feat_reg_mult_input.value()),
         }
 
-        cfg_dir = os.path.join(os.getcwd(), "Настройки")
+        cfg_dir = os.path.join(os.getcwd(), USER_SETTINGS_DIR.name)
         os.makedirs(cfg_dir, exist_ok=True)
         cfg_path = os.path.join(cfg_dir, "train_config.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
@@ -537,7 +519,7 @@ def _get_store_city_map(aboba) -> dict:
         return m
 
     # запасной вариант: из JSON настроек
-    path = os.path.join(os.getcwd(), "Настройки", "filter_settings.json")
+    path = os.path.join(os.getcwd(), "user_settings", "filter_settings.json")
     if os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -709,12 +691,12 @@ def _prepare_training_data_dir(aboba) -> str:
         if extra:
             msg += f" | {extra}"
 
-    base_dir = os.path.join(os.getcwd(), "ВходныеДанные")
+    base_dir = os.path.join(os.getcwd(), INPUT_DATA_DIR.name)
 
     if not _any_order_filters_set(aboba):
-        return "ВходныеДанные"
+        return INPUT_DATA_DIR.name
 
-    out_rel = "ФильтрованныеДанные"
+    out_rel = "filtered_data"
     out_dir = os.path.join(os.getcwd(), out_rel)
 
     if os.path.isdir(out_dir):
@@ -777,7 +759,7 @@ def _prepare_training_data_dir(aboba) -> str:
 
             df = df[ok]
 
-        # дату оставляем как в исходнике (чтобы не портить формат в ФильтрованныеДанные)
+        # дату оставляем как в исходнике (чтобы не портить формат в filtered_data)
         df["Дата"] = src.loc[df.index]
         return df
 
@@ -800,7 +782,7 @@ def _prepare_training_data_dir(aboba) -> str:
         return df[df["Магазин"].isin(stores)]
 
     # --- Заказы ---
-    p_orders = os.path.join(base_dir, "Заказы.csv")
+    p_orders = os.path.join(base_dir, "orders.csv")
     if os.path.isfile(p_orders):
         df = pd.read_csv(p_orders, sep="|", dtype=str)
         _dbg("orders loaded", df)
@@ -822,7 +804,7 @@ def _prepare_training_data_dir(aboba) -> str:
         except Exception:
             pass
 
-        weather_path = os.path.join(base_dir, "Погода.csv")
+        weather_path = os.path.join(base_dir, "weather.csv")
         before_enrich = len(df)
         weather_diagnostics = []
         df = _enrich_orders_with_city_and_weather(
@@ -836,10 +818,10 @@ def _prepare_training_data_dir(aboba) -> str:
                 aboba.train_log.append(message + "\n")
         _dbg("orders after _enrich_orders_with_city_and_weather", df, extra=f"delta={_n(len(df) - before_enrich)}")
 
-        df.to_csv(os.path.join(out_dir, "Заказы.csv"), sep="|", index=False)
+        df.to_csv(os.path.join(out_dir, "orders.csv"), sep="|", index=False)
 
     # --- Просмотры (дата + вид номенклатуры) ---
-    p_views = os.path.join(base_dir, "Просмотры.csv")
+    p_views = os.path.join(base_dir, "views.csv")
     if os.path.isfile(p_views):
         df = pd.read_csv(p_views, sep="|", dtype=str)
         _dbg("views loaded", df)
@@ -850,10 +832,10 @@ def _prepare_training_data_dir(aboba) -> str:
         df = _apply_kind(df)
         _dbg("views after _apply_kind", df)
 
-        df.to_csv(os.path.join(out_dir, "Просмотры.csv"), sep="|", index=False)
+        df.to_csv(os.path.join(out_dir, "views.csv"), sep="|", index=False)
 
     # --- Избранное (дата + вид номенклатуры) ---
-    p_favs = os.path.join(base_dir, "Избранное.csv")
+    p_favs = os.path.join(base_dir, "favorites.csv")
     if os.path.isfile(p_favs):
         df = pd.read_csv(p_favs, sep="|", dtype=str)
         _dbg("favs loaded", df)
@@ -872,10 +854,10 @@ def _prepare_training_data_dir(aboba) -> str:
         except Exception:
             pass
 
-        df.to_csv(os.path.join(out_dir, "Избранное.csv"), sep="|", index=False)
+        df.to_csv(os.path.join(out_dir, "favorites.csv"), sep="|", index=False)
 
     # --- Справочники (копируем как есть, чтобы тренер не сломался) ---
-    for fn in ("Номенклатура.csv", "КатегорииСайта.csv"):
+    for fn in ("nomenclature.csv", "site_categories.csv"):
         src = os.path.join(base_dir, fn)
         dst = os.path.join(out_dir, fn)
         if os.path.isfile(src):

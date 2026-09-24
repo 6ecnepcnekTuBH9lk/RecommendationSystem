@@ -21,7 +21,7 @@ def _clean_code(value) -> str:
 
 
 def _ensure_photo_map(aboba):
-    nom_path = os.path.join(os.getcwd(), "ВходныеДанные", "Номенклатура.csv")
+    nom_path = os.path.join(os.getcwd(), "input_data", "nomenclature.csv")
 
     if not os.path.isfile(nom_path):
         aboba._photo_by_code = {}

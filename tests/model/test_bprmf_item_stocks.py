@@ -8,7 +8,7 @@ from Application.model import BPRMF
 
 def _write_nomenclature(data_dir: Path, rows, *, columns=None) -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
-    path = data_dir / "Номенклатура.csv"
+    path = data_dir / "nomenclature.csv"
     frame = pd.DataFrame(rows, columns=columns)
     frame.to_csv(path, sep="|", index=False, encoding="utf-8-sig")
     return path

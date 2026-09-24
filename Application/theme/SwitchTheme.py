@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from Application.paths import ICONS_DIR
+
+import os
+
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, pyqtProperty, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QPainter, QPixmap, QPalette
 from PyQt6.QtWidgets import QLabel, QWidget
 
 
@@ -11,14 +15,8 @@ KNOB_SIZE = 26
 ICON_SIZE = 22
 PADDING = 3
 
-SUN_ICON_PATH = "Картинки/Солнце.png"
-MOON_ICON_PATH = "Картинки/Луна.png"
-
-BG_ON = QColor("#5F5F5F")
-BG_OFF = QColor("#EBEBEB")
-KNOB_CIRCLE_OFF = QColor("#FAFAFA")
-KNOB_CIRCLE_ON = QColor("#464646")
-
+SUN_ICON_PATH = str(ICONS_DIR / "sun.png")
+MOON_ICON_PATH = str(ICONS_DIR / "moon.png")
 
 class ThemeSwitch(QWidget):
 
@@ -31,20 +29,21 @@ class ThemeSwitch(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # Knob position state
-        self._x = PADDING
+        self._x = SWITCH_W - KNOB_SIZE - PADDING
         self._y = PADDING
-        self._checked = False
+        self._checked = True
 
         # Knob container for PNG (do not stretch icon)
         self.knob = QLabel(self)
         self.knob.setFixedSize(KNOB_SIZE, KNOB_SIZE)
         self.knob.move(self._x, self._y)
         self.knob.setScaledContents(False)
+        self.knob.setStyleSheet("background: transparent; border: none;")
 
         # Icons
         self.sun_icon = QPixmap(SUN_ICON_PATH)
         self.moon_icon = QPixmap(MOON_ICON_PATH)
-        self.knob.setPixmap(self._center_icon(self.sun_icon))
+        self.knob.setPixmap(self._center_icon(self.moon_icon))
 
         # Animation
         self.anim = QPropertyAnimation(self, b"knob_pos", self)
@@ -87,13 +86,16 @@ class ThemeSwitch(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        p.setBrush(BG_ON if self._checked else BG_OFF)
+        palette = self.palette()
+        track = QColor(os.environ.get("QTMATERIAL_SECONDARYCOLOR", palette.color(QPalette.ColorRole.Mid).name()))
+        knob = QColor(os.environ.get("QTMATERIAL_SECONDARYDARKCOLOR", palette.color(QPalette.ColorRole.Base).name()))
+        p.setBrush(track)
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(self.rect(), 16, 16)
 
         # Knob circle (under PNG)
         knob_rect = self.knob.geometry()
-        p.setBrush(KNOB_CIRCLE_ON if self._checked else KNOB_CIRCLE_OFF)
+        p.setBrush(knob)
         p.drawEllipse(knob_rect)
 
     # === Click handling ===

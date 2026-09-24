@@ -6,7 +6,7 @@ from Application.model import BPRMF
 
 
 def _write_settings(tmp_path, data):
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir(parents=True, exist_ok=True)
     path = settings_dir / "filter_settings.json"
     path.write_text(
@@ -127,7 +127,7 @@ def test_selected_collections_propagates_real_json_decode_error(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    settings_dir = tmp_path / "Настройки"
+    settings_dir = tmp_path / "user_settings"
     settings_dir.mkdir()
     (settings_dir / "filter_settings.json").write_text(
         '{"seasons_selected": [',

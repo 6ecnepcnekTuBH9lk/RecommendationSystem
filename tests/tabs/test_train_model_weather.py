@@ -56,7 +56,7 @@ def test_duplicate_normalized_weather_headers_preserve_orders_and_report_warning
     duplicate_name,
     duplicate_header,
 ):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     canonical_headers = [
         "Дата",
         "Город",
@@ -98,7 +98,7 @@ def test_duplicate_normalized_weather_headers_preserve_orders_and_report_warning
 
 
 def test_duplicate_weather_keys_do_not_multiply_orders(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     _write_weather(
         weather_path,
         [
@@ -137,7 +137,7 @@ def test_duplicate_weather_keys_do_not_multiply_orders(tmp_path):
 
 
 def test_weather_success_populates_canonical_columns_without_suffixes(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     _write_weather(
         weather_path,
         [
@@ -171,7 +171,7 @@ def test_weather_success_populates_canonical_columns_without_suffixes(tmp_path):
 
 
 def test_weather_success_preserves_order_count(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     source = pd.concat([_orders(), _orders().assign(MindboxID="client-2")], ignore_index=True)
     _write_weather(
         weather_path,
@@ -195,7 +195,7 @@ def test_weather_success_preserves_order_count(tmp_path):
 
 
 def test_weather_no_match_preserves_order_and_reports_coverage(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     _write_weather(
         weather_path,
         [
@@ -222,7 +222,7 @@ def test_weather_no_match_preserves_order_and_reports_coverage(tmp_path):
 
 
 def test_partial_weather_coverage_is_reported_once(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     _write_weather(
         weather_path,
         [
@@ -283,7 +283,7 @@ def test_weather_read_error_preserves_orders_and_reports_warning(
     monkeypatch,
     read_error,
 ):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     weather_path.write_text("existing", encoding="utf-8")
     diagnostics = []
     monkeypatch.setattr(train_model_tab.pd, "read_csv", Mock(side_effect=read_error))
@@ -302,7 +302,7 @@ def test_weather_schema_error_preserves_orders_and_reports_warning(
     tmp_path,
     missing_column,
 ):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     weather = {
         "Дата": "2025-01-15",
         "Город": "Москва",
@@ -321,7 +321,7 @@ def test_weather_schema_error_preserves_orders_and_reports_warning(
 
 
 def test_header_only_weather_preserves_orders_and_reports_warning(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     pd.DataFrame(columns=["Дата", "Город", *WEATHER_COLUMNS]).to_csv(
         weather_path,
         sep="|",
@@ -339,7 +339,7 @@ def test_header_only_weather_preserves_orders_and_reports_warning(tmp_path):
 
 
 def test_zero_byte_weather_preserves_orders_and_reports_warning(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     weather_path.write_bytes(b"")
     diagnostics = []
 
@@ -354,7 +354,7 @@ def test_zero_byte_weather_preserves_orders_and_reports_warning(tmp_path):
 
 
 def test_all_missing_weather_values_are_reported_as_degraded(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     _write_weather(
         weather_path,
         [
@@ -379,7 +379,7 @@ def test_all_missing_weather_values_are_reported_as_degraded(tmp_path):
 
 
 def test_missing_city_and_date_preserve_interactions(tmp_path):
-    weather_path = tmp_path / "Погода.csv"
+    weather_path = tmp_path / "weather.csv"
     _write_weather(
         weather_path,
         [

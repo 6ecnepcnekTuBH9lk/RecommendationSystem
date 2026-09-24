@@ -40,9 +40,9 @@ def test_manual_weather_update_reports_actual_api_outcome(
     expected_fragment,
 ):
     monkeypatch.chdir(tmp_path)
-    input_dir = tmp_path / "ВходныеДанные"
+    input_dir = tmp_path / "input_data"
     input_dir.mkdir()
-    (input_dir / "КоординатыГородов.csv").write_text("existing", encoding="utf-8")
+    (input_dir / "city_coordinates.csv").write_text("existing", encoding="utf-8")
     result = pd.DataFrame()
     result.attrs.update(
         weather_total_cities=2,

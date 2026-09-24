@@ -77,7 +77,7 @@ def _publish_manifest(model_dir, generation):
 
 
 def _prepare_current_generation(tmp_path, generation="generation-a"):
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
     _write_generation(model_dir, generation)
     manifest_path = _publish_manifest(model_dir, generation)
@@ -95,7 +95,7 @@ def lightweight_artifact_preparation(monkeypatch):
 
 def test_partial_mappings_write_keeps_legacy_model_unchanged(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
     legacy_mappings = model_dir / "mappings.json"
     legacy_checkpoint = model_dir / "bprmf.pt"
@@ -168,7 +168,7 @@ def test_missing_nomenclature_publishes_empty_train_item_meta(
 
     _mappings, checkpoint = BPRMF._load_artifacts()
     assert checkpoint["train_item_meta"] == {}
-    assert (tmp_path / "Модель" / "current.json").is_file()
+    assert (tmp_path / "model" / "current.json").is_file()
 
 
 def test_valid_nomenclature_preserves_train_item_meta_semantics(
@@ -201,7 +201,7 @@ def test_valid_nomenclature_preserves_train_item_meta_semantics(
             },
         ]
     ).to_csv(
-        data_dir / "Номенклатура.csv",
+        data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -235,7 +235,7 @@ def test_valid_empty_nomenclature_publishes_empty_train_item_meta(
     pd.DataFrame(
         [{"КодНоменклатуры": "not-in-model", "Коллекция": "synthetic"}]
     ).to_csv(
-        data_dir / "Номенклатура.csv",
+        data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -260,7 +260,7 @@ def test_train_item_meta_permission_error_keeps_current_generation(
     )
     data_dir = tmp_path / "synthetic-data"
     data_dir.mkdir()
-    nomenclature_path = data_dir / "Номенклатура.csv"
+    nomenclature_path = data_dir / "nomenclature.csv"
     nomenclature_path.write_text(
         "КодНоменклатуры|Коллекция\nnew-item|synthetic\n",
         encoding="utf-8-sig",
@@ -293,7 +293,7 @@ def test_train_item_meta_propagates_parser_error(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "synthetic-data"
     data_dir.mkdir()
-    (data_dir / "Номенклатура.csv").write_text(
+    (data_dir / "nomenclature.csv").write_text(
         "КодНоменклатуры|Коллекция\nnew-item|synthetic\n",
         encoding="utf-8-sig",
     )
@@ -326,7 +326,7 @@ def test_train_item_meta_propagates_processing_error_after_successful_read(
     pd.DataFrame(
         [{"КодНоменклатуры": "new-item", "Коллекция": "synthetic"}]
     ).to_csv(
-        data_dir / "Номенклатура.csv",
+        data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -358,7 +358,7 @@ def test_existing_nomenclature_without_item_code_column_is_rejected(
     data_dir = tmp_path / "synthetic-data"
     data_dir.mkdir()
     pd.DataFrame([{"Коллекция": "synthetic"}]).to_csv(
-        data_dir / "Номенклатура.csv",
+        data_dir / "nomenclature.csv",
         sep="|",
         index=False,
         encoding="utf-8-sig",
@@ -460,13 +460,83 @@ def test_manifest_replace_error_keeps_old_manifest_and_generation(
     mappings, checkpoint = BPRMF._load_artifacts()
     assert mappings["idx2user"] == ["generation-a-user"]
     assert checkpoint["state_dict"]["generation"] == "generation-a"
-    assert len(list((model_dir / "runs").iterdir())) == 2
+    assert [p.name for p in (model_dir / "runs").iterdir()] == ["generation-a"]
     assert len(failed_manifest_temps) == 1
     failed_manifest_temp = failed_manifest_temps[0]
     assert failed_manifest_temp.name.startswith(".current.")
     assert failed_manifest_temp.name.endswith(".tmp")
     assert not failed_manifest_temp.exists()
     assert other_publisher_temp.read_bytes() == other_publisher_bytes
+
+
+def test_explicit_model_directory_return_and_disk_commit_order(tmp_path, monkeypatch, lightweight_artifact_preparation):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "isolated-model"
+    events = []
+    original_load, original_rename, original_replace = torch.load, BPRMF.os.rename, BPRMF.os.replace
+    def load(path, *args, **kwargs):
+        assert Path(path).parent.parent.name == ".staging"
+        events.append("disk-readback")
+        return original_load(path, *args, **kwargs)
+    def rename(*args):
+        assert events == ["disk-readback"]
+        events.append("finalize")
+        return original_rename(*args)
+    def replace(source, destination):
+        assert events == ["disk-readback", "finalize"]
+        assert Path(destination) == target / "current.json"
+        assert not Path(destination).exists()
+        events.append("commit")
+        return original_replace(source, destination)
+    monkeypatch.setattr(torch, "load", load)
+    monkeypatch.setattr(BPRMF.os, "rename", rename)
+    monkeypatch.setattr(BPRMF.os, "replace", replace)
+    generation = BPRMF._save_artifacts(BPRMF.TrainConfig(data_dir=str(tmp_path / "no-data")),
+        _synthetic_mappings(), _SyntheticModel(), model_dir=target)
+    assert json.loads((target / "current.json").read_text())["generation"] == generation
+    assert events == ["disk-readback", "finalize", "commit"]
+    assert not (tmp_path / "model").exists()
+
+
+@pytest.mark.parametrize("corruption", ["torch_bytes", "mappings_json", "mappings_identity", "dimensions"])
+def test_corrupt_serialization_never_becomes_current(tmp_path, monkeypatch, lightweight_artifact_preparation, corruption):
+    monkeypatch.chdir(tmp_path)
+    root, current, old = _prepare_current_generation(tmp_path)
+    save = torch.save
+    def corrupt(checkpoint, destination):
+        if corruption == "torch_bytes":
+            destination.write(b"broken checkpoint")
+            return
+        if corruption == "dimensions":
+            checkpoint = {**checkpoint, "num_items": 99}
+        save(checkpoint, destination)
+        mappings = Path(destination.name).with_name("mappings.json")
+        if corruption == "mappings_json":
+            mappings.write_text("{broken", encoding="utf-8")
+        if corruption == "mappings_identity":
+            mappings.write_text(json.dumps({"idx2user": ["other-user"], "idx2item": ["other-item"]}), encoding="utf-8")
+    monkeypatch.setattr(torch, "save", corrupt)
+    with pytest.raises(Exception):
+        BPRMF._save_artifacts(BPRMF.TrainConfig(data_dir=str(tmp_path / "no-data")), _synthetic_mappings(), _SyntheticModel())
+    assert current.read_bytes() == old
+    assert [p.name for p in (root / "runs").iterdir()] == ["generation-a"]
+    assert list((root / ".staging").iterdir()) == []
+
+
+@pytest.mark.parametrize("point", ["save", "rename", "current"])
+def test_keyboard_interrupt_cleans_unpublished_artifacts(tmp_path, monkeypatch, lightweight_artifact_preparation, point):
+    monkeypatch.chdir(tmp_path)
+    root, current, old = _prepare_current_generation(tmp_path)
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+    owner, name = (torch, "save") if point == "save" else (BPRMF.os, "rename" if point == "rename" else "replace")
+    monkeypatch.setattr(owner, name, interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        BPRMF._save_artifacts(BPRMF.TrainConfig(data_dir=str(tmp_path / "no-data")), _synthetic_mappings(), _SyntheticModel())
+    assert current.read_bytes() == old
+    assert [p.name for p in (root / "runs").iterdir()] == ["generation-a"]
+    assert list((root / ".staging").iterdir()) == []
+    assert list(root.glob(".current.*.tmp")) == []
 
 
 def test_cleanup_error_does_not_hide_checkpoint_preparation_error(
@@ -590,7 +660,7 @@ def test_reader_keeps_selected_generation_when_manifest_switches_mid_load(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
     _write_generation(model_dir, "generation-a")
     _write_generation(model_dir, "generation-b")
@@ -618,7 +688,7 @@ def test_loader_falls_back_to_legacy_pair_when_manifest_is_absent(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
     legacy_mappings = {
         "idx2user": ["legacy-user"],
@@ -639,7 +709,7 @@ def test_first_successful_generation_preserves_legacy_files(
     tmp_path, monkeypatch, lightweight_artifact_preparation
 ):
     monkeypatch.chdir(tmp_path)
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
     legacy_mappings_path = model_dir / "mappings.json"
     legacy_checkpoint_path = model_dir / "bprmf.pt"
@@ -686,7 +756,7 @@ def test_loader_rejects_inconsistent_current_generation_without_legacy_fallback(
     tmp_path, monkeypatch, num_users, num_items, expected_field
 ):
     monkeypatch.chdir(tmp_path)
-    model_dir = tmp_path / "Модель"
+    model_dir = tmp_path / "model"
     model_dir.mkdir()
     _write_generation(
         model_dir,
