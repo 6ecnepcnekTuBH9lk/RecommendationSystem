@@ -884,19 +884,19 @@ def test_close_waits_asynchronously_for_process(window):
     assert not window.isVisible()
 
 
-def test_all_four_tabs_themes_and_legacy_controls(app):
+def test_all_tabs_themes_and_legacy_controls(app):
     from main import MainWindow
     window = MainWindow()
     QApplication.processEvents()
     wait_until(lambda: not window.mb_controller.tasks)
-    assert [window.tabs.tabText(i) for i in range(4)] == [
-        "Получение данных", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
+        "Получение данных", "Статистика и анализ", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
     assert window.btn_load is not None and window.start_train is not None
     window.mb_controller.start()
     for dark in (False, True, False):
         window.apply_theme(dark)
-        window.tabs.setCurrentIndex(2)
-        assert window.tabs.currentIndex() == 2
+        window.tabs.setCurrentIndex(3)
+        assert window.tabs.currentIndex() == 3
         assert window.theme_switch.isEnabled()
     window.mb_controller.cancel()
     window.mb_process.finish(1, True)

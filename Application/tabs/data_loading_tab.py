@@ -130,15 +130,28 @@ class LoadingState(Enum):
 
 
 class _BusyProgressBar(QProgressBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        font = self.font()
+        font.setItalic(True)
+        self.setFont(font)
+
     def text(self):
         return "Идёт загрузка..." if self.maximum() == 0 else super().text()
 
     def paintEvent(self, event):
         super().paintEvent(event)
+
         if self.maximum() == 0:
             painter = QPainter(self)
             painter.setPen(self.palette().text().color())
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+            painter.setFont(self.font())
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                self.text(),
+            )
 
 
 def _heading(text, layout):

@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 
 from Application.tabs.data_processing_tab import create_input_data_widgets_tab
 from Application.tabs.data_loading_tab import create_data_loading_widgets_tab
+from Application.tabs.dataset_statistics_tab import create_dataset_statistics_tab
 from Application.tabs.train_model_tab import create_train_model_widgets_tab
 from Application.tabs.create_results_tab import create_result_widgets_tab
 from Application.settings.set_status import set_ready_status
@@ -93,6 +94,7 @@ class MainWindow(QMainWindow):
 
         # Получение согласованных наборов Mindbox
         create_data_loading_widgets_tab(self)
+        create_dataset_statistics_tab(self)
         # Legacy CSV: обработка входных данных
         create_input_data_widgets_tab(self)
         # Вкладка с обучением модели
