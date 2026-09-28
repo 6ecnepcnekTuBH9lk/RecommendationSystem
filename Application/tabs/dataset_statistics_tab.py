@@ -83,6 +83,28 @@ def _information_label(text):
     return label
 
 
+def _section_heading(layout, title):
+    label = _label(title.upper())
+    label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    label.setProperty("class", "statisticsSection")
+    layout.addWidget(label)
+
+
+class _StatisticsTable(QTableWidget):
+    """Fit short tables to their rows, keeping long tables scrollable."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_height()
+
+    def fit_height(self):
+        height = self.horizontalHeader().height() + self.verticalHeader().length() + 2 * self.frameWidth()
+        scrollbar = self.horizontalScrollBar()
+        if scrollbar.maximum() > scrollbar.minimum():
+            height += scrollbar.sizeHint().height()
+        self.setFixedHeight(min(450, height))
+
+
 def _cards(layout, values):
     grid = QGridLayout()
     labels = []
@@ -102,7 +124,7 @@ def _cards(layout, values):
 
 
 def _table(layout, headers, rows):
-    table = QTableWidget(0, len(headers))
+    table = _StatisticsTable(0, len(headers))
     table.setHorizontalHeaderLabels(headers)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -117,7 +139,11 @@ def _table(layout, headers, rows):
     table.resizeColumnsToContents()
     for column in range(len(headers)):
         table.setColumnWidth(column, min(440, max(110, table.columnWidth(column))))
-    table.setMinimumHeight(min(450, max(130, 36 + 32 * len(rows))))
+    table.horizontalScrollBar().rangeChanged.connect(table.fit_height)
+    table.horizontalHeader().geometriesChanged.connect(table.fit_height)
+    table.verticalHeader().sectionResized.connect(table.fit_height)
+    table.ensurePolished()
+    table.fit_height()
     layout.addWidget(table)
     return table
 
@@ -129,11 +155,6 @@ def _decimal_display(value, *, money=True):
 
 
 def _actions_page(layout, result):
-    def heading(title):
-        label = _label(title)
-        label.setProperty("class", "sectionHeader")
-        layout.addWidget(label)
-
     def table(headers, rows):
         widget = _table(layout, headers, rows)
         widget.ensurePolished()
@@ -151,32 +172,27 @@ def _actions_page(layout, result):
                     ("Добавления в избранное", result["favorite_interactions"]),
                     ("Клиенты с просмотрами", result["view_users"]),
                     ("Клиенты с избранным", result["favorite_users"])])
-    layout.addWidget(_label("Показатели рассчитаны по товарным просмотрам и добавлениям в избранное. "
-                            "Одно исходное событие с несколькими товарами создаёт несколько взаимодействий."))
-    heading("Активность клиентов")
-    table(["Тип действия", "Взаимодействий", "Клиентов", "Среднее на клиента", "Медиана на клиента"], [
+    _section_heading(layout, "Активность клиентов")
+    table(["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"], [
         ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
         ("Добавления в избранное", result["favorite_interactions"], result["favorite_users"],
          result["mean_favorites_per_user"], result["median_favorites_per_user"])])
-    table(["Количество просмотров", "Клиентов", "Доля, %"], result["view_user_activity_distribution"])
-    table(["Количество добавлений", "Клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
-    heading("Каналы взаимодействий")
+    table(["Количество просмотров", "Количество клиентов", "Доля, %"], result["view_user_activity_distribution"])
+    table(["Количество избранного", "Количество клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
+    _section_heading(layout, "Каналы взаимодействий")
     table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
-                    "Добавления в избранное", "Клиенты с избранным", "Доля избранного, %"],
+                    "Избранное", "Клиенты с избранным", "Доля избранного, %"],
            [row[1:] for row in result["action_channel_statistics"]])
-    heading("Динамика действий")
-    layout.addWidget(_label("Месяц определяется по дате события в UTC."))
-    table(["Месяц", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Клиенты с избранным"],
+    _section_heading(layout, "Динамика действий")
+    table(["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
            [(month[5:] + "." + month[:4], *values) for month, *values in result["action_monthly_dynamics"]])
-    heading("Параметры просмотров")
-    layout.addWidget(_label("Доступность и цена учитываются один раз на исходное событие просмотра с единственным товаром. "
-                            "Отсутствующие цены не входят в среднее и медиану."))
+    _section_heading(layout, "Параметры просмотров")
     table(["Доступность", "Просмотров", "Доля, %"], result["view_availability_distribution"])
     table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
            [(currency, n, _decimal_display(mean), _decimal_display(middle))
             for currency, n, mean, middle in result["view_price_statistics"]])
-    heading("Исходные события")
-    table(["Системное имя", "Количество", "Доля, %"],
+    _section_heading(layout, "Исходные события")
+    table(["Системное название", "Количество", "Доля, %"],
            [(name, count, 100 * count / result["actions"] if result["actions"] else 0)
             for name, count in result["action_types"]])
     diagnostics = dict(result["diagnostics"])
@@ -186,11 +202,6 @@ def _actions_page(layout, result):
 
 
 def _products_page(layout, result):
-    def heading(title):
-        label = _label(title)
-        label.setProperty("class", "sectionHeader")
-        layout.addWidget(label)
-
     def table(headers, rows):
         widget = _table(layout, headers, rows)
         widget.ensurePolished()
@@ -211,26 +222,23 @@ def _products_page(layout, result):
                     ("Товары с просмотрами", result["products_with_views"]),
                     ("Товары в избранном", result["products_with_favorites"]),
                     ("Купленные товары", result["products_with_purchases"])])
-    layout.addWidget(_label("Показатели объединены по товарам справочника. Покупки — число позиций покупки, "
-                            "продано единиц — их суммарное количество. В рейтингах показано до 20 товаров."))
-    heading("Популярные товары")
-    layout.addWidget(_label("По просмотрам"))
+    _section_heading(layout, "Популярные товары по просмотрам")
     table(["Код", "Название", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Покупки"],
           result["top_viewed_products"])
-    layout.addWidget(_label("По добавлениям в избранное"))
+    _section_heading(layout, "Популярные товары по избранному")
     table(["Код", "Название", "Добавления в избранное", "Клиенты с избранным", "Просмотры", "Покупки"],
           result["top_favorited_products"])
-    layout.addWidget(_label("По покупкам"))
+    _section_heading(layout, "Популярные товары по покупкам")
     table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
           [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
-    heading("Категории товаров")
-    group("Категория", "product_category_statistics")
-    heading("Структура спроса")
-    for title, field in (("Пол товара", "product_gender_statistics"), ("Сезон", "product_season_statistics"),
-                         ("Стилевая группа", "product_style_statistics")):
-        layout.addWidget(_label(title))
+    _section_heading(layout, "Категории товаров")
+    table(["Категория", "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
+          [(*row[1:6], _decimal_display(row[6], money=False)) for row in result["product_category_statistics"]])
+    for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
+                         ("Спрос по стилевой группе", "product_style_statistics")):
+        _section_heading(layout, title)
         group("Значение", field)
-    heading("Качество сопоставления")
+    _section_heading(layout, "Качество сопоставления")
     table(["Показатель", "Значение"], [
         ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
         ("Уникальные распознанные товары", result["unique_resolved_items"]),
@@ -243,53 +251,47 @@ def _products_page(layout, result):
 
 
 def _orders_page(layout, result):
-    def heading(title):
-        label = _label(title)
-        label.setProperty("class", "sectionHeader")
-        layout.addWidget(label)
+    def table(headers, rows):
+        widget = _table(layout, headers, rows)
+        header = widget.horizontalHeader()
+        header.ensurePolished()
+        for column, title in enumerate(headers):
+            option = QStyleOptionHeader()
+            option.initFrom(header)
+            option.text = title.upper()
+            size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
+            widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
 
-    _cards(layout, [("Заказы с покупкой", result["purchase_orders"]), ("Покупатели", result["purchase_users"]),
-                    ("Позиции покупок", result["purchase_interactions"]),
-                    ("Продано единиц", _decimal_display(result["purchase_quantity"], money=False))])
-    layout.addWidget(_label("Бизнес-показатели рассчитаны по уникальным заказам с позициями покупки после исключения дублей. "
-                            "Статусы исходных позиций приведены отдельно внизу."))
-    heading("Корзина заказа")
+    _cards(layout, [("Заказы с покупкой", result["purchase_orders"]),
+                    ("Невыкупленные заказы", result["orders_without_purchase"]),
+                    ("Позиции покупок", result["purchase_interactions"]), ("Покупатели", result["purchase_users"])])
+    _section_heading(layout, "Корзина заказа")
+    basket_rates = {label: rate for label, _, rate in result["purchase_basket_distribution"]}
     _cards(layout, [("Среднее число позиций на заказ", result["mean_purchase_lines_per_order"]),
                     ("Медиана числа позиций на заказ", result["median_purchase_lines_per_order"]),
-                    ("Среднее число единиц на заказ", _decimal_display(result["mean_purchase_units_per_order"])),
-                    ("Медиана числа единиц на заказ", _decimal_display(result["median_purchase_units_per_order"]))])
-    _table(layout, ["Количество позиций", "Заказов", "Доля, %"], result["purchase_basket_distribution"])
-    heading("Финансовые показатели")
-    _table(layout, ["Валюта", "Заказов", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа", "Медианная сумма заказа"],
+                    ("Доля заказов с 1 позицией", f"{basket_rates['1 позиция']:.2f}%"),
+                    ("Доля заказов с 3+ позициями", f"{sum(basket_rates[key] for key in ('3–5 позиций', '6–10 позиций', '11+ позиций')):.2f}%")])
+    table(["Количество позиций", "Заказов", "Доля, %"], result["purchase_basket_distribution"])
+    _section_heading(layout, "Финансовые показатели")
+    table(["Валюта", "Заказов", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа", "Медианная сумма заказа"],
            [(currency, n, lines, _decimal_display(units, money=False), *(_decimal_display(v) for v in (amount, mean, median)))
             for currency, n, lines, units, amount, mean, median in result["order_financials"]])
     mixed, unknown = result["mixed_currency_purchase_orders"], result["unknown_currency_purchase_orders"]
     if mixed or unknown:
-        layout.addWidget(_label(f"Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}. "
-                                "Они учтены в корзине и общем числе заказов с покупкой, но исключены из денежных показателей RUB/KZT."))
-    heading("Динамика покупок")
-    layout.addWidget(_label("Месяц определяется по исходной дате заказа в UTC."))
-    _table(layout, ["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
+        layout.addWidget(_label(f"Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}."))
+    _section_heading(layout, "Динамика покупок")
+    table(["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
            [(month[5:] + "." + month[:4], rub_n, _decimal_display(rub), kzt_n, _decimal_display(kzt))
             for month, rub_n, rub, kzt_n, kzt in result["order_monthly_dynamics"]])
-    heading("Магазины и каналы")
     for currency in ("RUB", "KZT"):
-        layout.addWidget(_label(currency + " — 20 магазинов / каналов с наибольшей суммой покупок"))
-        _table(layout, ["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
+        _section_heading(layout, "Магазины и каналы — " + currency)
+        table(["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
                [(name, n, buyers, lines, _decimal_display(units, money=False), _decimal_display(amount), _decimal_display(mean))
                 for unit, key, name, n, buyers, lines, units, amount, mean in result["store_statistics"] if unit == currency])
-    heading("Оформление, доставка и оплата")
-    _table(layout, ["Способ оформления", "Заказов", "Доля, %"], result["ordering_method_distribution"])
-    _table(layout, ["Способ доставки", "Заказов", "Доля, %"], result["delivery_type_distribution"])
-    layout.addWidget(_label("В одном заказе может быть несколько способов оплаты; сумма долей может превышать 100%."))
-    _table(layout, ["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"], result["payment_type_distribution"])
-    _table(layout, ["Валюта", "Заказов с указанной стоимостью доставки", "Сумма доставки", "Средняя стоимость доставки", "Медианная стоимость доставки"],
-           [(currency, n, *(_decimal_display(v) for v in (amount, mean, median)))
-            for currency, n, amount, mean, median in result["delivery_financials"]])
-    heading("Статусы позиций")
-    layout.addWidget(_label("Эта таблица показывает статусы всех исходных позиций заказов, включая дубли. "
-                            "Бизнес-показатели выше рассчитаны по уникальным заказам после исключения дублей."))
-    _table(layout, ["Статус", "Позиции", "Доля, %", "Покупки"],
+    _section_heading(layout, "Оплата")
+    table(["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"], result["payment_type_distribution"])
+    _section_heading(layout, "Статусы позиций")
+    table(["Статус", "Позиции", "Доля, %", "Считается покупкой"],
            [(name, count, 100 * count / result["order_lines"] if result["order_lines"] else 0, "Да" if purchase else "Нет")
             for name, count, purchase in result["line_statuses"]])
 
@@ -319,6 +321,7 @@ DIAGNOSTIC_LABELS = {
 class DatasetStatisticsTab(QWidget):
     def __init__(self, window):
         super().__init__(window)
+        self.setObjectName("datasetStatisticsTab")
         self.window = window
         self.cache_path = CACHE_PATH
         self.process = None
@@ -556,7 +559,8 @@ class DatasetStatisticsTab(QWidget):
             label.setText(_number(result[name]))
         self.description.setText(SOURCE_DESCRIPTION + " Дата и время расчета: " + _date_time(result["calculated_at"]))
         self.status.setText("\n".join([_calculation_message(result),
-                            *(WARNING_LABELS.get(warning, warning) for warning in result["warnings"])]))
+                            *(WARNING_LABELS.get(warning, warning) for warning in result["warnings"]
+                              if warning != "Позиции заказов с нецелым количеством исключены из статистики.")]))
         actions, orders, products, customers, technical = self._pages()
         coverage = []
         for source in result["coverage"]:
@@ -583,25 +587,14 @@ class DatasetStatisticsTab(QWidget):
         _products_page(products, result)
         _cards(customers, [("Количество клиентов", result["customers"]),
                           ("Активные клиенты", result["interaction_users"]),
-                          ("Покупатели", result["purchase_users"]), ("Повторные покупатели", result["repeat_buyers"])])
-        customers.addWidget(_label("Активными считаются клиенты, имеющие хотя бы одно взаимодействие с товаром, "
-                                   "включая взаимодействия с товарами, которые не удалось сопоставить со справочником. "
-                                   "Покупатель имеет хотя бы один уникальный заказ с покупкой, повторный — не менее двух. "
-                                   "Активность учитывается по объединённым идентификаторам клиентов, "
-                                   "независимо от наличия профиля в текущем снимке клиентов."))
-        portrait = _label("Портрет клиента")
-        portrait.setProperty("class", "sectionHeader")
-        customers.addWidget(portrait)
-        customers.addWidget(_label("Пол и возраст рассчитаны по уникальным профилям текущего снимка клиентов. "
-                                   "Возраст клиента определяется на дату расчёта статистики."))
+                          ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
+        _section_heading(customers, "Портрет клиента")
         if result["customers"] is None:
             customers.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))
         _table(customers, ["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
         _cards(customers, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
         _table(customers, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
-        activity = _label("Активность клиентов")
-        activity.setProperty("class", "sectionHeader")
-        customers.addWidget(activity)
+        _section_heading(customers, "Активность клиентов")
         _table(customers, ["Показатель", "Значение"], [
             ("Клиенты с просмотрами", result["view_users"]),
             ("Клиенты с добавлениями в избранное", result["favorite_users"]),
@@ -613,16 +606,12 @@ class DatasetStatisticsTab(QWidget):
             ("Медиана числа взаимодействий на активного клиента", result["median_interactions"]),
             ("Доля активных клиентов, совершивших покупку, %", result["active_buyer_rate"])])
         _table(customers, ["Количество взаимодействий", "Клиентов", "Доля, %"], result["interaction_activity_distribution"])
-        purchases = _label("Покупательская активность")
-        purchases.setProperty("class", "sectionHeader")
-        customers.addWidget(purchases)
+        _section_heading(customers, "Покупательская активность")
         _table(customers, ["Количество заказов", "Покупателей", "Доля покупателей, %"], result["purchase_order_distribution"])
         _table(customers, ["Показатель", "Значение"], [
             ("Среднее число заказов на покупателя", result["mean_orders_per_buyer"]),
             ("Медиана числа заказов на покупателя", result["median_orders_per_buyer"]),
             ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
-        technical.addWidget(_label("Если при чтении данных обнаруживается некорректная запись, расчет завершается "
-                                 "с ошибкой — такие записи не пропускаются. События без указанного товара учитываются отдельно."))
         _table(technical, ["Диагностика", "Количество"],
                [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
                + [("Исходные заказы", result["orders"]), ("Исходные позиции заказов", result["order_lines"]),

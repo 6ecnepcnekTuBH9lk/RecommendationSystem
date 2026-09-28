@@ -162,7 +162,7 @@ class OrderAggregates:
                 n, lines, quantity, amount, mean = totals.values()
                 rows.append((currency, key, name, n, len(totals.buyers), lines, quantity, amount, mean))
             rows.sort(key=lambda row: (-Decimal(row[7]), -row[3], row[2], row[1] is not None, row[1] or ""))
-            stores.extend(rows[:20])
+            stores.extend(rows)
         basket = Counter({label: 0 for label in BASKET_LABELS})
         for count, orders in self.lines.items():
             index = 0 if count == 1 else 1 if count == 2 else 2 if count <= 5 else 3 if count <= 10 else 4

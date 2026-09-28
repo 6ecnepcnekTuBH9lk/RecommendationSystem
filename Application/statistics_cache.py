@@ -15,7 +15,7 @@ from Application.action_statistics import AVAILABILITY_LABELS, FAVORITE_BUCKETS,
 
 
 CACHE_PATH = USER_SETTINGS_DIR / "dataset_statistics.json"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 logger = logging.getLogger(__name__)
 
 COUNT_FIELDS = (
@@ -25,7 +25,7 @@ COUNT_FIELDS = (
     "resolved_interactions", "unresolved_interactions",
     "view_users", "favorite_users", "purchase_users", "view_purchase_users", "favorite_purchase_users",
     "all_interaction_type_users", "repeat_buyers",
-    "purchase_orders", "mixed_currency_purchase_orders", "unknown_currency_purchase_orders",
+    "purchase_orders", "orders_without_purchase", "mixed_currency_purchase_orders", "unknown_currency_purchase_orders",
     "view_parameter_actions",
     "products_with_views", "products_with_favorites", "products_with_purchases",
     "resolved_view_interactions", "resolved_favorite_interactions", "resolved_purchase_interactions",
@@ -87,6 +87,8 @@ def _validate_orders(result):
     currency = lambda value: value in CURRENCIES
     money = _decimal_string
     total = result["purchase_orders"]
+    if total + result["orders_without_purchase"] != dict(result["diagnostics"])["orders_unique"]:
+        raise ValueError
     for key in ("mean_purchase_lines_per_order", "median_purchase_lines_per_order"):
         if not _number(result[key]):
             raise ValueError
@@ -147,7 +149,7 @@ def _validate_orders(result):
         raise ValueError
     for unit in CURRENCIES:
         rows = [r for r in stores if r[0] == unit]
-        if len(rows) > 20 or rows != sorted(rows, key=lambda r: (-Decimal(r[7]), -r[3], r[2], r[1] is not None, r[1] or "")):
+        if rows != sorted(rows, key=lambda r: (-Decimal(r[7]), -r[3], r[2], r[1] is not None, r[1] or "")):
             raise ValueError
         for row in rows:
             if not 0 < row[4] <= row[3] <= total or row[5] < row[3] or Decimal(row[8]) != Decimal(row[7]) / row[3]:
@@ -259,11 +261,19 @@ def _validate_products(result):
             raise ValueError
     for field in ("product_category_statistics", "product_gender_statistics", "product_season_statistics", "product_style_statistics"):
         rows = result[field]
-        if not _rows(rows, (label, _count, _count, _count, _count, _integral_quantity)):
+        if field == "product_category_statistics":
+            if not _rows(rows, (lambda v: v is None or label(v), label, _count, _count, _count, _count, _integral_quantity)):
+                raise ValueError
+            if len({r[0] for r in rows}) != len(rows) or list(rows) != sorted(
+                    rows, key=lambda r: (-r[5], -r[3], -r[4], r[1], r[0] is not None, r[0] or "")):
+                raise ValueError
+            # Validate shared totals by stable identity; duplicate display names are valid.
+            rows = [(r[0], *r[2:]) for r in rows]
+        elif not _rows(rows, (label, _count, _count, _count, _count, _integral_quantity)):
             raise ValueError
         if len({r[0] for r in rows}) != len(rows) or any(not r[1] or r[1] > sum(r[2:5]) for r in rows):
             raise ValueError
-        if list(rows) != sorted(rows, key=lambda r: (-r[4], -r[2], -r[3], r[0])):
+        if field != "product_category_statistics" and list(rows) != sorted(rows, key=lambda r: (-r[4], -r[2], -r[3], r[0])):
             raise ValueError
         if any(sum(r[index] for r in rows) != total for index, total in enumerate((items, *totals), 1)):
             raise ValueError

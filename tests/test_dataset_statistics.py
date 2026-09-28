@@ -69,6 +69,7 @@ def dataset(tmp_path):
             "orders": {SINCE[:10]: put_entry(tmp_path, "orders", orders, 2)},
             "customer_merges": put_entry(tmp_path, "customer_merges", [merge], 3), "manual_interactions": None}
     save(tmp_path, data)
+    (tmp_path / "site_categories.csv").write_text("КодКатегории|НазваниеКатегории\n", encoding="utf-8-sig")
     catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры|Номенклатура|НазваниеНаСайте\n000001|Рубашка|Рубашка на сайте\n000002|Брюки|\n",
                        encoding="utf-8-sig")
@@ -265,7 +266,7 @@ def test_catalog_replacement_cannot_mix_ids_and_names(dataset, monkeypatch):
         return names
 
     monkeypatch.setattr(statistics, "_catalog_metadata", replace_catalog)
-    with pytest.raises(CatalogError, match="обновилась"):
+    with pytest.raises(CatalogError, match="во время чтения"):
         calculate(dataset)
 
 
@@ -433,9 +434,9 @@ def test_new_cache_roundtrip_old_cache_ignored_without_overwrite(dataset, tmp_pa
     result = asdict(calculate(dataset))
     path = tmp_path / "statistics.json"
     cache.save_result(path, result)
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 6
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 8
     assert cache.load_result(path) == json.loads(json.dumps(result))
-    path.write_text(json.dumps({"schema_version": 5, "result": result}), encoding="utf-8")
+    path.write_text(json.dumps({"schema_version": 7, "result": result}), encoding="utf-8")
     before = path.read_bytes()
     assert cache.load_result(path) is None
     assert path.read_bytes() == before
@@ -561,12 +562,35 @@ def test_store_keys_names_buyers_missing_and_currency_separation(dataset):
     assert calculate(dataset).store_statistics[0][2] == "A"
 
 
-def test_top20_deterministic_store_sort(dataset):
-    raws = [financial_order(str(i), amount=str(i), store=str(i), name="Shop") for i in range(24)]
+def test_all_stores_deterministic_sort_and_cache_roundtrip(dataset, tmp_path):
+    from Application import statistics_cache as cache
+    raws = [financial_order(f"{namespace}-{i}", namespace, amount=str(i), store=str(i), name="Shop")
+            for namespace in ("offline1C", "kanzlerKz") for i in range(24)]
     write_orders(dataset, raws[::-1])
-    rows = calculate(dataset).store_statistics
-    assert len(rows) == 20
-    assert [row[1] for row in rows] == [str(i) for i in range(23, 3, -1)]
+    result = asdict(calculate(dataset))
+    for currency in ("RUB", "KZT"):
+        rows = [r for r in result["store_statistics"] if r[0] == currency]
+        assert len(rows) == 24
+        assert [r[1] for r in rows] == [str(i) for i in range(23, -1, -1)]
+    path = tmp_path / "statistics.json"
+    cache.save_result(path, result)
+    assert cache.load_result(path) == json.loads(json.dumps(result))
+    for change in ("order", "duplicate", "currency", "count", "money"):
+        broken = json.loads(json.dumps(result))
+        rows = broken["store_statistics"]
+        if change == "order":
+            rows[0], rows[1] = rows[1], rows[0]
+        elif change == "duplicate":
+            rows.append(rows[0])
+        elif change == "currency":
+            rows[0][0] = "EUR"
+        elif change == "count":
+            rows[0][3] = -1
+        else:
+            rows[0][7] = "NaN"
+        with pytest.raises(cache.StatisticsCacheError):
+            cache.validate_result(broken)
+
 
 
 def test_month_uses_source_utc_and_optional_distributions(dataset):
@@ -652,7 +676,7 @@ def test_cache_decimal_arithmetic_overflow_is_safe(dataset, tmp_path):
     result["order_financials"][0][4:7] = ["1e999999", "1e999999", "1e999999"]
     result["order_monthly_dynamics"] = [["2026-01", 1, "9e999999", 0, "0"], ["2026-02", 0, "9e999999", 0, "0"]]
     path = tmp_path / "overflow.json"
-    path.write_text(json.dumps({"schema_version": 6, "result": result}), encoding="utf-8")
+    path.write_text(json.dumps({"schema_version": 8, "result": result}), encoding="utf-8")
     assert cache.load_result(path) is None
 
 
@@ -955,7 +979,7 @@ def test_product_resolution_reuse_and_single_pass(dataset, monkeypatch):
     assert result.top_purchased_products == (("000001", "Рубашка на сайте", 3, 1, "6", 2, 1),)
     assert result.unique_resolved_items == result.products_with_views == result.products_with_favorites == 2
     assert result.products_with_purchases == 1
-    assert result.product_category_statistics == (("Не указано", 2, 3, 2, 3, "6"),)
+    assert result.product_category_statistics == ((None, "Не указано", 2, 3, 2, 3, "6"),)
 
 
 def test_product_groups_quantity_and_unresolved_purchase(dataset):
@@ -989,7 +1013,7 @@ def test_product_groups_quantity_and_unresolved_purchase(dataset):
     assert result.resolved_purchase_quantity == "11" and result.purchase_quantity == "20"
     assert result.resolved_purchase_interactions == 5 and result.purchase_interactions == 6
     assert result.unresolved_interactions == dict(result.diagnostics)["unknown_candidate"] == 2
-    assert result.product_category_statistics == (("Не указано", 1, 0, 0, 3, "6"), ("Рубашки", 1, 3, 1, 2, "5"), ("Брюки", 1, 1, 3, 0, "0"))
+    assert result.product_category_statistics == ((None, "Не указано", 1, 0, 0, 3, "6"), ("Рубашки", "Рубашки", 1, 3, 1, 2, "5"), ("Брюки", "Брюки", 1, 1, 3, 0, "0"))
     assert result.product_gender_statistics == (("Не указано", 1, 0, 0, 3, "6"), ("Мужской", 2, 4, 4, 2, "5"))
     assert result.product_season_statistics == (("Не указано", 2, 1, 3, 3, "6"), ("Всесезон", 1, 3, 1, 2, "5"))
     assert result.product_style_statistics == (("Не указано", 1, 0, 0, 3, "6"), ("Деловой", 1, 3, 1, 2, "5"), ("Casual", 1, 1, 3, 0, "0"))
@@ -1003,7 +1027,7 @@ def test_product_rank_ties_limit_and_whole_metadata_values():
     from Application.product_statistics import ProductAggregates, ProductMetadata
     from Application.product_resolution import ResolvedInteraction, CatalogError
     metadata = {f"{i:06d}": ProductMetadata(category="A,B;C/D") for i in range(25)}
-    aggregate = ProductAggregates(metadata)
+    aggregate = ProductAggregates(metadata, {})
     def add(code, kind, user, quantity=None):
         record = InteractionRecord("source", user, ProductKey("offline1C", code + "-size"), kind,
                                    datetime.now(timezone.utc), InteractionSource.ACTION, "private-event", quantity)
@@ -1019,7 +1043,7 @@ def test_product_rank_ties_limit_and_whole_metadata_values():
     assert [r[0] for r in result["top_viewed_products"][:3]] == ["000024", "000022", "000000"]
     assert [r[0] for r in result["top_favorited_products"][:3]] == ["000023", "000022", "000000"]
     assert result["top_purchased_products"][0][0] == "000022"
-    assert result["product_category_statistics"] == (("A,B;C/D", 25, 26, 26, 26, "60"),)
+    assert result["product_category_statistics"] == (("A,B;C/D", "A,B;C/D", 25, 26, 26, 26, "60"),)
     # Equal purchases sort by Decimal quantity, then buyers, then catalog code.
     add("000021", InteractionType.PURCHASE, "same-user", Decimal(8))
     add("000020", InteractionType.PURCHASE, "another", Decimal(8))
@@ -1040,7 +1064,8 @@ def test_catalog_metadata_projection_immutable_and_missing_values(tmp_path, enco
     path = tmp_path / "catalog.csv"
     path.write_text("КодНоменклатуры|НазваниеНаСайте|Номенклатура|КатегорияНаСайте|Остаток|ТитульнаяФотография\n"
                     "000001|  | Fallback | A,B;C/D |not-a-number|private-photo\n000002|||||\n", encoding=encoding)
-    catalog, metadata = _catalog_snapshot(path)
+    (tmp_path / "site_categories.csv").write_text("КодКатегории|НазваниеКатегории\n", encoding="utf-8-sig")
+    catalog, metadata, _ = _catalog_snapshot(path)
     assert catalog.item_ids == metadata.keys()
     assert metadata["000001"].name == "Fallback"
     assert metadata["000001"].category == "A,B;C/D"
@@ -1055,6 +1080,7 @@ def test_catalog_metadata_projection_immutable_and_missing_values(tmp_path, enco
 @pytest.mark.parametrize("content", ["НазваниеНаСайте|КатегорияНаСайте\nA|B\n", "КодНоменклатуры;Номенклатура\n000001;A\n",
                                      "КодНоменклатуры|Номенклатура\n000001|A|extra\n"])
 def test_catalog_metadata_invalid_required_structure(tmp_path, content):
+    (tmp_path / "site_categories.csv").write_text("КодКатегории|НазваниеКатегории\n", encoding="utf-8-sig")
     from Application.dataset_statistics import _catalog_snapshot
     from Application.product_resolution import CatalogError
     path = tmp_path / "catalog.csv"
@@ -1098,7 +1124,137 @@ def test_product_cache_rejects_invalid_aggregates(dataset, mutation):
         if mutation == "group_duplicate":
             rows.append(rows[0])
         else:
-            index = {"group_items": 1, "group_view": 2, "group_favorite": 3, "group_purchase": 4, "group_quantity": 5}[mutation]
-            rows[0][index] = "999" if index == 5 else 999
+            index = {"group_items": 2, "group_view": 3, "group_favorite": 4, "group_purchase": 5, "group_quantity": 6}[mutation]
+            rows[0][index] = "999" if index == 6 else 999
     with pytest.raises(cache.StatisticsCacheError):
         cache.validate_result(result)
+
+
+@pytest.mark.parametrize("purchase_status", ["CP", "F", "delivering"])
+def test_orders_without_purchase_uses_eligible_unique_snapshots(dataset, purchase_status):
+    from Application.statistics_cache import validate_result
+    mixed = order([purchase_status, "Return"], "mixed")
+    purchased = order(["CP"], "purchased")
+    returned = order(["Return"], "returned")
+    conflict = deepcopy(returned)
+    conflict["lines"][0]["status"]["ids"]["externalId"] = "CP"
+    outside = order(["Return"], "outside")
+    outside["firstAction"]["dateTimeUtc"] = "2020-01-01T00:00:00Z"
+    write_orders(dataset, [mixed, purchased, returned, mixed, returned, conflict, outside])
+    result = calculate(dataset)
+    diagnostics = dict(result.diagnostics)
+    assert result.purchase_orders == 2
+    assert result.orders_without_purchase == 1
+    assert result.purchase_orders + result.orders_without_purchase == diagnostics["orders_unique"] == 3
+    assert diagnostics["orders_duplicate_identical"] == 2
+    assert diagnostics["orders_duplicate_conflicting"] == 1
+    assert diagnostics["orders_outside_statistics_period"] == 1
+    assert result.orders == 6
+    validate_result(asdict(result))
+
+
+@pytest.mark.parametrize("bad", [-1, True, 1.5, "0", None, 999])
+def test_orders_without_purchase_cache_validation(dataset, bad):
+    from Application.statistics_cache import validate_result, StatisticsCacheError
+    result = asdict(calculate(dataset))
+    result["orders_without_purchase"] = bad
+    with pytest.raises(StatisticsCacheError):
+        validate_result(result)
+
+
+def test_orders_without_purchase_empty_and_fractional_only(dataset):
+    from Application.statistics_cache import validate_result
+    raw = order(["CP"], "fractional")
+    raw["lines"][0]["quantity"] = Decimal("1.5")
+    write_orders(dataset, [raw])
+    result = calculate(dataset)
+    assert result.purchase_orders == 0 and result.orders_without_purchase == 1
+    validate_result(asdict(result))
+    write_orders(dataset, [])
+    result = calculate(dataset)
+    assert result.purchase_orders == result.orders_without_purchase == 0
+    validate_result(asdict(result))
+
+
+def test_category_codes_names_fallbacks_and_no_hierarchy(dataset):
+    root, catalog, _ = dataset
+    catalog.write_text("КодНоменклатуры|КатегорияНаСайте\n000001| 638 \n000002|\n000003|999\n000004|empty\n000005|0638\n000006|100\n000007|200\n", encoding="utf-8-sig")
+    (root / "site_categories.csv").write_text(
+        "КодКатегории|НазваниеКатегории|КодРодительскойКатегории\n 638 | Рубашки |parent\nempty| |parent\n"
+        "0638|С ведущим нулём|638\n100|Категория|638\n200|Категория|638\n100|Категория|different-parent\n", encoding="utf-8-sig")
+    write_actions(dataset, [action(DEFAULT_SELECTION.view_action_system_names[0], [f'{i:06d}-size']) for i in range(1, 8)])
+    write_orders(dataset, [])
+    result = calculate(dataset)
+    rows = {row[0]: row for row in result.product_category_statistics}
+    assert {code: row[1] for code, row in rows.items()} == {
+        '638': 'Рубашки', None: 'Не указано', '999': '999', 'empty': 'empty',
+        '0638': 'С ведущим нулём', '100': 'Категория', '200': 'Категория'}
+    assert all(row[2:] == (1, 1, 0, 0, '0') for row in rows.values())
+    assert [r[0] for r in result.product_category_statistics] == ['999', 'empty', '100', '200', None, '638', '0638']
+    from Application import statistics_cache as cache
+    path = root / 'category-cache.json'
+    cache.save_result(path, asdict(result))
+    assert cache.load_result(path) == json.loads(json.dumps(asdict(result)))
+    for mutation in ('duplicate', 'code', 'blank_code', 'blank_name', 'totals', 'order', 'quantity', 'duplicate_none'):
+        broken = json.loads(json.dumps(asdict(result)))
+        values = broken['product_category_statistics']
+        if mutation == 'duplicate':
+            values[1][0] = values[0][0]
+        elif mutation == 'duplicate_none':
+            values[0][0] = None
+        elif mutation == 'code':
+            values[0][0] = 999
+        elif mutation == 'blank_code':
+            values[0][0] = ' '
+        elif mutation == 'blank_name':
+            values[0][1] = ''
+        elif mutation == 'totals':
+            values[0][3] += 1
+        elif mutation == 'quantity':
+            values[0][6] = 'NaN'
+        else:
+            values[2], values[3] = values[3], values[2]
+        with pytest.raises(cache.StatisticsCacheError):
+            cache.validate_result(broken)
+
+
+@pytest.mark.parametrize('content', [
+    'КодКатегории|НазваниеКатегории\n638|A\n638|B\n',
+    'КодКатегории|Другое\n638|A\n',
+    'КодКатегории;НазваниеКатегории\n638;A\n',
+    'КодКатегории|НазваниеКатегории\n638|A|extra\n',
+    'КодКатегории|НазваниеКатегории\n638\n',
+    'КодКатегории|НазваниеКатегории|НазваниеКатегории\n638|A|A\n',
+])
+def test_category_reference_invalid_structure_is_safe(dataset, content):
+    from Application.product_resolution import CatalogError
+    (dataset[0] / 'site_categories.csv').write_text(content, encoding='utf-8-sig')
+    with pytest.raises(CatalogError):
+        calculate(dataset)
+
+
+@pytest.mark.parametrize('content', [None, b'\xff\xff'])
+def test_category_reference_read_errors_are_safe(dataset, content):
+    from Application.product_resolution import CatalogError
+    path = dataset[0] / 'site_categories.csv'
+    if content is None:
+        path.unlink()
+    else:
+        path.write_bytes(content)
+    with pytest.raises(CatalogError, match='Не удалось прочитать'):
+        calculate(dataset)
+
+
+@pytest.mark.parametrize('changed_file', ['nomenclature.csv', 'site_categories.csv'])
+def test_reference_snapshot_covers_both_files(dataset, monkeypatch, changed_file):
+    from Application import dataset_statistics as statistics
+    from Application.product_resolution import CatalogError
+    original = statistics._category_names
+    def changed(path):
+        result = original(path)
+        with (dataset[0] / changed_file).open('a', encoding='utf-8') as stream:
+            stream.write('\n')
+        return result
+    monkeypatch.setattr(statistics, '_category_names', changed)
+    with pytest.raises(CatalogError, match='во время чтения'):
+        calculate(dataset)

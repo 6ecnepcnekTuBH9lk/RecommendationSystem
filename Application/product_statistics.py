@@ -25,8 +25,9 @@ class _Item:
 
 
 class ProductAggregates:
-    def __init__(self, metadata):
+    def __init__(self, metadata, category_names):
         self.metadata = metadata
+        self.category_names = category_names
         self.items = {}
 
     def add(self, resolved):
@@ -61,7 +62,8 @@ class ProductAggregates:
             if p:
                 purchased.append((code, metadata.name, p, len(item.users[purchase]), str(item.quantity), v, f))
             for attribute, values in groups.items():
-                label = getattr(metadata, attribute) or "Не указано"
+                label = getattr(metadata, attribute)
+                label = (label or "").strip() or None if attribute == "category" else label or "Не указано"
                 row = values.setdefault(label, [0, 0, 0, 0, Decimal(0)])
                 for index, value in enumerate((1, v, f, p, item.quantity)):
                     row[index] += value
@@ -75,7 +77,12 @@ class ProductAggregates:
                       top_favorited_products=tuple(favorited[:20]), top_purchased_products=tuple(purchased[:20]))
         for attribute, values in groups.items():
             rows = [(label, *values[:4], str(values[4])) for label, values in values.items()]
-            rows.sort(key=lambda r: (-r[4], -r[2], -r[3], r[0]))
+            if attribute == "category":
+                rows = [(code, self.category_names.get(code, code) if code is not None else "Не указано", *rest)
+                        for code, *rest in rows]
+                rows.sort(key=lambda r: (-r[5], -r[3], -r[4], r[1], r[0] is not None, r[0] or ""))
+            else:
+                rows.sort(key=lambda r: (-r[4], -r[2], -r[3], r[0]))
             name = "style" if attribute == "style_group" else attribute
             result[f"product_{name}_statistics"] = tuple(rows)
         return result

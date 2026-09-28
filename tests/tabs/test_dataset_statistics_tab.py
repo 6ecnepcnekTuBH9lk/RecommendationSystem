@@ -48,7 +48,7 @@ def sample_result():
         action_types=(("ProsmotrProduktaVApiMethod", 3),), line_statuses=(("CP", 1, True),),
         namespaces=(("offline1C", 3, 3, 0, 100.), ("unsupported", 0, 0, 0, 0.)),
         top_products=(("000001", "Рубашка", 2, 0, 1, 3),),
-        diagnostics=tuple((key, 0) for key in cache.DIAGNOSTIC_KEYS), warnings=(),
+        diagnostics=tuple((key, int(key == "orders_unique")) for key in cache.DIAGNOSTIC_KEYS), warnings=(),
         gender_distribution=(("Мужчины", 0, 0.), ("Женщины", 0, 0.), ("Не указан", 2, 100.)),
         age_distribution=tuple((name, 2 if name == "Возраст не определён" else 0,
                                 100. if name == "Возраст не определён" else 0.) for name in
@@ -61,7 +61,7 @@ def sample_result():
         purchase_order_distribution=(("1 заказ", 1, 100.), ("2 заказа", 0, 0.), ("3–5 заказов", 0, 0.),
                                      ("6–10 заказов", 0, 0.), ("11+ заказов", 0, 0.)),
         mean_orders_per_buyer=1., median_orders_per_buyer=1., repeat_buyer_rate=0., active_buyer_rate=50.,
-        purchase_orders=1, mean_purchase_lines_per_order=1., median_purchase_lines_per_order=1.,
+        purchase_orders=1, orders_without_purchase=0, mean_purchase_lines_per_order=1., median_purchase_lines_per_order=1.,
         mean_purchase_units_per_order="4", median_purchase_units_per_order="4",
         purchase_basket_distribution=(("1 позиция", 1, 100.), ("2 позиции", 0, 0.), ("3–5 позиций", 0, 0.),
                                       ("6–10 позиций", 0, 0.), ("11+ позиций", 0, 0.)),
@@ -87,7 +87,7 @@ def sample_result():
         resolved_purchase_quantity="4",
         top_viewed_products=(("000001", "Рубашка", 2, 1, 0, 1),), top_favorited_products=(),
         top_purchased_products=(("000001", "Рубашка", 1, 1, "4", 2, 0),),
-        product_category_statistics=(("Не указано", 1, 2, 0, 1, "4"),),
+        product_category_statistics=((None, "Не указано", 1, 2, 0, 1, "4"),),
         product_gender_statistics=(("Не указано", 1, 2, 0, 1, "4"),),
         product_season_statistics=(("Не указано", 1, 2, 0, 1, "4"),),
         product_style_statistics=(("Не указано", 1, 2, 0, 1, "4"),),
@@ -127,6 +127,7 @@ def canonical_process(monkeypatch, tmp_path):
     (tmp_path / "canonical/catalog.json").write_text(json.dumps({
         "schema_version": 2, "revision": "test", "actions": {}, "orders": {}, "customer_merges": None,
         "manual_interactions": None, "selection": asdict(DEFAULT_SELECTION)}))
+    (tmp_path / "site_categories.csv").write_text("КодКатегории|НазваниеКатегории\n", encoding="utf-8-sig")
     catalog = tmp_path / "nomenclature.csv"
     catalog.write_text("КодНоменклатуры|Номенклатура\n000001|Test\n", encoding="utf-8")
 
@@ -223,7 +224,7 @@ def test_initial_page_has_no_internal_heading_or_cache(window):
     assert tab.layout().itemAt(0).widget() is tab.description
     assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен."
     assert tab.status.text() == "В фоновом режиме будут рассчитаны данные из Mindbox."
-    assert not [label for label in tab.findChildren(QLabel) if label.property("class") == "sectionHeader"]
+    assert not [label for label in tab.findChildren(QLabel) if label.property("class") == "statisticsSection"]
     assert [label.text() for label in tab.card_labels] == ["—"] * 4
     assert not tab.cache_path.exists()
     assert card_titles(tab)[:4] == ["Количество взаимодействий", "Количество заказов",
@@ -275,8 +276,8 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert technical.widgetResizable()
         layout = technical.widget().layout()
         assert layout.spacing() == ui.BLOCK_SPACING
-        assert layout.count() == 4
-        coverage, summary, explanation, diagnostics = [layout.itemAt(i).widget() for i in range(4)]
+        assert layout.count() == 3
+        coverage, summary, diagnostics = [layout.itemAt(i).widget() for i in range(3)]
         assert technical.findChildren(QTableWidget) == [coverage, summary, diagnostics]
         assert [coverage.horizontalHeaderItem(i).text() for i in range(3)] == [
             "Источник", "Период / состояние", "Источник данных"]
@@ -285,14 +286,11 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert summary.rowCount() == 13
         assert summary.item(0, 1).text() == "3"
         assert summary.item(12, 1).text() == "100.0000"
-        assert explanation.text() == (
-            "Если при чтении данных обнаруживается некорректная запись, расчет завершается "
-            "с ошибкой — такие записи не пропускаются. События без указанного товара учитываются отдельно.")
         assert diagnostics.horizontalHeaderItem(0).text() == "Диагностика"
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
-        for index, counts in enumerate((9, 10, 9, 6)):
+        for index, counts in enumerate((9, 7, 9, 6)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = tab.sections.widget(3).findChildren(QTableWidget)[0]
         assert customers.rowCount() == 3
@@ -306,7 +304,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
     QApplication.processEvents()
     scrollbar = technical.verticalScrollBar()
     assert scrollbar.maximum() > 0
-    blocks = [coverage, summary, explanation, diagnostics]
+    blocks = [coverage, summary, diagnostics]
     assert all(a.geometry().bottom() < b.geometry().top() for a, b in zip(blocks, blocks[1:]))
     scrollbar.setValue(scrollbar.maximum())
     QApplication.processEvents()
@@ -329,7 +327,7 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert coverage.item(0, 1).text() == "01.01.2025 — 01.01.2026"
     assert coverage.item(3, 1).text().startswith("Снимок данных от ")
     assert card_titles(tab.sections.widget(0)) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
-    assert card_titles(tab.sections.widget(1))[:4] == ["Заказы с покупкой", "Покупатели", "Позиции покупок", "Продано единиц"]
+    assert card_titles(tab.sections.widget(1))[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
     assert card_titles(tab.sections.widget(2)) == ["Товары с взаимодействиями", "Товары с просмотрами",
                                                 "Товары в избранном", "Купленные товары"]
     for index in range(5):
@@ -434,7 +432,7 @@ def test_new_success_atomically_replaces_cache_before_render(window, sample_resu
 
 
 @pytest.mark.parametrize("failure", ["incomplete", "bad_type", "bad_date", "bad_rows", "nan", "trailing_json",
-                                    "json_error", "deep_json", "prior_incomplete", "nonzero_exit", "crash", "replace", "fsync", "order_money", "action_price", "product_quantity"])
+                                    "json_error", "deep_json", "prior_incomplete", "nonzero_exit", "crash", "replace", "fsync", "order_money", "action_price", "product_quantity", "orders_without_purchase"])
 def test_failed_new_result_preserves_cache_and_display(window, sample_result, monkeypatch, failure):
     _, tab = window
     cache.save_result(tab.cache_path, sample_result)
@@ -452,6 +450,8 @@ def test_failed_new_result_preserves_cache_and_display(window, sample_result, mo
         candidate["namespaces"] = [["offline1C"]]
     elif failure == "nan":
         candidate["resolution_rate"] = float("nan")
+    elif failure == "orders_without_purchase":
+        candidate["orders_without_purchase"] = 1
     elif failure == "product_quantity":
         candidate["resolved_purchase_quantity"] = "1.5"
     elif failure == "action_price":
@@ -557,12 +557,12 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         page = tab.sections.widget(3)
         assert page.widgetResizable()
         assert page.widget().layout().spacing() == ui.BLOCK_SPACING
-        assert card_titles(page) == ["Количество клиентов", "Активные клиенты", "Покупатели", "Повторные покупатели",
+        assert card_titles(page) == ["Количество клиентов", "Активные клиенты", "Покупатели", "Повторные покупатели (от 2 покупок)",
                                     "Средний возраст", "Медианный возраст"]
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
             "2", "2", "1", "0", "—", "—"]
-        headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "sectionHeader"]
-        assert headings == ["Портрет клиента", "Активность клиентов", "Покупательская активность"]
+        headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
+        assert headings == ["ПОРТРЕТ КЛИЕНТА", "АКТИВНОСТЬ КЛИЕНТОВ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ"]
         tables = page.findChildren(QTableWidget)
         assert [table.rowCount() for table in tables] == [3, 8, 9, 7, 5, 3]
         assert tables[2].item(8, 1).text() == "50.00"
@@ -577,8 +577,8 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
 
 
 def test_old_complete_cache_opens_empty_without_modifying_it(app, sample_result):
-    # Even a complete payload with the old envelope must not be interpreted as v6.
-    ui.CACHE_PATH.write_text(json.dumps({"schema_version": 5, "result": sample_result}), encoding="utf-8")
+    # Even a complete payload with the old envelope must not be interpreted as v8.
+    ui.CACHE_PATH.write_text(json.dumps({"schema_version": 7, "result": sample_result}), encoding="utf-8")
     saved = ui.CACHE_PATH.read_bytes()
     window = QWidget()
     tab = ui.DatasetStatisticsTab(window)
@@ -601,11 +601,8 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         ["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
         ["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
         ["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
-        ["Способ оформления", "Заказов", "Доля, %"],
-        ["Способ доставки", "Заказов", "Доля, %"],
         ["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"],
-        ["Валюта", "Заказов с указанной стоимостью доставки", "Сумма доставки", "Средняя стоимость доставки", "Медианная стоимость доставки"],
-        ["Статус", "Позиции", "Доля, %", "Покупки"],
+        ["Статус", "Позиции", "Доля, %", "Считается покупкой"],
     ]
     for dark in (False, True):
         apply_app_theme(QApplication.instance(), dark)
@@ -615,15 +612,15 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         QApplication.processEvents()
         page = tab.sections.widget(1)
         assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
-        assert card_titles(page)[:4] == ["Заказы с покупкой", "Покупатели", "Позиции покупок", "Продано единиц"]
+        assert card_titles(page)[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
         assert len(card_titles(page)) == 8
         labels = [label.text() for label in page.findChildren(QLabel)]
-        assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "sectionHeader"] == [
-            "Корзина заказа", "Финансовые показатели", "Динамика покупок", "Магазины и каналы",
-            "Оформление, доставка и оплата", "Статусы позиций"]
-        assert any("превышать 100%" in label for label in labels)
-        assert any(label.startswith("RUB —") for label in labels)
-        assert any(label.startswith("KZT —") for label in labels)
+        assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
+            "КОРЗИНА ЗАКАЗА", "ФИНАНСОВЫЕ ПОКАЗАТЕЛИ", "ДИНАМИКА ПОКУПОК", "МАГАЗИНЫ И КАНАЛЫ — RUB",
+            "МАГАЗИНЫ И КАНАЛЫ — KZT", "ОПЛАТА", "СТАТУСЫ ПОЗИЦИЙ"]
+        assert not any("превышать 100%" in label for label in labels)
+        assert not any(label.startswith("RUB —") for label in labels)
+        assert not any(label.startswith("KZT —") for label in labels)
         tables = page.findChildren(QTableWidget)
         assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == expected_headers
         assert [tables[1].item(i, 0).text() for i in range(2)] == ["RUB", "KZT"]
@@ -647,14 +644,14 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
     _, tab = window
     original = deepcopy(sample_result)
     headers = [
-        ["Тип действия", "Взаимодействий", "Клиентов", "Среднее на клиента", "Медиана на клиента"],
-        ["Количество просмотров", "Клиентов", "Доля, %"],
-        ["Количество добавлений", "Клиентов", "Доля, %"],
-        ["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %", "Добавления в избранное", "Клиенты с избранным", "Доля избранного, %"],
-        ["Месяц", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Клиенты с избранным"],
+        ["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"],
+        ["Количество просмотров", "Количество клиентов", "Доля, %"],
+        ["Количество избранного", "Количество клиентов", "Доля, %"],
+        ["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %", "Избранное", "Клиенты с избранным", "Доля избранного, %"],
+        ["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
         ["Доступность", "Просмотров", "Доля, %"],
         ["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
-        ["Системное имя", "Количество", "Доля, %"],
+        ["Системное название", "Количество", "Доля, %"],
         ["Классификация событий", "Количество"],
     ]
     for dark in (False, True):
@@ -667,8 +664,8 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             page = tab.sections.widget(0)
             assert card_titles(page) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["2", "0", "1", "0"]
-            assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "sectionHeader"] == [
-                "Активность клиентов", "Каналы взаимодействий", "Динамика действий", "Параметры просмотров", "Исходные события"]
+            assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
+                "АКТИВНОСТЬ КЛИЕНТОВ", "КАНАЛЫ ВЗАИМОДЕЙСТВИЙ", "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ", "ИСХОДНЫЕ СОБЫТИЯ"]
             assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
@@ -714,8 +711,9 @@ def test_products_analytics_themes_headers_scroll_and_no_duplicates(window, samp
             page = tab.sections.widget(2)
             assert card_titles(page) == ["Товары с взаимодействиями", "Товары с просмотрами", "Товары в избранном", "Купленные товары"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["1", "1", "0", "1"]
-            assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "sectionHeader"] == [
-                "Популярные товары", "Категории товаров", "Структура спроса", "Качество сопоставления"]
+            assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
+                "ПОПУЛЯРНЫЕ ТОВАРЫ ПО ПРОСМОТРАМ", "ПОПУЛЯРНЫЕ ТОВАРЫ ПО ИЗБРАННОМУ", "ПОПУЛЯРНЫЕ ТОВАРЫ ПО ПОКУПКАМ",
+                "КАТЕГОРИИ ТОВАРОВ", "СПРОС ПО ПОЛУ ТОВАРА", "СПРОС ПО СЕЗОНУ", "СПРОС ПО СТИЛЕВОЙ ГРУППЕ", "КАЧЕСТВО СОПОСТАВЛЕНИЯ"]
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == expected
             assert tables[2].item(0, 4).text() == "4"
@@ -730,3 +728,136 @@ def test_products_analytics_themes_headers_scroll_and_no_duplicates(window, samp
             QApplication.processEvents()
             assert page.viewport().rect().contains(tables[-1].mapTo(page.viewport(), tables[-1].rect().bottomLeft()))
     assert original == sample_result
+
+
+def test_ui_cleanup_preserves_diagnostics_and_styles_sections(window, sample_result):
+    _, tab = window
+    hidden = "Позиции заказов с нецелым количеством исключены из статистики."
+    sample_result["warnings"] = (hidden, "Другое предупреждение.")
+    sample_result["diagnostics"] = tuple((key, 7 if key == "fractional_quantity_order_lines" else value)
+                                         for key, value in sample_result["diagnostics"])
+    original = deepcopy(sample_result)
+    for dark in (False, True):
+        apply_app_theme(QApplication.instance(), dark)
+        tab.render(sample_result)
+        assert tab.status.text() == ui._calculation_message(sample_result) + "\nДругое предупреждение."
+        for index in range(5):
+            tab.sections.setCurrentIndex(index)
+            QApplication.processEvents()
+            page = tab.sections.widget(index)
+            for label in page.findChildren(QLabel):
+                assert not label.text().startswith(("Месяц определяется", "Показатели рассчитаны", "Показатели объединены",
+                                                    "Бизнес-показатели", "Доступность и цена", "Активными считаются",
+                                                    "Пол и возраст рассчитаны", "Если при чтении данных"))
+                assert label.property("class") != "sectionHeader"
+                if label.property("class") == "statisticsSection":
+                    assert label.alignment() & Qt.AlignmentFlag.AlignHCenter
+                    assert label.font().italic() and not label.font().bold()
+                    assert label.font().pointSize() == 12
+                    assert label.text() == label.text().upper()
+            for table in page.findChildren(QTableWidget):
+                assert table.height() <= 450
+        diagnostics = tab.sections.widget(4).findChildren(QTableWidget)[-1]
+        rows = {diagnostics.item(r, 0).text(): diagnostics.item(r, 1).text() for r in range(diagnostics.rowCount())}
+        assert rows["Позиции с нецелым количеством"] == "7"
+    assert sample_result == original
+
+
+@pytest.mark.parametrize("count", [0, 1, 4, 60])
+def test_table_content_height_and_scroll_after_resize_and_theme_change(app, count):
+    window = QWidget()
+    layout = QVBoxLayout(window)
+    table = ui._table(layout, ["Колонка", "Значение"], [(f"Строка {i}", i) for i in range(count)])
+    window.show()
+    try:
+        for dark in (False, True):
+            apply_app_theme(app, dark)
+            for width in (260, 1200, 260):
+                window.resize(width, 800)
+                table.setColumnWidth(0, 500)
+                table.setColumnWidth(1, 200)
+                QTest.qWait(30)
+                if count < 60:
+                    assert table.verticalScrollBar().maximum() == 0
+                    assert abs(table.viewport().height() - sum(table.rowHeight(r) for r in range(count))) <= 2
+                else:
+                    assert table.height() == 450
+                    assert table.verticalScrollBar().maximum() > 0
+                    table.scrollToBottom()
+                    QTest.qWait(20)
+                    assert 0 <= table.visualItemRect(table.item(count - 1, 0)).bottom() < table.viewport().height()
+                assert (table.horizontalScrollBar().maximum() > 0) == (width == 260)
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_orders_cards_rates_full_stores_and_bright_scrollbars(window, sample_result):
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtGui import QColor
+    from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
+    _, tab = window
+    sample_result["orders_without_purchase"] = 2
+    sample_result["purchase_basket_distribution"] = tuple((label, 1, rate) for label, rate in zip(
+        ("1 позиция", "2 позиции", "3–5 позиций", "6–10 позиций", "11+ позиций"), (25., 15., 30., 20., 10.)))
+    sample_result["store_statistics"] = tuple((currency, str(i), f"Магазин {i}", 1, 1, 1, "1", "1", "1")
+                                               for currency in ("RUB", "KZT") for i in range(25))
+    original = deepcopy(sample_result)
+    for dark in (False, True):
+        apply_app_theme(QApplication.instance(), dark)
+        tab.render(sample_result)
+        tab.sections.setCurrentIndex(1)
+        QTest.qWait(30)
+        page = tab.sections.widget(1)
+        assert card_titles(page) == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели",
+                                    "Среднее число позиций на заказ", "Медиана числа позиций на заказ",
+                                    "Доля заказов с 1 позицией", "Доля заказов с 3+ позициями"]
+        assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
+            "1", "2", "1", "1", "1.00", "1.00", "25.00%", "60.00%"]
+        tables = page.findChildren(QTableWidget)
+        for table in tables[3:5]:
+            assert table.rowCount() == 25 and table.height() == 450
+            assert table.verticalScrollBar().maximum() > 0
+        # Check the actual unhovered pixels, including internal horizontal scrolling.
+        table = tables[3]
+        table.setColumnWidth(0, 1500)
+        page.ensureWidgetVisible(table)
+        QTest.qWait(30)
+        for scrollbar in (page.verticalScrollBar(), table.verticalScrollBar(), table.horizontalScrollBar()):
+            QApplication.sendEvent(scrollbar, QEvent(QEvent.Type.Leave))
+            option = QStyleOptionSlider()
+            scrollbar.initStyleOption(option)
+            option.state &= ~QStyle.StateFlag.State_MouseOver
+            rect = scrollbar.style().subControlRect(QStyle.ComplexControl.CC_ScrollBar, option,
+                                                    QStyle.SubControl.SC_ScrollBarSlider, scrollbar)
+            pixmap = scrollbar.grab()
+            point = rect.center() * pixmap.devicePixelRatio()
+            assert pixmap.toImage().pixelColor(point) == QColor(os.environ["QTMATERIAL_PRIMARYCOLOR"])
+    assert sample_result == original
+    sample_result["purchase_basket_distribution"] = tuple((label, 0, 0.) for label, _, _ in original["purchase_basket_distribution"])
+    tab.render(sample_result)
+    numbers = [label.text() for label in tab.sections.widget(1).findChildren(QLabel) if label.property("class") == "statisticsNumber"]
+    assert numbers[-2:] == ["0.00%", "0.00%"]
+
+
+def test_category_display_name_only_and_final_headers(window, sample_result):
+    _, tab = window
+    sample_result['product_category_statistics'] = (('0638', 'Рубашки', 1, 2, 0, 1, '4'),)
+    for dark in (False, True):
+        apply_app_theme(QApplication.instance(), dark)
+        tab.render(sample_result)
+        tab.sections.setCurrentIndex(2)
+        QTest.qWait(30)
+        page = tab.sections.widget(2)
+        category = page.findChildren(QTableWidget)[3]
+        assert category.columnCount() == 6
+        assert [category.item(0, i).text() for i in range(6)] == ['Рубашки', '1', '2', '0', '1', '4']
+        headings = [label for label in page.findChildren(QLabel) if label.property('class') == 'statisticsSection']
+        assert len(headings) == 8
+        for label in headings:
+            assert label.height() <= label.fontMetrics().lineSpacing() + 2
+        assert card_titles(tab.sections.widget(3))[3] == 'Повторные покупатели (от 2 покупок)'
+        orders = [label.text() for label in tab.sections.widget(1).findChildren(QLabel) if label.property('class') == 'statisticsSection']
+        assert 'МАГАЗИНЫ И КАНАЛЫ — RUB' in orders and 'МАГАЗИНЫ И КАНАЛЫ — KZT' in orders
+        assert not any('ПО РОССИИ' in value or 'ПО КАЗАХСТАНУ' in value for value in orders)

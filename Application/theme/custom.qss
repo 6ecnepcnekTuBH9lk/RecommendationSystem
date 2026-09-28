@@ -25,6 +25,13 @@ QLabel[class="statisticsNumber"] {{
 QLabel[class="statisticsInfo"] {{
     font-style: italic;
 }}
+QLabel[class="statisticsSection"] {{
+    font-size: 12pt;
+    font-style: italic;
+    font-weight: normal;
+    background-color: transparent;
+    border: none;
+}}
 QLabel[class="sectionHeader"] {{
     font-size: 11pt;
     font-weight: 600;
@@ -201,4 +208,12 @@ QDoubleSpinBox,
 QDateEdit {{
     selection-background-color: rgba({APP_PRIMARY_RGB}, 110);
     selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+}}
+
+/* Match the Material hover accent within statistics only. */
+QWidget#datasetStatisticsTab QScrollBar::handle:vertical,
+QWidget#datasetStatisticsTab QScrollBar::handle:horizontal,
+QWidget#datasetStatisticsTab QScrollBar::handle:vertical:hover,
+QWidget#datasetStatisticsTab QScrollBar::handle:horizontal:hover {{
+    background: {QTMATERIAL_PRIMARYCOLOR};
 }}

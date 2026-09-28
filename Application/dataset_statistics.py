@@ -88,6 +88,7 @@ class DatasetStatistics:
     repeat_buyer_rate: float
     active_buyer_rate: float
     purchase_orders: int
+    orders_without_purchase: int
     mean_purchase_lines_per_order: float
     median_purchase_lines_per_order: float
     mean_purchase_units_per_order: str
@@ -128,7 +129,7 @@ class DatasetStatistics:
     top_favorited_products: tuple[tuple[str, str, int, int, int, int], ...]
     top_purchased_products: tuple[tuple[str, str, int, int, str, int, int], ...]
     # label, unique items, VIEW/FAVORITE/PURCHASE interactions, purchase quantity
-    product_category_statistics: tuple[tuple[str, int, int, int, int, str], ...]
+    product_category_statistics: tuple[tuple[str | None, str, int, int, int, int, str], ...]
     product_gender_statistics: tuple[tuple[str, int, int, int, int, str], ...]
     product_season_statistics: tuple[tuple[str, int, int, int, int, str], ...]
     product_style_statistics: tuple[tuple[str, int, int, int, int, str], ...]
@@ -276,23 +277,47 @@ def _catalog_metadata(path):
         return MappingProxyType(metadata)
 
 
+def _category_names(path):
+    """Read only exact category codes/names, never hierarchy or raw rows."""
+    names = {}
+    with Path(path).open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="|", strict=True)
+        columns = reader.fieldnames or []
+        if not {"КодКатегории", "НазваниеКатегории"}.issubset(columns) or len(set(columns)) != len(columns):
+            raise CatalogError("Некорректные колонки справочника категорий.")
+        for row in reader:
+            if None in row or any(value is None for value in row.values()):
+                raise CatalogError("Некорректная структура строки справочника категорий.")
+            code, name = row["КодКатегории"].strip(), row["НазваниеКатегории"].strip()
+            if not code:
+                continue
+            if code in names and names[code] != name:
+                raise CatalogError("Конфликт названий для кода категории.")
+            names[code] = name
+    return MappingProxyType({code: name or code for code, name in names.items()})
+
+
 def _catalog_snapshot(path):
-    """Keep names and resolver IDs from the same reference-file generation."""
+    """Keep resolver IDs, metadata and category names in one reference snapshot."""
+    path = Path(path)
+    categories_path = path.with_name("site_categories.csv")
+
     def signature():
-        stat = Path(path).stat()
-        return stat.st_ino, stat.st_size, stat.st_mtime_ns
+        return tuple((stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                     for stat in (path.stat(), categories_path.stat()))
 
     try:
         before = signature()
-        products = load_catalog(Path(path))
+        products = load_catalog(path)
         metadata = _catalog_metadata(path)
+        categories = _category_names(categories_path)
         if signature() != before:
-            raise CatalogError("Номенклатура обновилась во время чтения. Повторите расчёт.")
+            raise CatalogError("Номенклатура или справочник категорий обновились во время чтения. Повторите расчёт.")
         if products.item_ids != metadata.keys():
             raise CatalogError("Метаданные не соответствуют товарам справочника.")
-        return products, metadata
+        return products, metadata, categories
     except (OSError, UnicodeError, csv.Error):
-        raise CatalogError("Cannot read catalog file") from None
+        raise CatalogError("Не удалось прочитать номенклатуру или справочник категорий.") from None
 
 
 def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATALOG_PATH,
@@ -342,9 +367,9 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
         identities = CustomerIdResolver(adapt_customer_merge(raw)
                                         for raw in records("customer_merges", [merge] if merge else []))
         builder = InteractionBuilder(selection.interaction_rules())
-        product_catalog, metadata = _catalog_snapshot(catalog_path)
+        product_catalog, metadata, categories = _catalog_snapshot(catalog_path)
         products = ProductResolver(product_catalog)
-        product_aggregates = ProductAggregates(metadata)
+        product_aggregates = ProductAggregates(metadata, categories)
         collected = _Interactions(products)
         action_types, statuses = Counter(), Counter()
         action_users, order_users = set(), set()
@@ -495,6 +520,7 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             median_orders_per_buyer=float(median(collected.purchase_orders.values())) if purchase_users else 0.0,
             repeat_buyer_rate=100 * repeat_buyers / purchase_users if purchase_users else 0.0,
             active_buyer_rate=100 * purchase_users / len(collected.users) if collected.users else 0.0,
+            orders_without_purchase=len(snapshots.fingerprints) - order_aggregates.orders,
             **order_aggregates.result(),
             **action_aggregates.result(),
             **product_result,
