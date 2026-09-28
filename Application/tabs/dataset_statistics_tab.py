@@ -9,7 +9,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy,
+    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader,
 )
 
 from Application.loading_errors import format_error
@@ -128,6 +128,120 @@ def _decimal_display(value, *, money=True):
     return formatted if money or "." not in formatted else formatted.rstrip("0").rstrip(".")
 
 
+def _actions_page(layout, result):
+    def heading(title):
+        label = _label(title)
+        label.setProperty("class", "sectionHeader")
+        layout.addWidget(label)
+
+    def table(headers, rows):
+        widget = _table(layout, headers, rows)
+        widget.ensurePolished()
+        header = widget.horizontalHeader()
+        header.ensurePolished()
+        # The theme capitalizes headers; measure that text with its styled padding.
+        for column, title in enumerate(headers):
+            option = QStyleOptionHeader()
+            option.initFrom(header)
+            option.text = title.upper()
+            size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
+            widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
+
+    _cards(layout, [("Просмотры товаров", result["view_interactions"]),
+                    ("Добавления в избранное", result["favorite_interactions"]),
+                    ("Клиенты с просмотрами", result["view_users"]),
+                    ("Клиенты с избранным", result["favorite_users"])])
+    layout.addWidget(_label("Показатели рассчитаны по товарным просмотрам и добавлениям в избранное. "
+                            "Одно исходное событие с несколькими товарами создаёт несколько взаимодействий."))
+    heading("Активность клиентов")
+    table(["Тип действия", "Взаимодействий", "Клиентов", "Среднее на клиента", "Медиана на клиента"], [
+        ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
+        ("Добавления в избранное", result["favorite_interactions"], result["favorite_users"],
+         result["mean_favorites_per_user"], result["median_favorites_per_user"])])
+    table(["Количество просмотров", "Клиентов", "Доля, %"], result["view_user_activity_distribution"])
+    table(["Количество добавлений", "Клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
+    heading("Каналы взаимодействий")
+    table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
+                    "Добавления в избранное", "Клиенты с избранным", "Доля избранного, %"],
+           [row[1:] for row in result["action_channel_statistics"]])
+    heading("Динамика действий")
+    layout.addWidget(_label("Месяц определяется по дате события в UTC."))
+    table(["Месяц", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Клиенты с избранным"],
+           [(month[5:] + "." + month[:4], *values) for month, *values in result["action_monthly_dynamics"]])
+    heading("Параметры просмотров")
+    layout.addWidget(_label("Доступность и цена учитываются один раз на исходное событие просмотра с единственным товаром. "
+                            "Отсутствующие цены не входят в среднее и медиану."))
+    table(["Доступность", "Просмотров", "Доля, %"], result["view_availability_distribution"])
+    table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
+           [(currency, n, _decimal_display(mean), _decimal_display(middle))
+            for currency, n, mean, middle in result["view_price_statistics"]])
+    heading("Исходные события")
+    table(["Системное имя", "Количество", "Доля, %"],
+           [(name, count, 100 * count / result["actions"] if result["actions"] else 0)
+            for name, count in result["action_types"]])
+    diagnostics = dict(result["diagnostics"])
+    table(["Классификация событий", "Количество"],
+           [(DIAGNOSTIC_LABELS[key], diagnostics[key]) for key in
+            ("mapped_view_actions", "mapped_favorite_actions", "unmapped_actions", "mapped_without_product")])
+
+
+def _products_page(layout, result):
+    def heading(title):
+        label = _label(title)
+        label.setProperty("class", "sectionHeader")
+        layout.addWidget(label)
+
+    def table(headers, rows):
+        widget = _table(layout, headers, rows)
+        widget.ensurePolished()
+        header = widget.horizontalHeader()
+        header.ensurePolished()
+        for column, title in enumerate(headers):
+            option = QStyleOptionHeader()
+            option.initFrom(header)
+            option.text = title.upper()
+            size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
+            widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
+
+    def group(first, field):
+        table([first, "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
+              [(*row[:5], _decimal_display(row[5], money=False)) for row in result[field]])
+
+    _cards(layout, [("Товары с взаимодействиями", result["unique_resolved_items"]),
+                    ("Товары с просмотрами", result["products_with_views"]),
+                    ("Товары в избранном", result["products_with_favorites"]),
+                    ("Купленные товары", result["products_with_purchases"])])
+    layout.addWidget(_label("Показатели объединены по товарам справочника. Покупки — число позиций покупки, "
+                            "продано единиц — их суммарное количество. В рейтингах показано до 20 товаров."))
+    heading("Популярные товары")
+    layout.addWidget(_label("По просмотрам"))
+    table(["Код", "Название", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Покупки"],
+          result["top_viewed_products"])
+    layout.addWidget(_label("По добавлениям в избранное"))
+    table(["Код", "Название", "Добавления в избранное", "Клиенты с избранным", "Просмотры", "Покупки"],
+          result["top_favorited_products"])
+    layout.addWidget(_label("По покупкам"))
+    table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
+          [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
+    heading("Категории товаров")
+    group("Категория", "product_category_statistics")
+    heading("Структура спроса")
+    for title, field in (("Пол товара", "product_gender_statistics"), ("Сезон", "product_season_statistics"),
+                         ("Стилевая группа", "product_style_statistics")):
+        layout.addWidget(_label(title))
+        group("Значение", field)
+    heading("Качество сопоставления")
+    table(["Показатель", "Значение"], [
+        ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
+        ("Уникальные распознанные товары", result["unique_resolved_items"]),
+        ("Распознанные взаимодействия", result["resolved_interactions"]),
+        ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
+        ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")])
+    table(["Система идентификаторов", "Взаимодействия", "Распознано", "Не распознано", "Доля распознанных, %"],
+          [("Неподдерживаемая" if name == "unsupported" else name, total, resolved, unresolved, f"{rate:.4f}")
+           for name, total, resolved, unresolved, rate in result["namespaces"]])
+
+
 def _orders_page(layout, result):
     def heading(title):
         label = _label(title)
@@ -181,6 +295,8 @@ def _orders_page(layout, result):
 
 
 DIAGNOSTIC_LABELS = {
+    "ambiguous_product_view_actions": "Просмотры с неоднозначным набором товаров",
+    "unknown_currency_view_price_actions": "Просмотры с ценой без определённой валюты",
     "orders_outside_statistics_period": "Заказы вне периода статистики",
     "fractional_quantity_order_lines": "Позиции с нецелым количеством",
     "mapped_view_actions": "События просмотра",
@@ -462,29 +578,9 @@ class DatasetStatisticsTab(QWidget):
                 ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
                 ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")]
         _table(technical, ["Показатель", "Значение"], base)
-        _cards(actions, [("Действия", result["actions"]), ("С товаром", result["actions_with_product"]),
-                         ("Без товара", result["actions_without_product"]), ("Клиенты", result["action_customers"])])
-        actions.addWidget(_label("Количество исходных событий и взаимодействий с товарами может различаться: "
-                                 "одно событие может содержать несколько товаров. Отсутствие товара, в том числе "
-                                 "в мобильных событиях, само по себе не означает ошибку импорта."))
-        _table(actions, ["Системное имя", "Количество", "Доля, %"],
-               [(name, count, 100 * count / result["actions"] if result["actions"] else 0)
-                for name, count in result["action_types"]])
-        diagnostics = dict(result["diagnostics"])
-        _table(actions, ["Классификация событий", "Количество"],
-               [(DIAGNOSTIC_LABELS[key], diagnostics[key]) for key in
-                ("mapped_view_actions", "mapped_favorite_actions", "unmapped_actions", "mapped_without_product")])
+        _actions_page(actions, result)
         _orders_page(orders, result)
-        _cards(products, [("Уникальные исходные идентификаторы", result["unique_source_products"]),
-                          ("Уникальные товары каталога", result["unique_resolved_items"]),
-                          ("Распознанные взаимодействия", result["resolved_interactions"]),
-                          ("Нераспознанные взаимодействия", result["unresolved_interactions"])])
-        products.addWidget(_label("Показатели рассчитаны по взаимодействиям с товарами. В таблице приведены "
-                                  "30 товаров с наибольшим общим количеством взаимодействий."))
-        _table(products, ["Система идентификаторов", "Взаимодействия", "Распознано", "Не распознано", "Доля распознанных, %"],
-               [("Неподдерживаемая" if name == "unsupported" else name, total, resolved, unresolved, f"{rate:.4f}")
-                for name, total, resolved, unresolved, rate in result["namespaces"]])
-        _table(products, ["Код", "Название", "Просмотры", "Добавления в избранное", "Покупки", "Всего"], result["top_products"])
+        _products_page(products, result)
         _cards(customers, [("Количество клиентов", result["customers"]),
                           ("Активные клиенты", result["interaction_users"]),
                           ("Покупатели", result["purchase_users"]), ("Повторные покупатели", result["repeat_buyers"])])

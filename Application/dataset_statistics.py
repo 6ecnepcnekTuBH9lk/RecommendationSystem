@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import sqlite3
 from statistics import median
+from types import MappingProxyType
 
 from Application.interactions import InteractionBuilder, InteractionBuildError, classify_action_system_name
 from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
@@ -27,6 +28,8 @@ from Application.mindbox.selection import MindboxSelectionConfig
 from Application.product_resolution import CatalogError, DEFAULT_CATALOG_PATH, ProductResolver, load_catalog
 from Application.order_statistics import CURRENCY_WARNING, OrderAggregates, order_for_adapter
 from Application.statistics_period import shared_intervals
+from Application.action_statistics import ActionAggregates
+from Application.product_statistics import ProductAggregates, ProductMetadata
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,33 @@ class DatasetStatistics:
     delivery_financials: tuple[tuple[str, int, str, str, str], ...]
     mixed_currency_purchase_orders: int
     unknown_currency_purchase_orders: int
+    mean_views_per_viewer: float
+    median_views_per_viewer: float
+    mean_favorites_per_user: float
+    median_favorites_per_user: float
+    view_user_activity_distribution: tuple[tuple[str, int, float], ...]
+    favorite_user_activity_distribution: tuple[tuple[str, int, float], ...]
+    # key, name, VIEW interactions/users/rate, FAVORITE interactions/users/rate
+    action_channel_statistics: tuple[tuple[str | None, str, int, int, float, int, int, float], ...]
+    action_monthly_dynamics: tuple[tuple[str, int, int, int, int], ...]
+    view_parameter_actions: int
+    view_availability_distribution: tuple[tuple[str, int, float], ...]
+    view_price_statistics: tuple[tuple[str, int, str, str], ...]
+    products_with_views: int
+    products_with_favorites: int
+    products_with_purchases: int
+    resolved_view_interactions: int
+    resolved_favorite_interactions: int
+    resolved_purchase_interactions: int
+    resolved_purchase_quantity: str
+    top_viewed_products: tuple[tuple[str, str, int, int, int, int], ...]
+    top_favorited_products: tuple[tuple[str, str, int, int, int, int], ...]
+    top_purchased_products: tuple[tuple[str, str, int, int, str, int, int], ...]
+    # label, unique items, VIEW/FAVORITE/PURCHASE interactions, purchase quantity
+    product_category_statistics: tuple[tuple[str, int, int, int, int, str], ...]
+    product_gender_statistics: tuple[tuple[str, int, int, int, int, str], ...]
+    product_season_statistics: tuple[tuple[str, int, int, int, int, str], ...]
+    product_style_statistics: tuple[tuple[str, int, int, int, int, str], ...]
 
 
 def _distribution(counts, labels):
@@ -177,6 +207,7 @@ class _Interactions:
         else:
             counts = self.items.setdefault(resolved.item_id, Counter())
             counts[interaction.interaction_type.value] += 1
+        return resolved
 
 
 def _customer_snapshot(root, as_of, check, progress):
@@ -223,11 +254,26 @@ def _customer_snapshot(root, as_of, check, progress):
         connection.close()
 
 
-def _catalog_names(path):
-    # Catalog has already passed load_catalog validation. Keep its pipe delimiter.
+def _catalog_metadata(path):
+    """Project five fields only, preserving the validated catalog's last-row precedence."""
+    def value(row, column):
+        return (row.get(column) or "").strip() or None
+
     with Path(path).open(encoding="utf-8-sig", newline="") as stream:
-        return {row["КодНоменклатуры"]: row.get("НазваниеНаСайте") or row.get("Номенклатура", "")
-                for row in csv.DictReader(stream, delimiter="|")}
+        reader = csv.DictReader(stream, delimiter="|", strict=True)
+        if not reader.fieldnames or "КодНоменклатуры" not in reader.fieldnames:
+            raise CatalogError("Missing required catalog column: КодНоменклатуры")
+        metadata = {}
+        for row in reader:
+            if None in row or any(cell is None for cell in row.values()):
+                raise CatalogError("Invalid catalog row width")
+            code = row["КодНоменклатуры"]
+            if code.strip():
+                metadata[code] = ProductMetadata(
+                    value(row, "НазваниеНаСайте") or value(row, "Номенклатура") or "",
+                    value(row, "КатегорияНаСайте"), value(row, "ПолНоменклатуры"),
+                    value(row, "СезонНоски"), value(row, "СтилеваяГруппа"))
+        return MappingProxyType(metadata)
 
 
 def _catalog_snapshot(path):
@@ -239,11 +285,13 @@ def _catalog_snapshot(path):
     try:
         before = signature()
         products = load_catalog(Path(path))
-        names = _catalog_names(path)
+        metadata = _catalog_metadata(path)
         if signature() != before:
             raise CatalogError("Номенклатура обновилась во время чтения. Повторите расчёт.")
-        return products, names
-    except OSError:
+        if products.item_ids != metadata.keys():
+            raise CatalogError("Метаданные не соответствуют товарам справочника.")
+        return products, metadata
+    except (OSError, UnicodeError, csv.Error):
         raise CatalogError("Cannot read catalog file") from None
 
 
@@ -294,12 +342,14 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
         identities = CustomerIdResolver(adapt_customer_merge(raw)
                                         for raw in records("customer_merges", [merge] if merge else []))
         builder = InteractionBuilder(selection.interaction_rules())
-        product_catalog, names = _catalog_snapshot(catalog_path)
+        product_catalog, metadata = _catalog_snapshot(catalog_path)
         products = ProductResolver(product_catalog)
+        product_aggregates = ProductAggregates(metadata)
         collected = _Interactions(products)
         action_types, statuses = Counter(), Counter()
         action_users, order_users = set(), set()
         with_product = missing_action_customer = raw_lines = 0
+        action_aggregates = ActionAggregates()
         for raw in records("actions", entries["actions"]):
             name = adapt_action_system_name(raw)
             action_types[name] += 1
@@ -318,8 +368,11 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             except InteractionBuildError:
                 # Valid mapped event with no products: not an import error.
                 continue
+            action_aggregates.add(action, interactions)
             for interaction in interactions:
-                collected.add(interaction)
+                resolved = collected.add(interaction)
+                if resolved is not None:
+                    product_aggregates.add(resolved)
 
         snapshots = OrderSnapshots()
         order_aggregates = OrderAggregates()
@@ -350,7 +403,9 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             for line in adapt_order(order_for_adapter(eligible_order), identities, product_namespaces=selection.order_product_namespaces):
                 interaction = builder.from_order_line(line)
                 if interaction is not None:
-                    collected.add(interaction)
+                    resolved = collected.add(interaction)
+                    if resolved is not None:
+                        product_aggregates.add(resolved)
                     buyer = interaction.customer_id
                     purchases.append(line)
             if buyer is not None:
@@ -371,6 +426,10 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
         activity = Counter(_bucket(n, (1, 5, 10, 25, 50, 100), activity_labels) for n in collected.users.values())
         order_counts = Counter(_bucket(n, (1, 2, 5, 10), order_labels) for n in collected.purchase_orders.values())
         interactions, resolution = builder.diagnostics, products.diagnostics
+        product_result = product_aggregates.result()
+        if any(product_result[f"resolved_{kind.value.lower()}_interactions"] != counts.resolved
+               for kind, counts in resolution.by_type.items()):
+            raise ValueError("Product aggregates disagree with resolution diagnostics")
         if snapshots.conflicting:
             warnings.append("Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.")
         if missing_action_customer:
@@ -383,6 +442,8 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             warnings.append("Позиции заказов с нецелым количеством исключены из статистики.")
         top = sorted(collected.items.items(), key=lambda pair: (-sum(pair[1].values()), pair[0]))[:30]
         diagnostics = (
+            ("ambiguous_product_view_actions", action_aggregates.ambiguous),
+            ("unknown_currency_view_price_actions", action_aggregates.unknown_price_currency),
             ("orders_outside_statistics_period", outside_period),
             ("fractional_quantity_order_lines", fractional_lines),
             ("mapped_view_actions", interactions.actions_view),
@@ -420,7 +481,7 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
                                 for name, count in sorted(statuses.items())),
             namespaces=tuple((name, counts.interactions_total, counts.resolved, counts.unresolved,
                               counts.resolution_rate_percent) for name, counts in resolution.by_namespace.items()),
-            top_products=tuple((code, names.get(code, ""), counts["VIEW"], counts["FAVORITE"],
+            top_products=tuple((code, metadata[code].name, counts["VIEW"], counts["FAVORITE"],
                                 counts["PURCHASE"], sum(counts.values())) for code, counts in top),
             diagnostics=diagnostics, warnings=tuple(warnings),
             gender_distribution=genders, age_distribution=ages, mean_age=mean_age, median_age=median_age,
@@ -435,4 +496,6 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             repeat_buyer_rate=100 * repeat_buyers / purchase_users if purchase_users else 0.0,
             active_buyer_rate=100 * purchase_users / len(collected.users) if collected.users else 0.0,
             **order_aggregates.result(),
+            **action_aggregates.result(),
+            **product_result,
         )

@@ -11,10 +11,11 @@ import tempfile
 
 from Application.paths import USER_SETTINGS_DIR
 from Application.order_statistics import BASKET_LABELS, CURRENCIES
+from Application.action_statistics import AVAILABILITY_LABELS, FAVORITE_BUCKETS, VIEW_BUCKETS
 
 
 CACHE_PATH = USER_SETTINGS_DIR / "dataset_statistics.json"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 logger = logging.getLogger(__name__)
 
 COUNT_FIELDS = (
@@ -25,8 +26,12 @@ COUNT_FIELDS = (
     "view_users", "favorite_users", "purchase_users", "view_purchase_users", "favorite_purchase_users",
     "all_interaction_type_users", "repeat_buyers",
     "purchase_orders", "mixed_currency_purchase_orders", "unknown_currency_purchase_orders",
+    "view_parameter_actions",
+    "products_with_views", "products_with_favorites", "products_with_purchases",
+    "resolved_view_interactions", "resolved_favorite_interactions", "resolved_purchase_interactions",
 )
 DIAGNOSTIC_KEYS = (
+    "ambiguous_product_view_actions", "unknown_currency_view_price_actions",
     "orders_outside_statistics_period", "fractional_quantity_order_lines",
     "mapped_view_actions", "mapped_favorite_actions", "unmapped_actions", "mapped_without_product",
     "actions_without_customer_id", "unknown_candidate", "unsupported_namespace", "invalid_id",
@@ -149,6 +154,123 @@ def _validate_orders(result):
                 raise ValueError
 
 
+def _validate_actions(result):
+    text = lambda value: isinstance(value, str) and bool(value.strip())
+    rate = lambda value: _number(value) and value <= 100
+    views, favorites = result["view_interactions"], result["favorite_interactions"]
+    for prefix, suffix, total, users in (("views", "viewer", views, result["view_users"]),
+                                         ("favorites", "user", favorites, result["favorite_users"])):
+        mean, middle = (result[f"{stat}_{prefix}_per_{suffix}"] for stat in ("mean", "median"))
+        if not _number(mean) or not _number(middle) or not 0 <= users <= total or bool(users) != bool(total):
+            raise ValueError
+        if not math.isclose(mean, total / users if users else 0., abs_tol=1e-9):
+            raise ValueError
+        if (not users and middle != 0) or (users and not 1 <= middle <= total):
+            raise ValueError
+    for field, labels, total in (
+        ("view_user_activity_distribution", VIEW_BUCKETS, result["view_users"]),
+        ("favorite_user_activity_distribution", FAVORITE_BUCKETS, result["favorite_users"]),
+        ("view_availability_distribution", AVAILABILITY_LABELS, result["view_parameter_actions"]),
+    ):
+        rows = result[field]
+        if not _rows(rows, (text, _count, rate)) or tuple(row[0] for row in rows) != labels:
+            raise ValueError
+        if sum(row[1] for row in rows) != total or any(
+                not math.isclose(r, 100 * n / total if total else 0., abs_tol=1e-9) for _, n, r in rows):
+            raise ValueError
+    channels = result["action_channel_statistics"]
+    if not _rows(channels, (lambda v: v is None or text(v), text, _count, _count, rate, _count, _count, rate)):
+        raise ValueError
+    if len({r[0] for r in channels}) != len(channels) or list(channels) != sorted(
+            channels, key=lambda r: (-r[2], -r[5], r[1], r[0] is not None, r[0] or "")):
+        raise ValueError
+    for index, total, users in ((2, views, result["view_users"]), (5, favorites, result["favorite_users"])):
+        if sum(r[index] for r in channels) != total:
+            raise ValueError
+        for row in channels:
+            n, unique, percent = row[index:index + 3]
+            if unique > min(n, users) or bool(unique) != bool(n) or not math.isclose(
+                    percent, 100 * n / total if total else 0., abs_tol=1e-9):
+                raise ValueError
+    monthly = result["action_monthly_dynamics"]
+    if not _rows(monthly, (text, _count, _count, _count, _count)):
+        raise ValueError
+    months = [r[0] for r in monthly]
+    if months != sorted(set(months)):
+        raise ValueError
+    for month in months:
+        parsed = datetime.strptime(month, "%Y-%m")
+        if month != f"{parsed.year:04d}-{parsed.month:02d}":
+            raise ValueError
+    for index, total, users in ((1, views, result["view_users"]), (3, favorites, result["favorite_users"])):
+        if sum(r[index] for r in monthly) != total:
+            raise ValueError
+        if any(r[index + 1] > min(r[index], users) or bool(r[index + 1]) != bool(r[index]) for r in monthly):
+            raise ValueError
+    prices = result["view_price_statistics"]
+    if not _rows(prices, (text, _count, _decimal_string, _decimal_string)) or tuple(r[0] for r in prices) != CURRENCIES:
+        raise ValueError
+    if any(not n and (Decimal(mean) != 0 or Decimal(middle) != 0) for _, n, mean, middle in prices):
+        raise ValueError
+    parameters = result["view_parameter_actions"]
+    diagnostics = dict(result["diagnostics"])
+    if sum(r[1] for r in prices) + diagnostics["unknown_currency_view_price_actions"] > parameters:
+        raise ValueError
+    if parameters + 2 * diagnostics["ambiguous_product_view_actions"] > views:
+        raise ValueError
+
+
+def _integral_quantity(value):
+    return _decimal_string(value) and Decimal(value) == Decimal(value).to_integral_value()
+
+
+def _validate_products(result):
+    text = lambda value: isinstance(value, str)
+    label = lambda value: text(value) and bool(value.strip())
+    items = result["unique_resolved_items"]
+    totals = tuple(result[f"resolved_{kind}_interactions"] for kind in ("view", "favorite", "purchase"))
+    if sum(totals) != result["resolved_interactions"]:
+        raise ValueError
+    for key, total, global_key in zip(("products_with_views", "products_with_favorites", "products_with_purchases"),
+                                      totals, ("view_interactions", "favorite_interactions", "purchase_interactions")):
+        if not 0 <= result[key] <= min(items, total) or total > result[global_key] or bool(result[key]) != bool(total):
+            raise ValueError
+    quantity = result["resolved_purchase_quantity"]
+    if not _integral_quantity(quantity) or Decimal(quantity) > Decimal(result["purchase_quantity"]):
+        raise ValueError
+    if not totals[2] and Decimal(quantity):
+        raise ValueError
+    for field, count_field, purchased in (
+        ("top_viewed_products", "products_with_views", False),
+        ("top_favorited_products", "products_with_favorites", False),
+        ("top_purchased_products", "products_with_purchases", True),
+    ):
+        rows = result[field]
+        checks = (label, text, _count, _count, _integral_quantity, _count, _count) if purchased else (label, text, _count, _count, _count, _count)
+        if not _rows(rows, checks) or len(rows) != min(20, result[count_field]) or len({r[0] for r in rows}) != len(rows):
+            raise ValueError
+        key = (lambda r: (-r[2], -Decimal(r[4]), -r[3], r[0])) if purchased else (lambda r: (-r[2], -r[3], -r[5], r[0]))
+        if list(rows) != sorted(rows, key=key) or any(not 0 < r[3] <= r[2] for r in rows):
+            raise ValueError
+        positions = (5, 6, 2) if purchased else (2, 4, 5) if field == "top_viewed_products" else (4, 2, 5)
+        if any(sum(r[index] for r in rows) > total for index, total in zip(positions, totals)):
+            raise ValueError
+        if purchased and sum((Decimal(r[4]) for r in rows), Decimal(0)) > Decimal(quantity):
+            raise ValueError
+    for field in ("product_category_statistics", "product_gender_statistics", "product_season_statistics", "product_style_statistics"):
+        rows = result[field]
+        if not _rows(rows, (label, _count, _count, _count, _count, _integral_quantity)):
+            raise ValueError
+        if len({r[0] for r in rows}) != len(rows) or any(not r[1] or r[1] > sum(r[2:5]) for r in rows):
+            raise ValueError
+        if list(rows) != sorted(rows, key=lambda r: (-r[4], -r[2], -r[3], r[0])):
+            raise ValueError
+        if any(sum(r[index] for r in rows) != total for index, total in enumerate((items, *totals), 1)):
+            raise ValueError
+        if sum((Decimal(r[5]) for r in rows), Decimal(0)) != Decimal(quantity):
+            raise ValueError
+
+
 def validate_result(result):
     """Validate the complete display contract without recalculating statistics."""
     text = lambda value: isinstance(value, str)
@@ -187,6 +309,8 @@ def validate_result(result):
         if not valid:
             raise ValueError
         _validate_orders(result)
+        _validate_actions(result)
+        _validate_products(result)
         keys = [key for key, _ in result["diagnostics"]]
         if len(keys) != len(set(keys)) or set(keys) != set(DIAGNOSTIC_KEYS):
             raise ValueError

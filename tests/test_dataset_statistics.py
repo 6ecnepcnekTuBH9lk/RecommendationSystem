@@ -25,10 +25,11 @@ SINCE = "2026-01-01T00:00:00+00:00"
 UNTIL = "2026-01-02T00:00:00+00:00"
 
 
-def action(name, products=(), customer="old"):
+def action(name, products=(), customer="old", *, stamp=STAMP, channel=None, price=None, available=None, namespace="offline1C"):
     return {"ids": {"mindboxId": "event"}, "customer": {"ids": {"mindboxId": customer}},
-            "actionTemplate": {"ids": {"systemName": name}}, "dateTimeUtc": STAMP, "creationDateTimeUtc": STAMP,
-            "products": [{"ids": {"offline1C": product}} for product in products]}
+            "actionTemplate": {"ids": {"systemName": name}}, "dateTimeUtc": stamp, "creationDateTimeUtc": STAMP,
+            "channel": channel, "productView": {"price": price, "isAvailable": available},
+            "products": [{"ids": {namespace: product}} for product in products]}
 
 
 def order(statuses, key="order"):
@@ -256,14 +257,14 @@ def test_catalog_replacement_cannot_mix_ids_and_names(dataset, monkeypatch):
     from Application import dataset_statistics as statistics
     from Application.product_resolution import CatalogError
 
-    original = statistics._catalog_names
+    original = statistics._catalog_metadata
 
     def replace_catalog(path):
         names = original(path)
         path.write_text("КодНоменклатуры|Номенклатура\n000099|Replacement\n", encoding="utf-8")
         return names
 
-    monkeypatch.setattr(statistics, "_catalog_names", replace_catalog)
+    monkeypatch.setattr(statistics, "_catalog_metadata", replace_catalog)
     with pytest.raises(CatalogError, match="обновилась"):
         calculate(dataset)
 
@@ -432,9 +433,9 @@ def test_new_cache_roundtrip_old_cache_ignored_without_overwrite(dataset, tmp_pa
     result = asdict(calculate(dataset))
     path = tmp_path / "statistics.json"
     cache.save_result(path, result)
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 4
-    assert cache.load_result(path)["gender_distribution"] == [list(row) for row in result["gender_distribution"]]
-    path.write_text(json.dumps({"schema_version": 3, "result": result}), encoding="utf-8")
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 6
+    assert cache.load_result(path) == json.loads(json.dumps(result))
+    path.write_text(json.dumps({"schema_version": 5, "result": result}), encoding="utf-8")
     before = path.read_bytes()
     assert cache.load_result(path) is None
     assert path.read_bytes() == before
@@ -651,7 +652,7 @@ def test_cache_decimal_arithmetic_overflow_is_safe(dataset, tmp_path):
     result["order_financials"][0][4:7] = ["1e999999", "1e999999", "1e999999"]
     result["order_monthly_dynamics"] = [["2026-01", 1, "9e999999", 0, "0"], ["2026-02", 0, "9e999999", 0, "0"]]
     path = tmp_path / "overflow.json"
-    path.write_text(json.dumps({"schema_version": 4, "result": result}), encoding="utf-8")
+    path.write_text(json.dumps({"schema_version": 6, "result": result}), encoding="utf-8")
     assert cache.load_result(path) is None
 
 
@@ -766,3 +767,338 @@ def test_eligibility_diagnostics_strict_validation(dataset, key, bad):
     result["diagnostics"] = tuple((name, bad if name == key else value) for name, value in result["diagnostics"])
     with pytest.raises(StatisticsCacheError):
         validate_result(result)
+
+
+
+def write_actions(dataset, records):
+    from Application.mindbox.canonical_customers import encode
+    root, _, data = dataset
+    (root / data["actions"][SINCE[:10]]["directory"] / "actions_part_001.json").write_text(
+        encode({"customerActions": records}), encoding="utf-8")
+
+
+def test_action_activity_bucket_edges_and_means(dataset):
+    from statistics import median
+    view, favorite = DEFAULT_SELECTION.view_action_system_names[0], DEFAULT_SELECTION.favorite_action_system_names[0]
+    views = (1, 2, 5, 6, 10, 11, 25, 26, 50, 51, 100, 101)
+    favorites = (1, 2, 3, 5, 6, 10, 11)
+    write_actions(dataset, [action(kind, ["000001-a"], f"private-{kind}-{i}")
+                            for kind, counts in ((view, views), (favorite, favorites))
+                            for i, n in enumerate(counts) for _ in range(n)])
+    result = calculate(dataset)
+    assert (result.view_interactions, result.favorite_interactions) == (sum(views), sum(favorites))
+    assert (result.view_users, result.favorite_users) == (12, 7)
+    assert [n for _, n, _ in result.view_user_activity_distribution] == [1, 2, 2, 2, 2, 2, 1]
+    assert [n for _, n, _ in result.favorite_user_activity_distribution] == [1, 1, 2, 2, 1]
+    assert result.mean_views_per_viewer == pytest.approx(sum(views) / len(views))
+    assert result.mean_favorites_per_user == pytest.approx(sum(favorites) / len(favorites))
+    assert result.median_views_per_viewer == median(views)
+    assert result.median_favorites_per_user == median(favorites)
+    for rows, users in ((result.view_user_activity_distribution, 12), (result.favorite_user_activity_distribution, 7)):
+        assert all(rate == pytest.approx(100 * n / users) for _, n, rate in rows)
+
+
+def test_action_multi_product_unresolved_malformed_and_raw_semantics(dataset):
+    result = calculate(dataset)
+    assert result.view_interactions == 4  # Includes unresolved product and two-product action.
+    assert result.mean_views_per_viewer == result.median_views_per_viewer == 4
+    assert result.view_users == 1  # old -> new canonical identity.
+    assert result.favorite_users == 2
+    assert result.action_channel_statistics == ((None, "Не указано", 4, 1, 100., 2, 2, 100.),)
+    assert result.action_monthly_dynamics == (("2026-01", 4, 1, 2, 2),)
+    assert result.view_parameter_actions == 2
+    assert result.view_availability_distribution[-1] == ("Не указано", 2, 100.)
+    assert result.view_price_statistics == (("RUB", 0, "0", "0"), ("KZT", 0, "0", "0"))
+    diagnostics = dict(result.diagnostics)
+    assert diagnostics["ambiguous_product_view_actions"] == 1
+    assert diagnostics["mapped_without_product"] == diagnostics["unknown_candidate"] == 1
+    assert diagnostics["unknown_currency_view_price_actions"] == 0
+    assert result.actions == 7 and result.actions_with_product == 5
+    assert sum(n for _, n in result.action_types) == 7
+    payload = json.dumps(asdict(result), ensure_ascii=False)
+    assert all(token not in payload for token in ('"old"', '"new"', '"other"', '"event"', '"customer_id"', '"productView"'))
+
+
+def test_action_channels_names_identity_months_and_no_date_filter(dataset):
+    view, favorite = DEFAULT_SELECTION.view_action_system_names[0], DEFAULT_SELECTION.favorite_action_system_names[0]
+    web = lambda name: {"ids": {"systemName": "web", "externalId": "ignored"}, "name": name}
+    records = [action(view, ["000001-a", "000002-a"], channel=web("Zulu"), stamp="2026-03-01T00:30:00+01:00"),
+               action(view, ["000001-a"], "new", channel=web("Alpha")),
+               action(favorite, ["000001-a"], channel=web("Alpha")),
+               action(view, ["000001-a"], channel={"ids": {"externalId": "external"}}),
+               action(view, ["000001-a"], channel={"ids": {"systemName": "tie"}, "name": "B"}),
+               action(favorite, ["000001-a"], channel={"ids": {"systemName": "tie"}, "name": "A"}),
+               action(view, ["000001-a"]),
+               action("technical", ["000001-a"], channel=web("Technical"))]
+    write_actions(dataset, records)
+    result = calculate(dataset)
+    rows = {r[0]: r for r in result.action_channel_statistics}
+    assert rows["web"][1:4] == ("Alpha", 3, 1)
+    assert rows["web"][5:7] == (1, 1)
+    assert rows["tie"][1] == "A"
+    assert rows["external"][1] == "external"
+    assert rows[None][1] == "Не указано"
+    assert result.view_users == 1 and sum(r[3] for r in rows.values()) == 4
+    assert result.action_monthly_dynamics == (("2026-01", 4, 1, 2, 1), ("2026-02", 2, 1, 0, 0))
+    assert result.action_channel_statistics[0][0] == "web"
+    assert sum(r[2] for r in rows.values()) == result.view_interactions == 6
+    assert all(r[4] == pytest.approx(100 * r[2] / 6) and r[7] == pytest.approx(100 * r[5] / 2) for r in rows.values())
+
+
+def test_action_availability_and_decimal_prices(dataset):
+    view = DEFAULT_SELECTION.view_action_system_names[0]
+    records = [action(view, ["000001-a"], price=Decimal("0.1"), available=True),
+               action(view, ["000001-a"], price=Decimal("0.2"), available=False),
+               action(view, ["000001-a"], price=None),
+               action(view, ["000001"], namespace="kanzlerKz", price=Decimal("120.25"), available=True),
+               action(view, ["000001-a", "000002-a"], price=999999, available=False)]
+    write_actions(dataset, records)
+    result = calculate(dataset)
+    assert result.view_interactions == 6 and result.view_parameter_actions == 4
+    assert result.view_availability_distribution == (("Доступен", 2, 50.), ("Недоступен", 1, 25.), ("Не указано", 1, 25.))
+    assert result.view_price_statistics == (("RUB", 2, "0.15", "0.15"), ("KZT", 1, "120.25", "120.25"))
+    assert dict(result.diagnostics)["ambiguous_product_view_actions"] == 1
+
+
+def test_action_unknown_currency_and_internal_invariant():
+    from Application.action_statistics import ActionAggregates
+    from Application.interactions import InteractionBuilder
+    from Application.mindbox.records import ActionRecord
+    record = ActionRecord("private-event", DEFAULT_SELECTION.view_action_system_names[0],
+                          datetime.now(timezone.utc), datetime.now(timezone.utc), "private-source", "private-canonical",
+                          products=(ProductKey("future", "private-product"),), product_view_price=Decimal("0.123456789123456789"))
+    aggregate = ActionAggregates()
+    builder = InteractionBuilder()
+    aggregate.add(record, builder.from_action(record))
+    absent = replace(record, product_view_price=None)
+    aggregate.add(absent, builder.from_action(absent))
+    assert aggregate.unknown_price_currency == 1
+    assert aggregate.result()["view_parameter_actions"] == 2
+    assert aggregate.result()["view_price_statistics"] == (("RUB", 0, "0", "0"), ("KZT", 0, "0", "0"))
+    with pytest.raises(ValueError):
+        aggregate.add(record, ())
+    interactions = builder.from_action(record)
+    with pytest.raises(ValueError):
+        aggregate.add(record, (interactions[0], replace(interactions[0], interaction_type=InteractionType.FAVORITE)))
+
+
+@pytest.mark.parametrize("mutation", ["mean_nan", "median_inf", "mean_negative", "view_count", "favorite_labels",
+                                      "availability", "channel_duplicate", "channel_rate", "channel_users", "channel_count",
+                                      "month_duplicate", "month_unsorted", "month_format", "month_total", "month_users",
+                                      "price_nan", "price_inf", "price_negative", "price_numeric", "price_duplicate",
+                                      "price_empty_nonzero", "diagnostic_missing", "diagnostic_negative"])
+def test_action_cache_rejects_malformed_aggregates(dataset, mutation):
+    from Application import statistics_cache as cache
+    result = json.loads(json.dumps(asdict(calculate(dataset))))
+    if mutation == "mean_nan":
+        result["mean_views_per_viewer"] = float("nan")
+    elif mutation == "median_inf":
+        result["median_favorites_per_user"] = float("inf")
+    elif mutation == "mean_negative":
+        result["mean_favorites_per_user"] = -1
+    elif mutation == "view_count":
+        result["view_user_activity_distribution"][0][1] += 1
+    elif mutation == "favorite_labels":
+        result["favorite_user_activity_distribution"][0][0] = "bad"
+    elif mutation == "availability":
+        result["view_availability_distribution"][2][2] = 50
+    elif mutation.startswith("channel_"):
+        rows = result["action_channel_statistics"]
+        if mutation == "channel_duplicate":
+            rows.append(rows[0])
+        else:
+            rows[0][{"channel_rate": 4, "channel_users": 3, "channel_count": 2}[mutation]] = 999
+    elif mutation.startswith("month_"):
+        rows = result["action_monthly_dynamics"]
+        if mutation == "month_duplicate":
+            rows.append(rows[0])
+        elif mutation == "month_unsorted":
+            rows.insert(0, ["2026-02", 0, 0, 0, 0])
+        elif mutation == "month_format":
+            rows[0][0] = "2026-13"
+        else:
+            rows[0][1 if mutation == "month_total" else 2] = 999
+    elif mutation.startswith("price_"):
+        rows = result["view_price_statistics"]
+        if mutation == "price_duplicate":
+            rows[1] = rows[0]
+        else:
+            rows[0][2] = {"price_nan": "NaN", "price_inf": "Infinity", "price_negative": "-1",
+                          "price_numeric": 1, "price_empty_nonzero": "1"}[mutation]
+    elif mutation == "diagnostic_missing":
+        result["diagnostics"].pop(0)
+    else:
+        result["diagnostics"][0][1] = -1
+    with pytest.raises(cache.StatisticsCacheError):
+        cache.validate_result(result)
+
+
+
+def test_product_resolution_reuse_and_single_pass(dataset, monkeypatch):
+    from Application import dataset_statistics as statistics
+    calls, reads = [], []
+    original_resolve = ProductResolver.resolve_interaction
+    original_read = statistics.iter_export
+    def resolve(self, interaction, **kwargs):
+        calls.append(interaction)
+        return original_resolve(self, interaction, **kwargs)
+    def read(name, **kwargs):
+        reads.append(name)
+        yield from original_read(name, **kwargs)
+    monkeypatch.setattr(ProductResolver, "resolve_interaction", resolve)
+    monkeypatch.setattr(statistics, "iter_export", read)
+    result = calculate(dataset)
+    assert reads == ["customer_merges", "actions", "orders"]
+    assert len(calls) == result.resolved_interactions + result.unresolved_interactions == 9
+    assert (result.resolved_view_interactions, result.resolved_favorite_interactions, result.resolved_purchase_interactions) == (3, 2, 3)
+    assert result.top_viewed_products == (("000001", "Рубашка на сайте", 2, 1, 1, 3), ("000002", "Брюки", 1, 1, 1, 0))
+    assert result.top_purchased_products == (("000001", "Рубашка на сайте", 3, 1, "6", 2, 1),)
+    assert result.unique_resolved_items == result.products_with_views == result.products_with_favorites == 2
+    assert result.products_with_purchases == 1
+    assert result.product_category_statistics == (("Не указано", 2, 3, 2, 3, "6"),)
+
+
+def test_product_groups_quantity_and_unresolved_purchase(dataset):
+    _, catalog, _ = dataset
+    catalog.write_text("КодНоменклатуры|Номенклатура|НазваниеНаСайте|КатегорияНаСайте|ПолНоменклатуры|СезонНоски|СтилеваяГруппа\n"
+                       "000001|A| Shirt | Рубашки |Мужской|Всесезон|Деловой\n"
+                       "000002|B||Брюки|Мужской| |Casual\n000003||||||\n", encoding="utf-8-sig")
+    view, favorite = DEFAULT_SELECTION.view_action_system_names[0], DEFAULT_SELECTION.favorite_action_system_names[0]
+    write_actions(dataset, [action(view, ["000001-a", "000001-b"], "old"), action(view, ["000001"], "other", namespace="kanzlerKz"),
+                            action(view, ["000002-a"]), action(favorite, ["000001-a"]),
+                            action(favorite, ["000002-a", "000002-b"]), action(favorite, ["000002-a"], "other"),
+                            action(view, ["999999-unresolved"])])
+    first = order(["CP", "CP"], "first")
+    first["lines"][0]["quantity"], first["lines"][1]["quantity"] = 2, 3
+    second = order(["CP", "CP"], "second")
+    for line in second["lines"]:
+        line["product"]["ids"] = {"offline1C": "000003-a"}
+    third = deepcopy(second)
+    third["ids"]["mindboxId"] = "third"
+    third["customer"]["ids"]["mindboxId"] = "other"
+    third["lines"] = third["lines"][:1]
+    unknown = order(["CP"], "unresolved")
+    unknown["lines"][0]["product"]["ids"] = {"offline1C": "999999-x"}
+    unknown["lines"][0]["quantity"] = 9
+    write_orders(dataset, [first, second, third, unknown])
+    result = calculate(dataset)
+    assert result.top_viewed_products[0] == ("000001", "Shirt", 3, 2, 1, 2)
+    assert result.top_favorited_products[0] == ("000002", "B", 3, 2, 1, 0)
+    assert result.top_purchased_products[0] == ("000003", "", 3, 2, "6", 0, 0)
+    assert result.top_purchased_products[1][2:5] == (2, 1, "5")
+    assert result.resolved_purchase_quantity == "11" and result.purchase_quantity == "20"
+    assert result.resolved_purchase_interactions == 5 and result.purchase_interactions == 6
+    assert result.unresolved_interactions == dict(result.diagnostics)["unknown_candidate"] == 2
+    assert result.product_category_statistics == (("Не указано", 1, 0, 0, 3, "6"), ("Рубашки", 1, 3, 1, 2, "5"), ("Брюки", 1, 1, 3, 0, "0"))
+    assert result.product_gender_statistics == (("Не указано", 1, 0, 0, 3, "6"), ("Мужской", 2, 4, 4, 2, "5"))
+    assert result.product_season_statistics == (("Не указано", 2, 1, 3, 3, "6"), ("Всесезон", 1, 3, 1, 2, "5"))
+    assert result.product_style_statistics == (("Не указано", 1, 0, 0, 3, "6"), ("Деловой", 1, 3, 1, 2, "5"), ("Casual", 1, 1, 3, 0, "0"))
+    from Application.statistics_cache import validate_result
+    validate_result(asdict(result))
+    encoded = json.dumps(asdict(result))
+    assert all(value not in encoded for value in ('"old"', '"new"', '"other"', '999999-x', '000001-b'))
+
+
+def test_product_rank_ties_limit_and_whole_metadata_values():
+    from Application.product_statistics import ProductAggregates, ProductMetadata
+    from Application.product_resolution import ResolvedInteraction, CatalogError
+    metadata = {f"{i:06d}": ProductMetadata(category="A,B;C/D") for i in range(25)}
+    aggregate = ProductAggregates(metadata)
+    def add(code, kind, user, quantity=None):
+        record = InteractionRecord("source", user, ProductKey("offline1C", code + "-size"), kind,
+                                   datetime.now(timezone.utc), InteractionSource.ACTION, "private-event", quantity)
+        aggregate.add(ResolvedInteraction(record, code))
+    for code in reversed(metadata):
+        for kind in InteractionType:
+            add(code, kind, "same-user", Decimal(2) if kind == InteractionType.PURCHASE else None)
+    add("000024", InteractionType.VIEW, "another")
+    add("000023", InteractionType.FAVORITE, "another")
+    add("000022", InteractionType.PURCHASE, "another", Decimal(10))
+    result = aggregate.result()
+    assert all(len(result[field]) == 20 for field in ("top_viewed_products", "top_favorited_products", "top_purchased_products"))
+    assert [r[0] for r in result["top_viewed_products"][:3]] == ["000024", "000022", "000000"]
+    assert [r[0] for r in result["top_favorited_products"][:3]] == ["000023", "000022", "000000"]
+    assert result["top_purchased_products"][0][0] == "000022"
+    assert result["product_category_statistics"] == (("A,B;C/D", 25, 26, 26, 26, "60"),)
+    # Equal purchases sort by Decimal quantity, then buyers, then catalog code.
+    add("000021", InteractionType.PURCHASE, "same-user", Decimal(8))
+    add("000020", InteractionType.PURCHASE, "another", Decimal(8))
+    add("000019", InteractionType.PURCHASE, "another", Decimal(7))
+    assert [r[0] for r in aggregate.result()["top_purchased_products"][:3]] == ["000022", "000020", "000021"]
+    add("000023", InteractionType.VIEW, "same-user")
+    add("000024", InteractionType.FAVORITE, "same-user")
+    assert aggregate.result()["top_viewed_products"][0][0] == "000024"
+    assert aggregate.result()["top_favorited_products"][0][0] == "000023"
+    del metadata["000000"]
+    with pytest.raises(CatalogError, match="метаданные"):
+        add("000000", InteractionType.VIEW, "user")
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_catalog_metadata_projection_immutable_and_missing_values(tmp_path, encoding):
+    from Application.dataset_statistics import _catalog_snapshot
+    path = tmp_path / "catalog.csv"
+    path.write_text("КодНоменклатуры|НазваниеНаСайте|Номенклатура|КатегорияНаСайте|Остаток|ТитульнаяФотография\n"
+                    "000001|  | Fallback | A,B;C/D |not-a-number|private-photo\n000002|||||\n", encoding=encoding)
+    catalog, metadata = _catalog_snapshot(path)
+    assert catalog.item_ids == metadata.keys()
+    assert metadata["000001"].name == "Fallback"
+    assert metadata["000001"].category == "A,B;C/D"
+    assert metadata["000002"].name == "" and metadata["000002"].season is None
+    assert len(asdict(metadata["000001"])) == 5
+    with pytest.raises(TypeError):
+        metadata["bad"] = metadata["000001"]
+    with pytest.raises(FrozenInstanceError):
+        metadata["000001"].name = "bad"
+
+
+@pytest.mark.parametrize("content", ["НазваниеНаСайте|КатегорияНаСайте\nA|B\n", "КодНоменклатуры;Номенклатура\n000001;A\n",
+                                     "КодНоменклатуры|Номенклатура\n000001|A|extra\n"])
+def test_catalog_metadata_invalid_required_structure(tmp_path, content):
+    from Application.dataset_statistics import _catalog_snapshot
+    from Application.product_resolution import CatalogError
+    path = tmp_path / "catalog.csv"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(CatalogError):
+        _catalog_snapshot(path)
+
+
+def test_catalog_missing_metadata_is_error(dataset, monkeypatch):
+    from Application import dataset_statistics as statistics
+    from Application.product_resolution import CatalogError
+    monkeypatch.setattr(statistics, "_catalog_metadata", lambda path: {})
+    with pytest.raises(CatalogError, match="Метаданные"):
+        calculate(dataset)
+
+
+@pytest.mark.parametrize("mutation", ["product_count", "type_sum", "quantity_nan", "quantity_inf", "quantity_negative", "quantity_fractional",
+                                      "quantity_exceeds", "top_duplicate", "top_order", "top_users", "top_quantity",
+                                      "group_duplicate", "group_items", "group_view", "group_favorite", "group_purchase", "group_quantity"])
+def test_product_cache_rejects_invalid_aggregates(dataset, mutation):
+    from Application import statistics_cache as cache
+    result = json.loads(json.dumps(asdict(calculate(dataset))))
+    if mutation == "product_count":
+        result["products_with_views"] = 999
+    elif mutation == "type_sum":
+        result["resolved_view_interactions"] += 1
+    elif mutation.startswith("quantity_"):
+        result["resolved_purchase_quantity"] = {"quantity_nan": "NaN", "quantity_inf": "Infinity", "quantity_negative": "-1",
+                                                "quantity_fractional": "1.5", "quantity_exceeds": "999"}[mutation]
+    elif mutation.startswith("top_"):
+        if mutation == "top_duplicate":
+            result["top_viewed_products"][1] = result["top_viewed_products"][0]
+        elif mutation == "top_order":
+            result["top_viewed_products"].reverse()
+        elif mutation == "top_users":
+            result["top_viewed_products"][0][3] = 999
+        else:
+            result["top_purchased_products"][0][4] = "1.1"
+    else:
+        rows = result["product_category_statistics"]
+        if mutation == "group_duplicate":
+            rows.append(rows[0])
+        else:
+            index = {"group_items": 1, "group_view": 2, "group_favorite": 3, "group_purchase": 4, "group_quantity": 5}[mutation]
+            rows[0][index] = "999" if index == 5 else 999
+    with pytest.raises(cache.StatisticsCacheError):
+        cache.validate_result(result)
