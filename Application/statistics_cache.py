@@ -1,7 +1,7 @@
 """Validated last-successful statistics snapshot; no Qt or canonical writes."""
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 import json
 import logging
 import math
@@ -10,9 +10,11 @@ from pathlib import Path
 import tempfile
 
 from Application.paths import USER_SETTINGS_DIR
+from Application.order_statistics import BASKET_LABELS, CURRENCIES
 
 
 CACHE_PATH = USER_SETTINGS_DIR / "dataset_statistics.json"
+SCHEMA_VERSION = 4
 logger = logging.getLogger(__name__)
 
 COUNT_FIELDS = (
@@ -20,8 +22,12 @@ COUNT_FIELDS = (
     "actions_with_product", "actions_without_product", "view_interactions", "favorite_interactions",
     "purchase_interactions", "unique_source_products", "unique_resolved_items",
     "resolved_interactions", "unresolved_interactions",
+    "view_users", "favorite_users", "purchase_users", "view_purchase_users", "favorite_purchase_users",
+    "all_interaction_type_users", "repeat_buyers",
+    "purchase_orders", "mixed_currency_purchase_orders", "unknown_currency_purchase_orders",
 )
 DIAGNOSTIC_KEYS = (
+    "orders_outside_statistics_period", "fractional_quantity_order_lines",
     "mapped_view_actions", "mapped_favorite_actions", "unmapped_actions", "mapped_without_product",
     "actions_without_customer_id", "unknown_candidate", "unsupported_namespace", "invalid_id",
     "orders_unique", "orders_duplicate_identical", "orders_duplicate_conflicting", "unique_order_lines",
@@ -61,6 +67,88 @@ def _rows(value, checks):
         and all(check(cell) for check, cell in zip(checks, row)) for row in value)
 
 
+def _decimal_string(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = Decimal(value)
+        return parsed.is_finite() and parsed >= 0
+    except InvalidOperation:
+        return False
+
+
+def _validate_orders(result):
+    text = lambda value: isinstance(value, str) and bool(value.strip())
+    currency = lambda value: value in CURRENCIES
+    money = _decimal_string
+    total = result["purchase_orders"]
+    for key in ("mean_purchase_lines_per_order", "median_purchase_lines_per_order"):
+        if not _number(result[key]):
+            raise ValueError
+    for key in ("mean_purchase_units_per_order", "median_purchase_units_per_order"):
+        if not money(result[key]):
+            raise ValueError
+    for key in ("purchase_basket_distribution", "ordering_method_distribution", "delivery_type_distribution", "payment_type_distribution"):
+        rows = result[key]
+        if not _rows(rows, (text, _count, _number)) or len({r[0] for r in rows}) != len(rows):
+            raise ValueError
+        if key == "purchase_basket_distribution" and tuple(r[0] for r in rows) != BASKET_LABELS:
+            raise ValueError
+        if key != "payment_type_distribution" and sum(r[1] for r in rows) != total:
+            raise ValueError
+        if key == "payment_type_distribution" and sum(r[1] for r in rows) < total:
+            raise ValueError
+        if any(n > total or not math.isclose(rate, 100 * n / total if total else 0., abs_tol=1e-9) for _, n, rate in rows):
+            raise ValueError
+    financials = result["order_financials"]
+    delivery = result["delivery_financials"]
+    if not _rows(financials, (currency, _count, _count, money, money, money, money)):
+        raise ValueError
+    if not _rows(delivery, (currency, _count, money, money, money)):
+        raise ValueError
+    if tuple(r[0] for r in financials) != CURRENCIES or tuple(r[0] for r in delivery) != CURRENCIES:
+        raise ValueError
+    if sum(r[1] for r in financials) + result["mixed_currency_purchase_orders"] + result["unknown_currency_purchase_orders"] != total:
+        raise ValueError
+    for row, shipping in zip(financials, delivery):
+        _, n, lines, units, amount, mean, middle = row
+        if lines < n or (not n and any(Decimal(v) for v in (units, amount, mean, middle))):
+            raise ValueError
+        if Decimal(mean) != (Decimal(amount) / n if n else 0):
+            raise ValueError
+        if shipping[1] > n or Decimal(shipping[3]) != (Decimal(shipping[2]) / shipping[1] if shipping[1] else 0):
+            raise ValueError
+        if not shipping[1] and any(Decimal(v) for v in shipping[2:]):
+            raise ValueError
+    monthly = result["order_monthly_dynamics"]
+    if not _rows(monthly, (text, _count, money, _count, money)):
+        raise ValueError
+    months = [r[0] for r in monthly]
+    if months != sorted(set(months)):
+        raise ValueError
+    for month in months:
+        parsed = datetime.strptime(month, "%Y-%m")
+        if parsed.strftime("%Y-%m") != month:
+            raise ValueError
+    for i, row in enumerate(financials):
+        if sum(r[1 + 2 * i] for r in monthly) != row[1]:
+            raise ValueError
+        if sum((Decimal(r[2 + 2 * i]) for r in monthly), Decimal(0)) != Decimal(row[4]):
+            raise ValueError
+    stores = result["store_statistics"]
+    if not _rows(stores, (currency, lambda v: v is None or text(v), text, _count, _count, _count, money, money, money)):
+        raise ValueError
+    if len({(r[0], r[1]) for r in stores}) != len(stores):
+        raise ValueError
+    for unit in CURRENCIES:
+        rows = [r for r in stores if r[0] == unit]
+        if len(rows) > 20 or rows != sorted(rows, key=lambda r: (-Decimal(r[7]), -r[3], r[2], r[1] is not None, r[1] or "")):
+            raise ValueError
+        for row in rows:
+            if not 0 < row[4] <= row[3] <= total or row[5] < row[3] or Decimal(row[8]) != Decimal(row[7]) / row[3]:
+                raise ValueError
+
+
 def validate_result(result):
     """Validate the complete display contract without recalculating statistics."""
     text = lambda value: isinstance(value, str)
@@ -71,6 +159,22 @@ def validate_result(result):
         valid &= result["customers"] is None or _count(result["customers"])
         valid &= all(_number(result[key]) for key in ("mean_interactions", "median_interactions", "resolution_rate"))
         valid &= result["resolution_rate"] <= 100
+        valid &= all(result[key] is None or _number(result[key]) for key in ("mean_age", "median_age"))
+        valid &= all(_number(result[key]) for key in ("mean_orders_per_buyer", "median_orders_per_buyer"))
+        valid &= all(_number(result[key]) and result[key] <= 100 for key in ("repeat_buyer_rate", "active_buyer_rate"))
+        for key, length, total in (
+            ("gender_distribution", 3, result["customers"] or 0),
+            ("age_distribution", 8, result["customers"] or 0),
+            ("interaction_activity_distribution", 7, result["interaction_users"]),
+            ("purchase_order_distribution", 5, result["purchase_users"]),
+        ):
+            rows = result[key]
+            if not _rows(rows, (text, _count, lambda value: _number(value) and value <= 100)):
+                raise ValueError
+            valid &= len(rows) == length and len({row[0] for row in rows}) == length
+            valid &= sum(row[1] for row in rows) == total
+            valid &= all(math.isclose(rate, 100 * count / total if total else 0.0, abs_tol=1e-9)
+                         for _, count, rate in rows)
         valid &= isinstance(result["purchase_quantity"], str) and Decimal(result["purchase_quantity"]).is_finite()
         for key, checks in (
             ("action_types", (text, _count)),
@@ -82,6 +186,7 @@ def validate_result(result):
             valid &= _rows(result[key], checks)
         if not valid:
             raise ValueError
+        _validate_orders(result)
         keys = [key for key, _ in result["diagnostics"]]
         if len(keys) != len(set(keys)) or set(keys) != set(DIAGNOSTIC_KEYS):
             raise ValueError
@@ -106,7 +211,7 @@ def validate_result(result):
                 parse_timestamp(source["updated"])
         if sources != {"Actions", "Orders", "CustomerMerges", "Customers"}:
             raise ValueError
-    except (KeyError, TypeError, ValueError, OverflowError, InvalidOperation):
+    except (KeyError, TypeError, ValueError, OverflowError, DecimalException):
         raise StatisticsCacheError("Неполный или некорректный результат статистики.") from None
     return result
 
@@ -126,7 +231,7 @@ def load_result(path):
         with Path(path).open(encoding="utf-8") as stream:
             saved = json.load(stream, object_pairs_hook=_unique_object)
         if (not isinstance(saved, dict) or type(saved.get("schema_version")) is not int
-                or saved["schema_version"] != 1):
+                or saved["schema_version"] != SCHEMA_VERSION):
             raise StatisticsCacheError("Неподдерживаемый формат сохранённой статистики.")
         return validate_result(saved.get("result"))
     except FileNotFoundError:
@@ -139,7 +244,7 @@ def load_result(path):
 def save_result(path, result):
     """Replace one JSON only after validation, serialization, flush and fsync."""
     validate_result(result)
-    payload = json.dumps({"schema_version": 1, "result": result}, ensure_ascii=False, allow_nan=False)
+    payload = json.dumps({"schema_version": SCHEMA_VERSION, "result": result}, ensure_ascii=False, allow_nan=False)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".dataset-statistics-", suffix=".tmp", dir=path.parent)

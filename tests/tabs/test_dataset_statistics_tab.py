@@ -49,6 +49,30 @@ def sample_result():
         namespaces=(("offline1C", 3, 3, 0, 100.), ("unsupported", 0, 0, 0, 0.)),
         top_products=(("000001", "Рубашка", 2, 0, 1, 3),),
         diagnostics=tuple((key, 0) for key in cache.DIAGNOSTIC_KEYS), warnings=(),
+        gender_distribution=(("Мужчины", 0, 0.), ("Женщины", 0, 0.), ("Не указан", 2, 100.)),
+        age_distribution=tuple((name, 2 if name == "Возраст не определён" else 0,
+                                100. if name == "Возраст не определён" else 0.) for name in
+                               ("До 18 лет", "18–25 лет", "26–35 лет", "36–45 лет", "46–55 лет",
+                                "56–65 лет", "66 лет и старше", "Возраст не определён")),
+        mean_age=None, median_age=None, view_users=1, favorite_users=0, purchase_users=1,
+        view_purchase_users=0, favorite_purchase_users=0, all_interaction_type_users=0, repeat_buyers=0,
+        interaction_activity_distribution=(("1", 1, 50.), ("2–5", 1, 50.), ("6–10", 0, 0.), ("11–25", 0, 0.),
+                                           ("26–50", 0, 0.), ("51–100", 0, 0.), ("101+", 0, 0.)),
+        purchase_order_distribution=(("1 заказ", 1, 100.), ("2 заказа", 0, 0.), ("3–5 заказов", 0, 0.),
+                                     ("6–10 заказов", 0, 0.), ("11+ заказов", 0, 0.)),
+        mean_orders_per_buyer=1., median_orders_per_buyer=1., repeat_buyer_rate=0., active_buyer_rate=50.,
+        purchase_orders=1, mean_purchase_lines_per_order=1., median_purchase_lines_per_order=1.,
+        mean_purchase_units_per_order="4", median_purchase_units_per_order="4",
+        purchase_basket_distribution=(("1 позиция", 1, 100.), ("2 позиции", 0, 0.), ("3–5 позиций", 0, 0.),
+                                      ("6–10 позиций", 0, 0.), ("11+ позиций", 0, 0.)),
+        order_financials=(("RUB", 1, 1, "4", "40", "40", "40"), ("KZT", 0, 0, "0", "0", "0", "0")),
+        order_monthly_dynamics=(("2025-01", 1, "40", 0, "0"),),
+        store_statistics=(("RUB", "shop", "Магазин", 1, 1, 1, "4", "40", "40"),),
+        ordering_method_distribution=(("Не указано", 1, 100.),),
+        delivery_type_distribution=(("Не указано", 1, 100.),),
+        payment_type_distribution=(("Не указано", 1, 100.),),
+        delivery_financials=(("RUB", 0, "0", "0", "0"), ("KZT", 0, "0", "0", "0")),
+        mixed_currency_purchase_orders=0, unknown_currency_purchase_orders=0,
     ))
 
 
@@ -203,6 +227,25 @@ def assert_section_names(tab):
         "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация"]
 
 
+@pytest.mark.parametrize("outside,fractional", [(0, 0), (7, 13)])
+def test_technical_information_renders_order_filter_diagnostics(window, sample_result, outside, fractional):
+    _, tab = window
+    values = dict(sample_result["diagnostics"])
+    values.update(orders_outside_statistics_period=outside, fractional_quantity_order_lines=fractional)
+    sample_result["diagnostics"] = tuple(values.items())
+    tab.render(sample_result)
+    tab.sections.setCurrentIndex(4)
+    QApplication.processEvents()
+    assert tab.sections.tabText(4) == "Техническая информация"
+    diagnostics = next(table for table in tab.sections.widget(4).findChildren(QTableWidget)
+                       if table.horizontalHeaderItem(0).text() == "Диагностика")
+    rows = {diagnostics.item(row, 0).text(): diagnostics.item(row, 1).text()
+            for row in range(diagnostics.rowCount())}
+    assert rows["Заказы вне периода статистики"] == str(outside)
+    assert rows["Позиции с нецелым количеством"] == str(fractional)
+    assert not diagnostics.isHidden()
+
+
 def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_result):
     _, tab = window
     assert_section_names(tab)
@@ -231,11 +274,11 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
-        for index, counts in enumerate((2, 1, 2, 1)):
+        for index, counts in enumerate((2, 10, 2, 6)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = tab.sections.widget(3).findChildren(QTableWidget)[0]
-        assert customers.rowCount() == 6
-        assert customers.item(0, 1).text() == "2"
+        assert customers.rowCount() == 3
+        assert customers.item(2, 1).text() == "2"
         for index in range(5):
             for table in tab.sections.widget(index).findChildren(QTableWidget):
                 for row in range(table.rowCount()):
@@ -268,7 +311,7 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert coverage.item(0, 1).text() == "01.01.2025 — 01.01.2026"
     assert coverage.item(3, 1).text().startswith("Снимок данных от ")
     assert card_titles(tab.sections.widget(0)) == ["Действия", "С товаром", "Без товара", "Клиенты"]
-    assert card_titles(tab.sections.widget(1)) == ["Исходные заказы", "Исходные позиции заказов", "Клиенты", "Позиции покупок"]
+    assert card_titles(tab.sections.widget(1))[:4] == ["Заказы с покупкой", "Покупатели", "Позиции покупок", "Продано единиц"]
     assert card_titles(tab.sections.widget(2)) == ["Уникальные исходные идентификаторы", "Уникальные товары каталога",
                                                 "Распознанные взаимодействия", "Нераспознанные взаимодействия"]
     for index in range(5):
@@ -282,9 +325,9 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
         assert value in cells  # Technical source values are deliberately preserved.
     technical_values = {"ProsmotrProduktaVApiMethod", "offline1C", "CP"}
     presentation = "\n".join(labels + [value for value in cells if value not in technical_values])
-    for phrase in ("Actions", "Orders", "Customers", "Canonical", "canonical", "Snapshot", "UTC", "item interactions",
+    for phrase in ("Actions", "Orders", "Customers", "Canonical", "canonical", "Snapshot", "item interactions",
                    "Raw events", "System name", "VIEW", "FAVORITE", "PURCHASE", "Resolution", "Namespace",
-                   "Unique", "Resolved", "Unresolved", "Active users", "product", "unsupported", "Продано единиц"):
+                   "Unique", "Resolved", "Unresolved", "Active users", "product", "unsupported"):
         assert phrase not in presentation
     assert sample_result["coverage"] == original["coverage"]
     assert sample_result["purchase_quantity"] == "4"
@@ -337,13 +380,21 @@ def result_process(monkeypatch, result, *, suffix="", exit_code=0):
     monkeypatch.setattr(ui, "QProcess", Process)
 
 
+def set_profile_count(result, count):
+    result["customers"] = count
+    for key in ("gender_distribution", "age_distribution"):
+        result[key] = tuple((label, count if i == len(result[key]) - 1 else 0,
+                             100. if i == len(result[key]) - 1 else 0.)
+                            for i, (label, _, _) in enumerate(result[key]))
+
+
 def test_new_success_atomically_replaces_cache_before_render(window, sample_result, monkeypatch):
     _, tab = window
     cache.save_result(tab.cache_path, sample_result)
     previous = tab.cache_path.read_bytes()
     candidate = deepcopy(sample_result)
     candidate["calculated_at"] = "2026-09-25T09:47:28+00:00"
-    candidate["customers"] = 5
+    set_profile_count(candidate, 5)
     result_process(monkeypatch, candidate)
     render = tab.render
 
@@ -365,14 +416,14 @@ def test_new_success_atomically_replaces_cache_before_render(window, sample_resu
 
 
 @pytest.mark.parametrize("failure", ["incomplete", "bad_type", "bad_date", "bad_rows", "nan", "trailing_json",
-                                    "json_error", "deep_json", "prior_incomplete", "nonzero_exit", "crash", "replace", "fsync"])
+                                    "json_error", "deep_json", "prior_incomplete", "nonzero_exit", "crash", "replace", "fsync", "order_money"])
 def test_failed_new_result_preserves_cache_and_display(window, sample_result, monkeypatch, failure):
     _, tab = window
     cache.save_result(tab.cache_path, sample_result)
     tab.render(sample_result)
     previous = tab.cache_path.read_bytes()
     candidate = deepcopy(sample_result)
-    candidate["customers"] = 9
+    set_profile_count(candidate, 9)
     if failure == "incomplete":
         del candidate["top_products"]
     elif failure == "bad_type":
@@ -383,6 +434,8 @@ def test_failed_new_result_preserves_cache_and_display(window, sample_result, mo
         candidate["namespaces"] = [["offline1C"]]
     elif failure == "nan":
         candidate["resolution_rate"] = float("nan")
+    elif failure == "order_money":
+        candidate["mean_purchase_units_per_order"] = "NaN"
     elif failure in ("replace", "fsync"):
         def fail(*args):
             raise OSError("Нет доступа к файлу")
@@ -470,3 +523,98 @@ def test_period_uses_interaction_coverage_not_customer_snapshots(sample_result, 
     # Customers and merges still cover 2025: they must not enter the calculation.
     sample_result["coverage"][3]["intervals"] = sample_result["coverage"][2]["intervals"]
     assert ui._calculation_message(sample_result) == expected
+
+
+def test_customer_analytics_render_themes_scroll_and_no_duplication(window, sample_result):
+    _, tab = window
+    for dark in (False, True):
+        apply_app_theme(QApplication.instance(), dark)
+        tab.render(sample_result)
+        tab.sections.setCurrentIndex(3)
+        QApplication.processEvents()
+        page = tab.sections.widget(3)
+        assert page.widgetResizable()
+        assert page.widget().layout().spacing() == ui.BLOCK_SPACING
+        assert card_titles(page) == ["Количество клиентов", "Активные клиенты", "Покупатели", "Повторные покупатели",
+                                    "Средний возраст", "Медианный возраст"]
+        assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
+            "2", "2", "1", "0", "—", "—"]
+        headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "sectionHeader"]
+        assert headings == ["Портрет клиента", "Активность клиентов", "Покупательская активность"]
+        tables = page.findChildren(QTableWidget)
+        assert [table.rowCount() for table in tables] == [3, 8, 9, 7, 5, 3]
+        assert tables[2].item(8, 1).text() == "50.00"
+        for table in tables:
+            assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
+        assert page.verticalScrollBar().maximum() > 0
+        page.verticalScrollBar().setValue(page.verticalScrollBar().maximum())
+        QApplication.processEvents()
+        bottom = tables[-1].mapTo(page.viewport(), tables[-1].rect().bottomLeft())
+        assert page.viewport().rect().contains(bottom)
+        assert_section_names(tab)
+
+
+def test_old_complete_cache_opens_empty_without_modifying_it(app, sample_result):
+    # Even a complete payload with the old envelope must not be interpreted as v4.
+    ui.CACHE_PATH.write_text(json.dumps({"schema_version": 3, "result": sample_result}), encoding="utf-8")
+    saved = ui.CACHE_PATH.read_bytes()
+    window = QWidget()
+    tab = ui.DatasetStatisticsTab(window)
+    try:
+        assert [label.text() for label in tab.card_labels] == ["—"] * 4
+        assert not tab.sections.widget(3).findChildren(QTableWidget)
+        assert ui.CACHE_PATH.read_bytes() == saved
+        assert_section_names(tab)
+    finally:
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sample_result):
+    _, tab = window
+    original = deepcopy(sample_result)
+    expected_headers = [
+        ["Количество позиций", "Заказов", "Доля, %"],
+        ["Валюта", "Заказов", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа", "Медианная сумма заказа"],
+        ["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
+        ["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
+        ["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
+        ["Способ оформления", "Заказов", "Доля, %"],
+        ["Способ доставки", "Заказов", "Доля, %"],
+        ["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"],
+        ["Валюта", "Заказов с указанной стоимостью доставки", "Сумма доставки", "Средняя стоимость доставки", "Медианная стоимость доставки"],
+        ["Статус", "Позиции", "Доля, %", "Покупки"],
+    ]
+    for dark in (False, True):
+        apply_app_theme(QApplication.instance(), dark)
+        tab.render(sample_result)
+        assert_section_names(tab)
+        tab.sections.setCurrentIndex(1)
+        QApplication.processEvents()
+        page = tab.sections.widget(1)
+        assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+        assert card_titles(page)[:4] == ["Заказы с покупкой", "Покупатели", "Позиции покупок", "Продано единиц"]
+        assert len(card_titles(page)) == 8
+        labels = [label.text() for label in page.findChildren(QLabel)]
+        assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "sectionHeader"] == [
+            "Корзина заказа", "Финансовые показатели", "Динамика покупок", "Магазины и каналы",
+            "Оформление, доставка и оплата", "Статусы позиций"]
+        assert any("превышать 100%" in label for label in labels)
+        assert any(label.startswith("RUB —") for label in labels)
+        assert any(label.startswith("KZT —") for label in labels)
+        tables = page.findChildren(QTableWidget)
+        assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == expected_headers
+        assert [tables[1].item(i, 0).text() for i in range(2)] == ["RUB", "KZT"]
+        assert tables[1].rowCount() == 2  # No cross-currency total.
+        assert tables[1].item(0, 4).text() == "40.00"
+        assert tables[2].item(0, 0).text() == "01.2025"
+        assert page.widget().layout().itemAt(page.widget().layout().count() - 1).widget() is tables[-1]
+        for table in tables:
+            assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
+        assert page.verticalScrollBar().maximum() > 0
+        page.verticalScrollBar().setValue(page.verticalScrollBar().maximum())
+        QApplication.processEvents()
+        assert page.viewport().rect().contains(tables[-1].mapTo(page.viewport(), tables[-1].rect().bottomLeft()))
+    assert original == sample_result
+    assert ui._decimal_display("1234567.125") == "1 234 567.12"
+    assert ui._decimal_display("1234.500", money=False) == "1 234.5"
