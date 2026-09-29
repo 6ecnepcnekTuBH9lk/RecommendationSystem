@@ -16,6 +16,7 @@ import sqlite3
 from statistics import median
 from types import MappingProxyType
 
+from Application.analysis_filter import AnalysisFilter, options_from_snapshot
 from Application.interactions import InteractionBuilder, InteractionBuildError, classify_action_system_name
 from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
 from Application.mindbox.adapters._common import AdapterError, birth_date, identifier, number, objects, timestamp
@@ -133,6 +134,7 @@ class DatasetStatistics:
     product_gender_statistics: tuple[tuple[str, int, int, int, int, str], ...]
     product_season_statistics: tuple[tuple[str, int, int, int, int, str], ...]
     product_style_statistics: tuple[tuple[str, int, int, int, int, str], ...]
+    analysis_filter: AnalysisFilter = AnalysisFilter()
 
 
 def _distribution(counts, labels):
@@ -211,7 +213,7 @@ class _Interactions:
         return resolved
 
 
-def _customer_snapshot(root, as_of, check, progress):
+def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=None):
     path = database(root)
     genders, ages, groups = Counter(), Counter(), Counter()
     age_labels = ("До 18 лет", "18–25 лет", "26–35 лет", "36–45 лет", "46–55 лет", "56–65 лет",
@@ -222,10 +224,16 @@ def _customer_snapshot(root, as_of, check, progress):
     connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     try:
         count = 0
-        # Project only demographic fields; contacts/IDs/full profiles never enter memory.
-        for birthday, sex in connection.execute(
-                "SELECT json_extract(raw, '$.birthDate'), json_extract(raw, '$.sex') FROM profiles"):
+        # Stream identity and demographics only; never retain raw profiles/contacts.
+        seen = set()
+        for source_id, birthday, sex in connection.execute(
+                "SELECT id, json_extract(raw, '$.birthDate'), json_extract(raw, '$.sex') FROM profiles ORDER BY id"):
             check()
+            if cohort is not None:
+                canonical_id = identities.resolve(source_id)
+                if canonical_id not in cohort or canonical_id in seen:
+                    continue
+                seen.add(canonical_id)
             count += 1
             if progress and (count == 1 or count % 10000 == 0):
                 progress(f"Клиенты: {count:,}".replace(",", " "))
@@ -256,7 +264,7 @@ def _customer_snapshot(root, as_of, check, progress):
 
 
 def _catalog_metadata(path):
-    """Project five fields only, preserving the validated catalog's last-row precedence."""
+    """Project analytical fields only, preserving the validated catalog's last-row precedence."""
     def value(row, column):
         return (row.get(column) or "").strip() or None
 
@@ -273,7 +281,7 @@ def _catalog_metadata(path):
                 metadata[code] = ProductMetadata(
                     value(row, "НазваниеНаСайте") or value(row, "Номенклатура") or "",
                     value(row, "КатегорияНаСайте"), value(row, "ПолНоменклатуры"),
-                    value(row, "СезонНоски"), value(row, "СтилеваяГруппа"))
+                    value(row, "Коллекция"), value(row, "СтилеваяГруппа"), value(row, "ВидНоменклатуры"))
         return MappingProxyType(metadata)
 
 
@@ -320,13 +328,50 @@ def _catalog_snapshot(path):
         raise CatalogError("Не удалось прочитать номенклатуру или справочник категорий.") from None
 
 
+def _statistics_sources(root):
+    """Shared source prerequisites for calculation and option discovery, under lock."""
+    if not (root / "canonical/catalog.json").is_file():
+        raise ValueError("Нет canonical dataset. Сначала загрузите данные Mindbox.")
+    data = catalog(root)
+    entries = {name: _entries(data, name) for name in ("actions", "orders")}
+    if any(entries.values()) and not data["customer_merges"]:
+        raise ValueError("Нет canonical CustomerMerges: невозможно подтвердить identity клиентов.")
+    return data, entries
+
+
+def _source_directory(root, name, entry):
+    """Shared physical source check for readiness and the statistics reader."""
+    directory = checked_directory(root, entry["directory"], name)
+    if len(part_files(directory, name)) != entry["parts"]:
+        raise ValueError("Canonical parts mismatch")
+    return directory
+
+
+def load_analysis_options(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATALOG_PATH):
+    """Reference/manifest-only readiness snapshot; never scan Actions or Orders."""
+    root = Path(raw_root)
+    if not (root / "canonical/catalog.json").is_file():
+        raise ValueError("Для установки отбора необходимо загрузить исходные данные и справочники.")
+    with storage_lock(root):
+        data, entries = _statistics_sources(root)
+        if not all(entries.values()) or not data["customer_merges"] or not database(root).is_file():
+            raise ValueError("Для установки отбора необходимо загрузить исходные данные и справочники.")
+        for name, sources in (*entries.items(), ("customer_merges", [data["customer_merges"]])):
+            for entry in sources:
+                _source_directory(root, name, entry)
+        _, metadata, _ = _catalog_snapshot(catalog_path)
+        period = shared_intervals(*[[(e["since"], e["until"]) for e in entries[name]]
+                                  for name in ("actions", "orders")])
+        return options_from_snapshot(metadata, period)
+
+
 def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATALOG_PATH,
-                         progress=None, cancelled=None):
+                         progress=None, cancelled=None, analysis_filter=AnalysisFilter()):
     """Scan published canonical data once. No legacy fallback or silent skipping.
 
-    Raw order counts/statuses include every saved snapshot. Item interactions and
-    purchase quantity use the first snapshot, as OrderSnapshots(diagnose=True)
-    does in training diagnostics. Conflicts are explicitly reported as incomplete.
+    Default counts/statuses retain the source-snapshot baseline. With a filter,
+    business orders/statuses use matching lines of unique first snapshots.
+    Source dedup diagnostics remain independent of product selection.
     """
     root = Path(raw_root)
     if not (root / "canonical/catalog.json").is_file():
@@ -338,13 +383,10 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
 
     with storage_lock(root):
         check()
-        data = catalog(root)
+        data, entries = _statistics_sources(root)
         selection = MindboxSelectionConfig(**data["selection"])
-        entries = {name: _entries(data, name) for name in ("actions", "orders")}
         merge = data["customer_merges"]
         warnings = []
-        if any(entries.values()) and not merge:
-            raise ValueError("Нет canonical CustomerMerges: невозможно подтвердить identity клиентов.")
         if merge and any(datetime.fromisoformat(e["since"]) < datetime.fromisoformat(merge["since"])
                          or datetime.fromisoformat(e["until"]) > datetime.fromisoformat(merge["until"])
                          for group in entries.values() for e in group):
@@ -354,9 +396,7 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             count = 0
             for entry in sources:
                 check()
-                directory = checked_directory(root, entry["directory"], name)
-                if len(part_files(directory, name)) != entry["parts"]:
-                    raise ValueError("Canonical parts mismatch")
+                directory = _source_directory(root, name, entry)
                 for raw in iter_export(name, input_dir=directory):
                     check()
                     count += 1
@@ -368,14 +408,33 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
                                         for raw in records("customer_merges", [merge] if merge else []))
         builder = InteractionBuilder(selection.interaction_rules())
         product_catalog, metadata, categories = _catalog_snapshot(catalog_path)
+        period = shared_intervals(*[[(entry["since"], entry["until"]) for entry in entries[name]]
+                                    for name in ("actions", "orders")])
+        if period:
+            analysis_filter = options_from_snapshot(metadata, period).normalize(analysis_filter)
         products = ProductResolver(product_catalog)
+
+        def matches(product):
+            if not analysis_filter.product_restricted:
+                return True
+            item = products.resolve(product, strict=False)
+            return analysis_filter.matches(metadata.get(item.item_id))
+
         product_aggregates = ProductAggregates(metadata, categories)
         collected = _Interactions(products)
+        accepted_counts = Counter()
+        business_orders = business_lines = 0
         action_types, statuses = Counter(), Counter()
         action_users, order_users = set(), set()
+        accepted_action_users, accepted_order_users = set(), set()
         with_product = missing_action_customer = raw_lines = 0
         action_aggregates = ActionAggregates()
         for raw in records("actions", entries["actions"]):
+            if analysis_filter.start_date is not None:
+                # Unmapped technical actions may have no timestamp; do not invent one.
+                occurred_at = timestamp(raw, "dateTimeUtc", required=False)
+                if occurred_at is not None and not analysis_filter.contains(occurred_at):
+                    continue
             name = adapt_action_system_name(raw)
             action_types[name] += 1
             with_product += bool(objects(raw, "products"))
@@ -393,21 +452,26 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             except InteractionBuildError:
                 # Valid mapped event with no products: not an import error.
                 continue
+            interactions = tuple(item for item in interactions if matches(item.product))
+            if not interactions:
+                continue
             action_aggregates.add(action, interactions)
             for interaction in interactions:
+                accepted_action_users.add(interaction.customer_id)
+                accepted_counts[interaction.interaction_type.value] += 1
                 resolved = collected.add(interaction)
                 if resolved is not None:
                     product_aggregates.add(resolved)
 
         snapshots = OrderSnapshots()
         order_aggregates = OrderAggregates()
-        period = shared_intervals(*[[(entry["since"], entry["until"]) for entry in entries[name]]
-                                    for name in ("actions", "orders")])
         outside_period = fractional_lines = 0
         for raw in records("orders", entries["orders"]):
             ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
             if not any(start <= ordered_at < end for start, end in period):
                 outside_period += 1
+                continue
+            if not analysis_filter.contains(ordered_at):
                 continue
             eligible_lines = []
             for line in objects(raw, "lines", required=True):
@@ -419,15 +483,26 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             order_users.add(identities.resolve(identifier(raw, "customer.ids.mindboxId")))
             for line in eligible_lines:
                 raw_lines += 1
-                statuses[identifier(line, "status.ids.externalId")] += 1
+                if not analysis_filter.active:
+                    statuses[identifier(line, "status.ids.externalId")] += 1
             if not snapshots.accept(raw, diagnose=True):
                 continue
             buyer = None
             purchases = []
             eligible_order = {**raw, "lines": eligible_lines}
-            for line in adapt_order(order_for_adapter(eligible_order), identities, product_namespaces=selection.order_product_namespaces):
+            lines = adapt_order(order_for_adapter(eligible_order), identities, product_namespaces=selection.order_product_namespaces)
+            lines = tuple(line for line in lines if matches(line.product))
+            if analysis_filter.product_restricted and not lines:
+                continue
+            business_orders += 1
+            business_lines += len(lines)
+            accepted_order_users.add(identities.resolve(identifier(raw, "customer.ids.mindboxId")))
+            for line in lines:
+                if analysis_filter.active:
+                    statuses[line.line_status] += 1
                 interaction = builder.from_order_line(line)
                 if interaction is not None:
+                    accepted_counts[interaction.interaction_type.value] += 1
                     resolved = collected.add(interaction)
                     if resolved is not None:
                         product_aggregates.add(resolved)
@@ -440,7 +515,8 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
         check()
         calculated_at = datetime.now(timezone.utc)
         customers, customer_coverage, genders, ages, mean_age, median_age = _customer_snapshot(
-            root, calculated_at.astimezone().date(), check, progress)
+            root, calculated_at.astimezone().date(), check, progress,
+            cohort=set(collected.users) if analysis_filter.active else None, identities=identities)
         user_types = Counter(collected.user_types.values())
         view_users = sum(n for mask, n in user_types.items() if mask & 1)
         favorite_users = sum(n for mask, n in user_types.items() if mask & 2)
@@ -490,12 +566,16 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             calculated_at=calculated_at.isoformat(),
             coverage=tuple(_coverage(name.title(), entries[name]) for name in ("actions", "orders"))
                      + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
-            actions=interactions.actions_total, orders=snapshots.raw, order_lines=raw_lines, customers=customers,
-            action_customers=len(action_users), order_customers=len(order_users), interaction_users=len(collected.users),
+            analysis_filter=analysis_filter,
+            actions=sum(accepted_counts.values()) if analysis_filter.active else interactions.actions_total,
+            orders=business_orders if analysis_filter.active else snapshots.raw,
+            order_lines=business_lines if analysis_filter.active else raw_lines, customers=customers,
+            action_customers=len(accepted_action_users if analysis_filter.active else action_users),
+            order_customers=len(accepted_order_users if analysis_filter.active else order_users), interaction_users=len(collected.users),
             actions_with_product=with_product, actions_without_product=interactions.actions_total - with_product,
-            view_interactions=interactions.view_interactions, favorite_interactions=interactions.favorite_interactions,
-            purchase_interactions=interactions.purchase_interactions, purchase_quantity=str(collected.quantity),
-            mean_interactions=interactions.total_interactions / len(collected.users) if collected.users else 0.0,
+            view_interactions=accepted_counts["VIEW"], favorite_interactions=accepted_counts["FAVORITE"],
+            purchase_interactions=accepted_counts["PURCHASE"], purchase_quantity=str(collected.quantity),
+            mean_interactions=sum(accepted_counts.values()) / len(collected.users) if collected.users else 0.0,
             median_interactions=float(median(collected.users.values())) if collected.users else 0.0,
             unique_source_products=resolution.unique_source_product_keys,
             unique_resolved_items=resolution.unique_resolved_catalog_items,
@@ -520,7 +600,7 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             median_orders_per_buyer=float(median(collected.purchase_orders.values())) if purchase_users else 0.0,
             repeat_buyer_rate=100 * repeat_buyers / purchase_users if purchase_users else 0.0,
             active_buyer_rate=100 * purchase_users / len(collected.users) if collected.users else 0.0,
-            orders_without_purchase=len(snapshots.fingerprints) - order_aggregates.orders,
+            orders_without_purchase=business_orders - order_aggregates.orders,
             **order_aggregates.result(),
             **action_aggregates.result(),
             **product_result,

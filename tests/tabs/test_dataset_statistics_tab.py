@@ -22,6 +22,8 @@ from Application.theme.apply_theme import apply_app_theme
 from Application import statistics_cache as cache
 from Application.settings.set_status import set_ready_status, schedule_status_reset
 
+pytestmark = pytest.mark.usefixtures("window_settings")
+
 
 @pytest.fixture
 def app():
@@ -577,8 +579,8 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
 
 
 def test_old_complete_cache_opens_empty_without_modifying_it(app, sample_result):
-    # Even a complete payload with the old envelope must not be interpreted as v8.
-    ui.CACHE_PATH.write_text(json.dumps({"schema_version": 7, "result": sample_result}), encoding="utf-8")
+    # Even a complete payload with the old envelope must not be interpreted as v9.
+    ui.CACHE_PATH.write_text(json.dumps({"schema_version": 8, "result": sample_result}), encoding="utf-8")
     saved = ui.CACHE_PATH.read_bytes()
     window = QWidget()
     tab = ui.DatasetStatisticsTab(window)

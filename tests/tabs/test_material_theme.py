@@ -56,7 +56,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.minimumWidth() < window.maximumWidth()
         assert window.minimumHeight() < window.maximumHeight()
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-            "Получение данных", "Статистика и анализ", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+            "Получение данных", "Установка фильтров", "Статистика и анализ", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
         assert window.purchases_table.columnCount() == 6
         assert window.recs_table.columnCount() == 7
         assert window.mb_progress.isTextVisible()
@@ -78,7 +78,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert load_status_row.itemAt(1).widget() is window.status_files_container
         assert isinstance(window.status_files_layout, QHBoxLayout)
         assert window.status_files_layout.itemAt(0).widget() is window.prefix
-        acquisition, processing = window.tabs.widget(0), window.tabs.widget(2)
+        acquisition, processing = window.tabs.widget(0), window.tabs.widget(3)
         headings = [label.text() for label in acquisition.findChildren(QLabel)
                     if label.property("class") == "sectionHeader"]
         assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка из Mindbox"}

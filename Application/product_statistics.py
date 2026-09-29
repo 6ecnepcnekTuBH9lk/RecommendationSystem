@@ -13,8 +13,9 @@ class ProductMetadata:
     name: str = ""
     category: str | None = None
     gender: str | None = None
-    season: str | None = None
+    collection: str | None = None
     style_group: str | None = None
+    nomenclature_type: str | None = None
 
 
 @dataclass
@@ -62,7 +63,7 @@ class ProductAggregates:
             if p:
                 purchased.append((code, metadata.name, p, len(item.users[purchase]), str(item.quantity), v, f))
             for attribute, values in groups.items():
-                label = getattr(metadata, attribute)
+                label = getattr(metadata, "collection" if attribute == "season" else attribute)
                 label = (label or "").strip() or None if attribute == "category" else label or "Не указано"
                 row = values.setdefault(label, [0, 0, 0, 0, Decimal(0)])
                 for index, value in enumerate((1, v, f, p, item.quantity)):

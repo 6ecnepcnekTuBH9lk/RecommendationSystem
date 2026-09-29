@@ -4,7 +4,7 @@ import json
 import sys
 from decimal import Decimal
 
-from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt
+from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
 
 from Application.loading_errors import format_error
 from Application.paths import ICONS_DIR, PROJECT_ROOT
+from Application.analysis_filter import AnalysisFilter
+from Application.analysis_filter_settings import load_filter
 from Application.statistics_period import shared_intervals
 from Application.settings.set_status import set_status_processing, schedule_status_reset
 from Application.statistics_cache import CACHE_PATH, load_result, parse_timestamp, save_result, validate_result
@@ -48,6 +50,9 @@ def _date_time(value):
 
 def _calculation_message(result):
     """Present shared interaction coverage, retaining gaps; never use snapshots."""
+    selection = AnalysisFilter.from_dict(result["analysis_filter"])
+    if selection.start_date is not None:
+        return "Статистика рассчитана за " + selection.summary().split(";", 1)[0].removeprefix("Отбор → ") + "."
     sources = {source["source"]: source["intervals"] for source in result["coverage"]}
     merged = shared_intervals(sources.get("Actions", ()), sources.get("Orders", ()))
     if not merged:
@@ -319,11 +324,19 @@ DIAGNOSTIC_LABELS = {
 
 
 class DatasetStatisticsTab(QWidget):
+    calculation_running_changed = pyqtSignal(bool)
+
     def __init__(self, window):
         super().__init__(window)
         self.setObjectName("datasetStatisticsTab")
         self.window = window
         self.cache_path = CACHE_PATH
+        self.displayed_result = None
+        filter_tab = getattr(window, "analysis_filter_tab", None)
+        self.configured_filter = filter_tab.configured_filter if filter_tab is not None else load_filter()
+        if filter_tab is not None:
+            filter_tab.filter_changed.connect(self.set_analysis_filter)
+            self.calculation_running_changed.connect(filter_tab.set_statistics_running)
         self.process = None
         self.pending = None
         self.buffer = bytearray()
@@ -417,9 +430,22 @@ class DatasetStatisticsTab(QWidget):
             # Reuse the shared timer: a reset from another operation must not
             # leave an active statistics process displaying "ready".
             timer.timeout.connect(self._keep_processing_status)
+        self._update_description()
         saved = load_result(self.cache_path)
         if saved is not None:
             self.render(saved)
+
+    def set_analysis_filter(self, selection):
+        self.configured_filter = selection
+        self._update_description()
+
+    def _update_description(self):
+        text = SOURCE_DESCRIPTION.replace("Отбор не установлен", self.configured_filter.summary())
+        if self.displayed_result is not None:
+            text += " Дата и время расчета: " + _date_time(self.displayed_result["calculated_at"])
+            if AnalysisFilter.from_dict(self.displayed_result["analysis_filter"]) != self.configured_filter:
+                text += ". Отбор изменен → требуется пересчитать статистику."
+        self.description.setText(text)
 
     def _pages(self):
         while self.sections.count():
@@ -452,6 +478,7 @@ class DatasetStatisticsTab(QWidget):
         self.status.setText("Расчет… Показанные ранее данные обновятся только после успешного завершения.")
         process = QProcess(self)
         self.process = process
+        self.calculation_running_changed.emit(True)
         timer = getattr(self.window, "_status_reset_timer", None)
         if timer is not None:
             timer.stop()
@@ -461,7 +488,9 @@ class DatasetStatisticsTab(QWidget):
         process.readyReadStandardError.connect(lambda: process.readAllStandardError())
         process.finished.connect(self._finished)
         process.errorOccurred.connect(self._error)
-        process.start(sys.executable, ["-u", str(PROJECT_ROOT / "scripts/dataset_statistics.py")])
+        self.running_filter = self.configured_filter
+        process.start(sys.executable, ["-u", str(PROJECT_ROOT / "scripts/dataset_statistics.py"),
+                                      "--analysis-filter", json.dumps(self.running_filter.to_dict(), ensure_ascii=True)])
 
     def _keep_processing_status(self):
         if self.process is not None:
@@ -484,6 +513,8 @@ class DatasetStatisticsTab(QWidget):
                     if self.pending is not None:
                         raise ValueError
                     self.pending = validate_result(value)
+                    if AnalysisFilter.from_dict(self.pending["analysis_filter"]) != self.running_filter:
+                        raise ValueError
                 elif kind == "error":
                     self.failure = format_error(value, context="Ошибка расчета статистики")
                 elif kind != "progress":
@@ -503,6 +534,7 @@ class DatasetStatisticsTab(QWidget):
         if self.buffer.strip():
             self.failure = "Некорректный ответ процесса статистики."
         process, self.process = self.process, None
+        self.calculation_running_changed.emit(False)
         self.kill_timer.stop()
         self.refresh.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -557,7 +589,8 @@ class DatasetStatisticsTab(QWidget):
     def render(self, result):
         for label, name in zip(self.card_labels, ("actions", "orders", "order_lines", "customers")):
             label.setText(_number(result[name]))
-        self.description.setText(SOURCE_DESCRIPTION + " Дата и время расчета: " + _date_time(result["calculated_at"]))
+        self.displayed_result = result
+        self._update_description()
         self.status.setText("\n".join([_calculation_message(result),
                             *(WARNING_LABELS.get(warning, warning) for warning in result["warnings"]
                               if warning != "Позиции заказов с нецелым количеством исключены из статистики.")]))
@@ -570,7 +603,8 @@ class DatasetStatisticsTab(QWidget):
             coverage.append((SOURCE_LABELS[source["source"]], period or "—",
                              "/".join(SOURCE_KIND_LABELS.get(kind, kind) for kind in source["source_kinds"]) or "—"))
         _table(technical, ["Источник", "Период / состояние", "Источник данных"], coverage)
-        base = [("Действия", result["actions"]), ("Заказы", result["orders"]),
+        filtered = AnalysisFilter.from_dict(result["analysis_filter"]).active
+        base = [("Взаимодействия выбранного среза" if filtered else "Действия", result["actions"]), ("Заказы", result["orders"]),
                 ("Позиции заказов", result["order_lines"]), ("Профили клиентов", result["customers"]),
                 ("Просмотры", result["view_interactions"]),
                 ("Добавления в избранное", result["favorite_interactions"]),
@@ -614,7 +648,8 @@ class DatasetStatisticsTab(QWidget):
             ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
         _table(technical, ["Диагностика", "Количество"],
                [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
-               + [("Исходные заказы", result["orders"]), ("Исходные позиции заказов", result["order_lines"]),
+               + [("Заказы выбранного среза" if filtered else "Исходные заказы", result["orders"]),
+                  ("Позиции заказов выбранного среза" if filtered else "Исходные позиции заказов", result["order_lines"]),
                   ("Распознанные взаимодействия", result["resolved_interactions"]),
                   ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
                   ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")])

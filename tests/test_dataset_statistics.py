@@ -434,7 +434,7 @@ def test_new_cache_roundtrip_old_cache_ignored_without_overwrite(dataset, tmp_pa
     result = asdict(calculate(dataset))
     path = tmp_path / "statistics.json"
     cache.save_result(path, result)
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 8
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 9
     assert cache.load_result(path) == json.loads(json.dumps(result))
     path.write_text(json.dumps({"schema_version": 7, "result": result}), encoding="utf-8")
     before = path.read_bytes()
@@ -676,7 +676,7 @@ def test_cache_decimal_arithmetic_overflow_is_safe(dataset, tmp_path):
     result["order_financials"][0][4:7] = ["1e999999", "1e999999", "1e999999"]
     result["order_monthly_dynamics"] = [["2026-01", 1, "9e999999", 0, "0"], ["2026-02", 0, "9e999999", 0, "0"]]
     path = tmp_path / "overflow.json"
-    path.write_text(json.dumps({"schema_version": 8, "result": result}), encoding="utf-8")
+    path.write_text(json.dumps({"schema_version": 9, "result": result}), encoding="utf-8")
     assert cache.load_result(path) is None
 
 
@@ -984,7 +984,7 @@ def test_product_resolution_reuse_and_single_pass(dataset, monkeypatch):
 
 def test_product_groups_quantity_and_unresolved_purchase(dataset):
     _, catalog, _ = dataset
-    catalog.write_text("КодНоменклатуры|Номенклатура|НазваниеНаСайте|КатегорияНаСайте|ПолНоменклатуры|СезонНоски|СтилеваяГруппа\n"
+    catalog.write_text("КодНоменклатуры|Номенклатура|НазваниеНаСайте|КатегорияНаСайте|ПолНоменклатуры|Коллекция|СтилеваяГруппа\n"
                        "000001|A| Shirt | Рубашки |Мужской|Всесезон|Деловой\n"
                        "000002|B||Брюки|Мужской| |Casual\n000003||||||\n", encoding="utf-8-sig")
     view, favorite = DEFAULT_SELECTION.view_action_system_names[0], DEFAULT_SELECTION.favorite_action_system_names[0]
@@ -1069,8 +1069,8 @@ def test_catalog_metadata_projection_immutable_and_missing_values(tmp_path, enco
     assert catalog.item_ids == metadata.keys()
     assert metadata["000001"].name == "Fallback"
     assert metadata["000001"].category == "A,B;C/D"
-    assert metadata["000002"].name == "" and metadata["000002"].season is None
-    assert len(asdict(metadata["000001"])) == 5
+    assert metadata["000002"].name == "" and metadata["000002"].collection is None
+    assert len(asdict(metadata["000001"])) == 6
     with pytest.raises(TypeError):
         metadata["bad"] = metadata["000001"]
     with pytest.raises(FrozenInstanceError):

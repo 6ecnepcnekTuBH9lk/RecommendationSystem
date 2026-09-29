@@ -10,12 +10,13 @@ from pathlib import Path
 import tempfile
 
 from Application.paths import USER_SETTINGS_DIR
+from Application.analysis_filter import AnalysisFilter
 from Application.order_statistics import BASKET_LABELS, CURRENCIES
 from Application.action_statistics import AVAILABILITY_LABELS, FAVORITE_BUCKETS, VIEW_BUCKETS
 
 
 CACHE_PATH = USER_SETTINGS_DIR / "dataset_statistics.json"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 logger = logging.getLogger(__name__)
 
 COUNT_FIELDS = (
@@ -87,7 +88,12 @@ def _validate_orders(result):
     currency = lambda value: value in CURRENCIES
     money = _decimal_string
     total = result["purchase_orders"]
-    if total + result["orders_without_purchase"] != dict(result["diagnostics"])["orders_unique"]:
+    business_orders = total + result["orders_without_purchase"]
+    source_orders = dict(result["diagnostics"])["orders_unique"]
+    active = AnalysisFilter.from_dict(result["analysis_filter"]).active
+    if (business_orders > source_orders if active else business_orders != source_orders):
+        raise ValueError
+    if active and result["orders"] != business_orders:
         raise ValueError
     for key in ("mean_purchase_lines_per_order", "median_purchase_lines_per_order"):
         if not _number(result[key]):
@@ -218,7 +224,8 @@ def _validate_actions(result):
     diagnostics = dict(result["diagnostics"])
     if sum(r[1] for r in prices) + diagnostics["unknown_currency_view_price_actions"] > parameters:
         raise ValueError
-    if parameters + 2 * diagnostics["ambiguous_product_view_actions"] > views:
+    minimum = 1 if AnalysisFilter.from_dict(result["analysis_filter"]).product_restricted else 2
+    if parameters + minimum * diagnostics["ambiguous_product_view_actions"] > views:
         raise ValueError
 
 
@@ -287,6 +294,12 @@ def validate_result(result):
     if not isinstance(result, dict):
         raise StatisticsCacheError("Неполный или некорректный результат статистики.")
     try:
+        selection = AnalysisFilter.from_dict(result["analysis_filter"])
+        if selection.active and result["actions"] != sum(result[k] for k in (
+                "view_interactions", "favorite_interactions", "purchase_interactions")):
+            raise ValueError
+        if selection.product_restricted and result["unresolved_interactions"]:
+            raise ValueError
         valid = all(_count(result[key]) for key in COUNT_FIELDS)
         valid &= result["customers"] is None or _count(result["customers"])
         valid &= all(_number(result[key]) for key in ("mean_interactions", "median_interactions", "resolution_rate"))

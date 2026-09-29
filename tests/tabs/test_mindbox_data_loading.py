@@ -890,7 +890,7 @@ def test_all_tabs_themes_and_legacy_controls(app):
     QApplication.processEvents()
     wait_until(lambda: not window.mb_controller.tasks)
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-        "Получение данных", "Статистика и анализ", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+        "Получение данных", "Установка фильтров", "Статистика и анализ", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
     assert window.btn_load is not None and window.start_train is not None
     window.mb_controller.start()
     for dark in (False, True, False):
