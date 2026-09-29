@@ -45,7 +45,8 @@ class Coverage:
 class DatasetStatistics:
     calculated_at: str
     coverage: tuple[Coverage, ...]
-    actions: int
+    source_actions: int  # Date-scoped canonical events, before product selection.
+    total_interactions: int  # Accepted VIEW + FAVORITE + PURCHASE item interactions.
     orders: int
     order_lines: int
     customers: int | None
@@ -355,7 +356,9 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
                          progress=None, cancelled=None, analysis_filter=AnalysisFilter()):
     """Scan published canonical data once. No legacy fallback or silent skipping.
 
-    Default counts/statuses retain the source-snapshot baseline. With a filter,
+    Source Actions are date-scoped, independent of product selection; item totals
+    always count accepted builder records. Default order counts/statuses retain
+    the source-snapshot baseline. With a filter,
     business orders/statuses use matching lines of unique first snapshots.
     Source dedup diagnostics remain independent of product selection.
     """
@@ -419,7 +422,7 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             if analysis_filter.start_date is not None:
                 # Unmapped technical actions may have no timestamp; do not invent one.
                 occurred_at = timestamp(raw, "dateTimeUtc", required=False)
-                if occurred_at is not None and not analysis_filter.contains(occurred_at):
+                if occurred_at is None or not analysis_filter.contains(occurred_at):
                     continue
             name = adapt_action_system_name(raw)
             action_types[name] += 1
@@ -553,7 +556,8 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             coverage=tuple(_coverage(name.title(), entries[name]) for name in ("actions", "orders"))
                      + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
             analysis_filter=analysis_filter,
-            actions=sum(accepted_counts.values()) if analysis_filter.active else interactions.actions_total,
+            source_actions=interactions.actions_total,
+            total_interactions=sum(accepted_counts.values()),
             orders=business_orders if analysis_filter.active else snapshots.raw,
             order_lines=business_lines if analysis_filter.active else raw_lines, customers=customers,
             action_customers=len(accepted_action_users if analysis_filter.active else action_users),

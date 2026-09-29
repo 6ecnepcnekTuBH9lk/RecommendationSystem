@@ -16,11 +16,11 @@ from Application.action_statistics import AVAILABILITY_LABELS, FAVORITE_BUCKETS,
 
 
 CACHE_PATH = USER_SETTINGS_DIR / "dataset_statistics.json"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 logger = logging.getLogger(__name__)
 
 COUNT_FIELDS = (
-    "actions", "orders", "order_lines", "action_customers", "order_customers", "interaction_users",
+    "source_actions", "total_interactions", "orders", "order_lines", "action_customers", "order_customers", "interaction_users",
     "actions_with_product", "actions_without_product", "view_interactions", "favorite_interactions",
     "purchase_interactions", "unique_source_products", "unique_resolved_items",
     "resolved_interactions", "unresolved_interactions",
@@ -295,7 +295,7 @@ def validate_result(result):
         raise StatisticsCacheError("Неполный или некорректный результат статистики.")
     try:
         selection = AnalysisFilter.from_dict(result["analysis_filter"])
-        if selection.active and result["actions"] != sum(result[k] for k in (
+        if result["total_interactions"] != sum(result[k] for k in (
                 "view_interactions", "favorite_interactions", "purchase_interactions")):
             raise ValueError
         if selection.product_restricted and result["unresolved_interactions"]:
@@ -330,6 +330,9 @@ def validate_result(result):
         ):
             valid &= _rows(result[key], checks)
         if not valid:
+            raise ValueError
+        if (sum(count for _, count in result["action_types"]) != result["source_actions"]
+                or result["actions_with_product"] + result["actions_without_product"] != result["source_actions"]):
             raise ValueError
         _validate_orders(result)
         _validate_actions(result)

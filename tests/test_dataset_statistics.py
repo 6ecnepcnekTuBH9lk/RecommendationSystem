@@ -95,7 +95,7 @@ def test_counts_classification_identity_resolution_and_no_legacy(dataset):
     for filename in ("orders.csv", "views.csv", "favorites.csv"):
         (root / filename).write_text("not a CSV; must never be read")
     result = calculate(dataset)
-    assert (result.actions, result.orders, result.order_lines, result.customers) == (7, 1, 4, 3)
+    assert (result.source_actions, result.orders, result.order_lines, result.customers) == (7, 1, 4, 3)
     assert (result.view_interactions, result.favorite_interactions, result.purchase_interactions) == (4, 2, 3)
     assert (result.actions_with_product, result.actions_without_product) == (5, 2)
     assert (result.action_customers, result.order_customers, result.interaction_users) == (2, 1, 2)
@@ -117,7 +117,7 @@ def test_counts_classification_identity_resolution_and_no_legacy(dataset):
     assert result.coverage[-1].source_kinds == ("MANUAL",)
     assert result.warnings == ()
     with pytest.raises(FrozenInstanceError):
-        result.actions = 0
+        result.source_actions = 0
     json.dumps(asdict(result))  # DTO has no retained per-user/per-event objects.
 
 
@@ -153,7 +153,7 @@ def test_all_coverage_gaps_unpaired_days_and_manual_precedence(dataset):
                                                5, "2026-01-05T00:00:00+00:00", "2026-01-06T00:00:00+00:00")
     save(root, data)
     result = calculate(dataset)
-    assert result.actions == 1 and result.orders == 0
+    assert result.source_actions == 1 and result.orders == 0
     assert len(result.coverage[0].intervals) == 2
     assert result.coverage[0].source_kinds == ("API", "MANUAL")
     assert "CustomerMerges" in result.warnings[0]
@@ -204,7 +204,7 @@ def test_empty_sources_and_missing_canonical(dataset, tmp_path):
     data["actions"] = data["orders"] = {}
     save(root, data)
     result = calculate(dataset)
-    assert result.actions == result.orders == result.resolution_rate == result.median_interactions == 0
+    assert result.source_actions == result.orders == result.resolution_rate == result.median_interactions == 0
     missing = tmp_path / "missing"
     with pytest.raises(ValueError, match="canonical dataset"):
         calculate_statistics(raw_root=missing, catalog_path=catalog)
@@ -216,7 +216,7 @@ def test_cli_result_and_structured_failure(dataset, capsys):
     assert cli_main(["--raw-root", str(root), "--catalog", str(catalog)]) == 0
     messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert messages[-1]["event"] == "result"
-    assert messages[-1]["value"]["actions"] == 7
+    assert messages[-1]["value"]["source_actions"] == 7
     assert cli_main(["--raw-root", str(root / "missing")]) == 1
     assert json.loads(capsys.readouterr().out)["event"] == "error"
 
@@ -227,7 +227,7 @@ def test_unmapped_event_does_not_require_full_action_payload(dataset):
     (directory / "actions_part_001.json").write_text(json.dumps({"customerActions": [
         {"actionTemplate": {"ids": {"systemName": "Unmapped.Mobile.Event"}}}]}))
     result = calculate(dataset)
-    assert result.actions == result.actions_without_product == 1
+    assert result.source_actions == result.actions_without_product == 1
     assert result.action_customers == 0
     assert dict(result.diagnostics)["actions_without_customer_id"] == 1
     assert any("customer ID" in warning for warning in result.warnings)
@@ -434,7 +434,7 @@ def test_new_cache_roundtrip_old_cache_ignored_without_overwrite(dataset, tmp_pa
     result = asdict(calculate(dataset))
     path = tmp_path / "statistics.json"
     cache.save_result(path, result)
-    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 9
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 10
     assert cache.load_result(path) == json.loads(json.dumps(result))
     path.write_text(json.dumps({"schema_version": 7, "result": result}), encoding="utf-8")
     before = path.read_bytes()
@@ -676,7 +676,7 @@ def test_cache_decimal_arithmetic_overflow_is_safe(dataset, tmp_path):
     result["order_financials"][0][4:7] = ["1e999999", "1e999999", "1e999999"]
     result["order_monthly_dynamics"] = [["2026-01", 1, "9e999999", 0, "0"], ["2026-02", 0, "9e999999", 0, "0"]]
     path = tmp_path / "overflow.json"
-    path.write_text(json.dumps({"schema_version": 9, "result": result}), encoding="utf-8")
+    path.write_text(json.dumps({"schema_version": cache.SCHEMA_VERSION, "result": result}), encoding="utf-8")
     assert cache.load_result(path) is None
 
 
@@ -837,7 +837,7 @@ def test_action_multi_product_unresolved_malformed_and_raw_semantics(dataset):
     assert diagnostics["ambiguous_product_view_actions"] == 1
     assert diagnostics["mapped_without_product"] == diagnostics["unknown_candidate"] == 1
     assert diagnostics["unknown_currency_view_price_actions"] == 0
-    assert result.actions == 7 and result.actions_with_product == 5
+    assert result.source_actions == 7 and result.actions_with_product == 5
     assert sum(n for _, n in result.action_types) == 7
     payload = json.dumps(asdict(result), ensure_ascii=False)
     assert all(token not in payload for token in ('"old"', '"new"', '"other"', '"event"', '"customer_id"', '"productView"'))
@@ -1258,3 +1258,22 @@ def test_reference_snapshot_covers_both_files(dataset, monkeypatch, changed_file
     monkeypatch.setattr(statistics, '_category_names', changed)
     with pytest.raises(CatalogError, match='во время чтения'):
         calculate(dataset)
+
+@pytest.mark.parametrize('field,value', [('total_interactions', 99), ('source_actions', 99),
+                                        ('source_actions', True), ('total_interactions', -1)])
+def test_source_and_item_cache_invariants(dataset, field, value):
+    from Application.statistics_cache import StatisticsCacheError, validate_result
+    result = asdict(calculate(dataset))
+    result[field] = value
+    with pytest.raises(StatisticsCacheError):
+        validate_result(result)
+
+
+def test_previous_schema_nine_rejected(dataset, tmp_path):
+    from Application.statistics_cache import load_result, SCHEMA_VERSION
+    assert SCHEMA_VERSION == 10
+    path = tmp_path / 'old-statistics.json'
+    path.write_text(json.dumps({'schema_version': 9, 'result': asdict(calculate(dataset))}), encoding='utf-8')
+    before = path.read_bytes()
+    assert load_result(path) is None
+    assert path.read_bytes() == before

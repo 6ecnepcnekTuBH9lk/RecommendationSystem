@@ -1,67 +1,37 @@
 """Statistics presentation and subprocess lifecycle; no raw-data business rules."""
 
 import json
+import logging
 import sys
 from decimal import Decimal
+from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt, pyqtSignal, QObject, QRunnable, QThreadPool, QStandardPaths
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader,
+    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog,
 )
 
+from Application.statistics_presentation import (
+    SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING, source_action_rows, source_action_quality_rows,
+)
 from Application.loading_errors import format_error
 from Application.paths import ICONS_DIR, PROJECT_ROOT
 from Application.analysis_filter import AnalysisFilter
 from Application.analysis_filter_settings import load_filter
-from Application.statistics_period import shared_intervals
-from Application.settings.set_status import set_status_processing, schedule_status_reset
-from Application.statistics_cache import CACHE_PATH, load_result, parse_timestamp, save_result, validate_result
+from Application.settings.set_status import set_status_processing, schedule_status_reset, set_status_ok, set_status_error
+from Application.statistics_export import export_statistics, suggested_filename
+from Application.statistics_cache import CACHE_PATH, load_result, save_result, validate_result
+from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, WARNING_LABELS, DIAGNOSTIC_LABELS,
+                                                 _date, _date_time, _calculation_message)
 
 
 BLOCK_SPACING = 18
 SOURCE_DESCRIPTION = "Исходные данные Mindbox. Отбор не установлен."
 PROCESSING_STATUS = "Расчет статистики..."
-SOURCE_LABELS = {"Actions": "Действия", "Orders": "Заказы", "Customers": "Клиенты",
-                 "CustomerMerges": "Объединения клиентов"}
 PROGRESS_LABELS = {"actions": "Действия", "orders": "Заказы", "customer_merges": "Объединения клиентов"}
-SOURCE_KIND_LABELS = {"API": "Через API", "MANUAL": "Ручная загрузка", "MIXED": "Смешанный"}
-WARNING_LABELS = {
-    "CustomerMerges не покрывает весь период: canonical identity может быть неполной.":
-        "История объединений клиентов не покрывает весь период: сопоставление клиентов может быть неполным.",
-    "Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.":
-        "Есть конфликтующие снимки заказов: взаимодействия с товарами рассчитаны по первому снимку.",
-    "Часть Actions не содержит customer ID; число клиентов Actions учитывает только известные ID.":
-        "Часть событий не содержит идентификатора клиента; число клиентов учитывает только известные идентификаторы.",
-    "Canonical Customers отсутствует: число профилей неизвестно.":
-        "Данные клиентов отсутствуют: число профилей неизвестно.",
-}
-
-
-def _date(value):
-    return parse_timestamp(value).strftime("%d.%m.%Y")
-
-
-def _date_time(value):
-    return parse_timestamp(value).astimezone().strftime("%d.%m.%Y %H:%M:%S")
-
-
-def _calculation_message(result):
-    """Present shared interaction coverage, retaining gaps; never use snapshots."""
-    selection = AnalysisFilter.from_dict(result["analysis_filter"])
-    if selection.start_date is not None:
-        return "Статистика рассчитана за " + selection.summary().split(";", 1)[0].removeprefix("Отбор → ") + "."
-    sources = {source["source"]: source["intervals"] for source in result["coverage"]}
-    merged = shared_intervals(sources.get("Actions", ()), sources.get("Orders", ()))
-    if not merged:
-        return "Статистика рассчитана."
-    periods = "; ".join(
-        f"{start:%d.%m.%Y} - {end:%d.%m.%Y}"
-        for start, end in merged
-    )
-    return ("Статистика рассчитана за период: " if len(merged) == 1 else "Статистика рассчитана за периоды: ") + periods + "."
 
 
 def _number(value):
@@ -196,14 +166,7 @@ def _actions_page(layout, result):
     table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
            [(currency, n, _decimal_display(mean), _decimal_display(middle))
             for currency, n, mean, middle in result["view_price_statistics"]])
-    _section_heading(layout, "Исходные события")
-    table(["Системное название", "Количество", "Доля, %"],
-           [(name, count, 100 * count / result["actions"] if result["actions"] else 0)
-            for name, count in result["action_types"]])
-    diagnostics = dict(result["diagnostics"])
-    table(["Классификация событий", "Количество"],
-           [(DIAGNOSTIC_LABELS[key], diagnostics[key]) for key in
-            ("mapped_view_actions", "mapped_favorite_actions", "unmapped_actions", "mapped_without_product")])
+
 
 
 def _products_page(layout, result):
@@ -301,26 +264,24 @@ def _orders_page(layout, result):
             for name, count, purchase in result["line_statuses"]])
 
 
-DIAGNOSTIC_LABELS = {
-    "ambiguous_product_view_actions": "Просмотры с неоднозначным набором товаров",
-    "unknown_currency_view_price_actions": "Просмотры с ценой без определённой валюты",
-    "orders_outside_statistics_period": "Заказы вне периода статистики",
-    "fractional_quantity_order_lines": "Позиции с нецелым количеством",
-    "mapped_view_actions": "События просмотра",
-    "mapped_favorite_actions": "События добавления в избранное",
-    "unmapped_actions": "Неклассифицированные события",
-    "mapped_without_product": "Классифицированные события без товара",
-    "actions_without_customer_id": "События без идентификатора клиента",
-    "unknown_candidate": "Товары, отсутствующие в справочнике",
-    "unsupported_namespace": "Неподдерживаемая система идентификаторов товаров",
-    "invalid_id": "Некорректные идентификаторы товаров",
-    "orders_unique": "Уникальные снимки заказов",
-    "orders_duplicate_identical": "Одинаковые дубли заказов",
-    "orders_duplicate_conflicting": "Конфликтующие дубли заказов",
-    "unique_order_lines": "Позиции после исключения дублей заказов",
-    "purchase_lines": "Позиции покупок после исключения дублей",
-    "filtered_by_status": "Позиции, исключённые по статусу (без дублей)",
-}
+class _ExportSignals(QObject):
+    finished = pyqtSignal(bool)
+
+
+class _ExportTask(QRunnable):
+    def __init__(self, result, path):
+        super().__init__()
+        self.result, self.path = result, path
+        self.signals = _ExportSignals()
+
+    def run(self):
+        try:
+            export_statistics(self.result, self.path)
+        except Exception:
+            logging.getLogger(__name__).warning("Не удалось экспортировать статистику.")
+            self.signals.finished.emit(False)
+        else:
+            self.signals.finished.emit(True)
 
 
 class DatasetStatisticsTab(QWidget):
@@ -332,6 +293,7 @@ class DatasetStatisticsTab(QWidget):
         self.window = window
         self.cache_path = CACHE_PATH
         self.displayed_result = None
+        self._export_task = None
         filter_tab = getattr(window, "analysis_filter_tab", None)
         self.configured_filter = filter_tab.configured_filter if filter_tab is not None else load_filter()
         if filter_tab is not None:
@@ -362,6 +324,10 @@ class DatasetStatisticsTab(QWidget):
             QIcon(str(ICONS_DIR / "failure.png")),
             " Отменить",
         )
+        self.export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт статистики")
+        self.export_button.setIconSize(QSize(17, 17))
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self.export)
 
         self.refresh.setIconSize(QSize(17, 17))
         self.cancel_button.setIconSize(QSize(17, 17))
@@ -415,6 +381,7 @@ class DatasetStatisticsTab(QWidget):
         progress_layout.addWidget(self.progress_text, 0, 0)
 
         controls.addWidget(self.refresh)
+        controls.addWidget(self.export_button)
         controls.addWidget(self.cancel_button)
         controls.addWidget(self.status)
         controls.addWidget(self.progress_container, 1)
@@ -434,6 +401,36 @@ class DatasetStatisticsTab(QWidget):
         saved = load_result(self.cache_path)
         if saved is not None:
             self.render(saved)
+
+    def _update_export_button(self):
+        self.export_button.setEnabled(self.process is None and self.displayed_result is not None
+                                      and self._export_task is None)
+
+    def export(self):
+        if self.process is not None or self.displayed_result is None or self._export_task is not None:
+            return
+        directory = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт статистики",
+                                            str(Path(directory) / suggested_filename(self.displayed_result)), "Excel (*.xlsx)")
+        if not path or self.process is not None or self._export_task is not None:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        # Capture this snapshot; later render() replaces it rather than mutating it.
+        self._export_task = _ExportTask(self.displayed_result, path)
+        self._export_task.signals.finished.connect(self._export_finished)
+        self._update_export_button()
+        QThreadPool.globalInstance().start(self._export_task)
+
+    def _export_finished(self, success):
+        self._export_task = None
+        self._update_export_button()
+        if success:
+            set_status_ok(self.window, "Статистика экспортирована")
+        else:
+            set_status_error(self.window, "Не удалось экспортировать статистику")
+        schedule_status_reset(self.window, 5)
+        self._keep_processing_status()
 
     def set_analysis_filter(self, selection):
         self.configured_filter = selection
@@ -478,6 +475,7 @@ class DatasetStatisticsTab(QWidget):
         self.status.setText("Расчет… Показанные ранее данные обновятся только после успешного завершения.")
         process = QProcess(self)
         self.process = process
+        self._update_export_button()
         self.calculation_running_changed.emit(True)
         timer = getattr(self.window, "_status_reset_timer", None)
         if timer is not None:
@@ -556,6 +554,7 @@ class DatasetStatisticsTab(QWidget):
             else:
                 self.render(self.pending)
         self.pending = None
+        self._update_export_button()
         schedule_status_reset(self.window, 0)
         if self.closing:
             QTimer.singleShot(0, self.window.close)
@@ -587,9 +586,10 @@ class DatasetStatisticsTab(QWidget):
         return super().eventFilter(watched, event)
 
     def render(self, result):
-        for label, name in zip(self.card_labels, ("actions", "orders", "order_lines", "customers")):
+        for label, name in zip(self.card_labels, ("total_interactions", "orders", "order_lines", "customers")):
             label.setText(_number(result[name]))
         self.displayed_result = result
+        self._update_export_button()
         self._update_description()
         self.status.setText("\n".join([_calculation_message(result),
                             *(WARNING_LABELS.get(warning, warning) for warning in result["warnings"]
@@ -604,7 +604,7 @@ class DatasetStatisticsTab(QWidget):
                              "/".join(SOURCE_KIND_LABELS.get(kind, kind) for kind in source["source_kinds"]) or "—"))
         _table(technical, ["Источник", "Период / состояние", "Источник данных"], coverage)
         filtered = AnalysisFilter.from_dict(result["analysis_filter"]).active
-        base = [("Взаимодействия выбранного среза" if filtered else "Действия", result["actions"]), ("Заказы", result["orders"]),
+        base = [("Количество взаимодействий", result["total_interactions"]), ("Заказы", result["orders"]),
                 ("Позиции заказов", result["order_lines"]), ("Профили клиентов", result["customers"]),
                 ("Просмотры", result["view_interactions"]),
                 ("Добавления в избранное", result["favorite_interactions"]),
@@ -616,6 +616,10 @@ class DatasetStatisticsTab(QWidget):
                 ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
                 ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")]
         _table(technical, ["Показатель", "Значение"], base)
+        _section_heading(technical, SOURCE_ACTIONS_HEADING)
+        _table(technical, ["Системное название", "Количество", "Доля, %"], source_action_rows(result))
+        _section_heading(technical, ACTION_QUALITY_HEADING)
+        _table(technical, ["Классификация событий", "Количество"], source_action_quality_rows(result))
         _actions_page(actions, result)
         _orders_page(orders, result)
         _products_page(products, result)

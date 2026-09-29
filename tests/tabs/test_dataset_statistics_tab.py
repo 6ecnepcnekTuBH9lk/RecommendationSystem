@@ -42,7 +42,7 @@ def sample_result():
         calculated_at=stamp,
         coverage=tuple(Coverage(name, interval if name != "Customers" else (), ("API",), stamp)
                        for name in ("Actions", "Orders", "CustomerMerges", "Customers")),
-        actions=3, orders=1, order_lines=1, customers=2, action_customers=2, order_customers=1,
+        source_actions=3, total_interactions=3, orders=1, order_lines=1, customers=2, action_customers=2, order_customers=1,
         interaction_users=2, actions_with_product=2, actions_without_product=1,
         view_interactions=2, favorite_interactions=0, purchase_interactions=1, purchase_quantity="4",
         mean_interactions=1.5, median_interactions=1.5, unique_source_products=1, unique_resolved_items=1,
@@ -146,14 +146,16 @@ def test_success_theme_switch_and_error_preserves_previous_result(window, monkey
     catalog = canonical_process(monkeypatch, tmp_path)
     tab.start()
     process = tab.process
+    assert not tab.export_button.isEnabled()
     tab.start()
     assert tab.process is process
     wait_until(lambda: tab.process is None)
+    assert tab.export_button.isEnabled()
     assert tab.card_labels[0].text() == "0"
     assert tab.card_labels[3].text() == "—"
     assert tab.sections.count() == 5
     saved = tab.cache_path.read_bytes()
-    assert cache.load_result(tab.cache_path)["actions"] == 0
+    assert cache.load_result(tab.cache_path)["total_interactions"] == 0
     from Application.dataset_statistics import calculate_statistics
 
     result = asdict(calculate_statistics(raw_root=tmp_path, catalog_path=catalog))
@@ -173,6 +175,7 @@ def test_success_theme_switch_and_error_preserves_previous_result(window, monkey
     assert "не обновлены" in tab.status.text()
     assert tab.card_labels[0].text() == "0"
     assert tab.refresh.isEnabled() and not tab.cancel_button.isEnabled()
+    assert tab.export_button.isEnabled()
     assert tab.cache_path.read_bytes() == saved
     wait_until(lambda: tab.window.status_label.text() == "Готов к работе")
 
@@ -183,6 +186,7 @@ def test_cancel_and_close_reap_child_without_blocking_event_loop(window, monkeyp
     cache.save_result(tab.cache_path, sample_result)
     tab.render(sample_result)
     saved = tab.cache_path.read_bytes()
+    assert tab.export_button.isEnabled()
 
     class SlowProcess(QProcess):
         def start(self, program, arguments):
@@ -195,6 +199,7 @@ def test_cancel_and_close_reap_child_without_blocking_event_loop(window, monkeyp
     timer.start(10)
     tab.start()
     wait_until(lambda: tab.process.state() == QProcess.ProcessState.Running)
+    assert not tab.export_button.isEnabled()
     QTest.qWait(50)
     if close:
         window.close()
@@ -207,6 +212,7 @@ def test_cancel_and_close_reap_child_without_blocking_event_loop(window, monkeyp
     assert not tab.kill_timer.isActive()
     assert tab.cache_path.read_bytes() == saved
     assert tab.card_labels[0].text() == "3"
+    assert tab.export_button.isEnabled()
     wait_until(lambda: window.status_label.text() == "Готов к работе")
 
 
@@ -218,6 +224,7 @@ def test_failed_start_resets_controls(window, monkeypatch):
     assert "Не удалось запустить" in tab.status.text()
     assert tab.refresh.isEnabled()
     assert not tab.cancel_button.isEnabled()
+    assert not tab.export_button.isEnabled()
     wait_until(lambda: tab.window.status_label.text() == "Готов к работе")
 
 
@@ -232,10 +239,11 @@ def test_initial_page_has_no_internal_heading_or_cache(window):
     assert card_titles(tab)[:4] == ["Количество взаимодействий", "Количество заказов",
                                    "Количество позиций в заказах", "Количество клиентов"]
     controls = tab.layout().itemAt(2).layout()
-    assert controls.count() == 4
-    assert [controls.itemAt(i).widget() for i in range(4)] == [
-        tab.refresh, tab.cancel_button, tab.status, tab.progress_container]
-    assert controls.stretch(3) == 1
+    assert controls.count() == 5
+    assert [controls.itemAt(i).widget() for i in range(5)] == [
+        tab.refresh, tab.export_button, tab.cancel_button, tab.status, tab.progress_container]
+    assert controls.stretch(4) == 1
+    assert not tab.export_button.isEnabled()
 
 
 def card_titles(page):
@@ -278,9 +286,9 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert technical.widgetResizable()
         layout = technical.widget().layout()
         assert layout.spacing() == ui.BLOCK_SPACING
-        assert layout.count() == 3
-        coverage, summary, diagnostics = [layout.itemAt(i).widget() for i in range(3)]
-        assert technical.findChildren(QTableWidget) == [coverage, summary, diagnostics]
+        assert layout.count() == 7
+        coverage, summary, raw, quality, diagnostics = technical.findChildren(QTableWidget)
+        assert technical.findChildren(QTableWidget) == [coverage, summary, raw, quality, diagnostics]
         assert [coverage.horizontalHeaderItem(i).text() for i in range(3)] == [
             "Источник", "Период / состояние", "Источник данных"]
         assert [coverage.item(i, 0).text() for i in range(4)] == [
@@ -292,7 +300,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
-        for index, counts in enumerate((9, 7, 9, 6)):
+        for index, counts in enumerate((7, 7, 9, 6)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = tab.sections.widget(3).findChildren(QTableWidget)[0]
         assert customers.rowCount() == 3
@@ -343,9 +351,9 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
         assert value in cells  # Technical source values are deliberately preserved.
     technical_values = {"ProsmotrProduktaVApiMethod", "offline1C", "CP"}
     presentation = "\n".join(labels + [value for value in cells if value not in technical_values])
-    for phrase in ("Actions", "Orders", "Customers", "Canonical", "canonical", "Snapshot", "item interactions",
-                   "Raw events", "System name", "VIEW", "FAVORITE", "PURCHASE", "Resolution", "Namespace",
-                   "Unique", "Resolved", "Unresolved", "Active users", "product", "unsupported"):
+    for phrase in ("Orders", "Customers", "Canonical", "canonical", "Snapshot", "item interactions",
+                   "Raw events", "System name", "PURCHASE", "Resolution", "Namespace",
+                   "Unique", "Resolved", "Unresolved", "Active users", "unsupported"):
         assert phrase not in presentation
     assert sample_result["coverage"] == original["coverage"]
     assert sample_result["purchase_quantity"] == "4"
@@ -364,7 +372,7 @@ def test_saved_result_loads_automatically_without_process(app, sample_result, mo
         assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен. Дата и время расчета: " + expected
         assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
         assert_section_names(tab)
-        assert len(tab.sections.widget(4).findChildren(QTableWidget)) == 3
+        assert len(tab.sections.widget(4).findChildren(QTableWidget)) == 5
     finally:
         window.deleteLater()
         app.processEvents()
@@ -445,7 +453,7 @@ def test_failed_new_result_preserves_cache_and_display(window, sample_result, mo
     if failure == "incomplete":
         del candidate["top_products"]
     elif failure == "bad_type":
-        candidate["actions"] = True
+        candidate["total_interactions"] = True
     elif failure == "bad_date":
         candidate["calculated_at"] = "not a date"
     elif failure == "bad_rows":
@@ -499,7 +507,8 @@ def test_information_style_and_existing_icons_in_both_themes(window):
             assert label.alignment() & alignment
             assert label.font().italic()
             assert label.font().pointSize() == 10
-        for button, filename in ((tab.refresh, "statistic.png"), (tab.cancel_button, "failure.png")):
+        for button, filename in ((tab.refresh, "statistic.png"), (tab.export_button, "export.png"),
+                                 (tab.cancel_button, "failure.png")):
             expected = QIcon(str(ui.ICONS_DIR / filename))
             assert not button.icon().isNull()
             assert button.icon().pixmap(button.iconSize()).toImage() == expected.pixmap(button.iconSize()).toImage()
@@ -653,8 +662,6 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
         ["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
         ["Доступность", "Просмотров", "Доля, %"],
         ["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
-        ["Системное название", "Количество", "Доля, %"],
-        ["Классификация событий", "Количество"],
     ]
     for dark in (False, True):
         apply_app_theme(QApplication.instance(), dark)
@@ -667,7 +674,7 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             assert card_titles(page) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["2", "0", "1", "0"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
-                "АКТИВНОСТЬ КЛИЕНТОВ", "КАНАЛЫ ВЗАИМОДЕЙСТВИЙ", "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ", "ИСХОДНЫЕ СОБЫТИЯ"]
+                "АКТИВНОСТЬ КЛИЕНТОВ", "КАНАЛЫ ВЗАИМОДЕЙСТВИЙ", "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
             assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
@@ -675,8 +682,6 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             assert tables[6].rowCount() == 2
             assert [tables[6].item(i, 0).text() for i in range(2)] == ["RUB", "KZT"]
             assert tables[6].item(0, 2).text() == "100.25"
-            assert tables[7].item(0, 0).text() == "ProsmotrProduktaVApiMethod"
-            assert tables[8].rowCount() == 4
             for table in tables:
                 assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
             wait_until(lambda: page.verticalScrollBar().maximum() > 0)
@@ -863,3 +868,148 @@ def test_category_display_name_only_and_final_headers(window, sample_result):
         orders = [label.text() for label in tab.sections.widget(1).findChildren(QLabel) if label.property('class') == 'statisticsSection']
         assert 'МАГАЗИНЫ И КАНАЛЫ — RUB' in orders and 'МАГАЗИНЫ И КАНАЛЫ — KZT' in orders
         assert not any('ПО РОССИИ' in value or 'ПО КАЗАХСТАНУ' in value for value in orders)
+
+
+def test_export_cache_result_and_dialog_cancel(window, sample_result, monkeypatch):
+    parent, tab = window
+    cache.save_result(tab.cache_path, sample_result)
+    restored = ui.DatasetStatisticsTab(parent)
+    assert restored.displayed_result is not None and restored.export_button.isEnabled()
+    restored.deleteLater()
+    tab.render(sample_result)
+    status, page_status = parent.status_label.text(), tab.status.text()
+    calls = []
+    def dialog(*args):
+        assert args[1] == 'Экспорт статистики' and args[3] == 'Excel (*.xlsx)'
+        assert args[2].endswith('Статистика_2026-09-24_09-47-28.xlsx')
+        return '', ''
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', dialog)
+    monkeypatch.setattr(ui, 'export_statistics', lambda *args: calls.append(args))
+    tab.export_button.click()
+    assert not calls and tab._export_task is None
+    assert parent.status_label.text() == status and tab.status.text() == page_status
+    assert tab.export_button.isEnabled()
+
+
+@pytest.mark.parametrize('suffix', ['', '.xlsx', '.XLSX'])
+def test_export_uses_displayed_snapshot_despite_new_filter(window, sample_result, monkeypatch, tmp_path, suffix):
+    from Application.analysis_filter import AnalysisFilter
+    from Application.statistics_export import export_statistics
+    from openpyxl import load_workbook
+    parent, tab = window
+    tab.render(sample_result)
+    cache.save_result(tab.cache_path, sample_result)
+    before = tab.cache_path.read_bytes()
+    tab.set_analysis_filter(AnalysisFilter(nomenclature_types=('Новый фильтр',)))
+    tab.pending = {**sample_result, 'total_interactions': 999}
+    status = tab.status.text()
+    destination = tmp_path / ('export' + suffix)
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(destination), 'Excel (*.xlsx)'))
+    calls = []
+    def save(result, path):
+        assert result is tab.displayed_result is sample_result
+        calls.append(path)
+        export_statistics(result, path)
+    monkeypatch.setattr(ui, 'export_statistics', save)
+    tab.export_button.click()
+    wait_until(lambda: tab._export_task is None)
+    assert len(calls) == 1 and calls[0] == str(destination) + ('' if suffix else '.xlsx')
+    assert parent.status_label.text() == 'Статистика экспортирована'
+    assert parent._status_reset_timer.interval() == 5000
+    assert tab.status.text() == status and tab.cache_path.read_bytes() == before
+    assert tab.export_button.isEnabled()
+    book = load_workbook(calls[0])
+    metadata = {row[0]: row[1] for row in book['Сводка'].values if row[0]}
+    assert metadata['Вид номенклатуры'] == 'Все значения'
+    book.close()
+
+
+@pytest.mark.parametrize('error', [PermissionError, RuntimeError])
+def test_export_error_preserves_snapshot_cache_and_page_status(window, sample_result, monkeypatch, tmp_path, error):
+    parent, tab = window
+    tab.render(sample_result)
+    cache.save_result(tab.cache_path, sample_result)
+    previous = tab.cache_path.read_bytes(), tab.status.text(), deepcopy(sample_result)
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
+    def failed(*args):
+        raise error('synthetic')
+    monkeypatch.setattr(ui, 'export_statistics', failed)
+    tab.export_button.click()
+    wait_until(lambda: tab._export_task is None)
+    assert parent.status_label.text() == 'Не удалось экспортировать статистику'
+    assert parent._status_reset_timer.interval() == 5000
+    assert tab.displayed_result is sample_result
+    assert (tab.cache_path.read_bytes(), tab.status.text(), sample_result) == previous
+    assert tab.export_button.isEnabled()
+
+
+def test_export_contains_every_visible_table_and_card(window, sample_result, tmp_path):
+    from Application.statistics_export import export_statistics, SHEET_NAMES
+    from openpyxl import load_workbook
+    _, tab = window
+    tab.render(sample_result)
+    path = tmp_path / 'complete.xlsx'
+    export_statistics(sample_result, path)
+    book = load_workbook(path)
+    for index, name in enumerate(SHEET_NAMES[1:]):
+        sheet = book[name]
+        rows = list(sheet.values)
+        page = tab.sections.widget(index)
+        for table in page.findChildren(QTableWidget):
+            headers = tuple(table.horizontalHeaderItem(i).text() for i in range(table.columnCount()))
+            assert any(row[:len(headers)] == headers for row in rows), (name, headers)
+        for title in card_titles(page):
+            assert any(row[0] == title for row in rows), (name, title)
+    book.close()
+
+
+def test_export_runs_in_background_and_holds_original_snapshot(window, sample_result, monkeypatch, tmp_path):
+    from threading import Event, get_ident
+    _, tab = window
+    tab.render(sample_result)
+    entered, release = Event(), Event()
+    gui_thread = get_ident()
+    calls = []
+    def save(result, path):
+        assert get_ident() != gui_thread
+        calls.append(result)
+        entered.set()
+        assert release.wait(10)
+    monkeypatch.setattr(ui, 'export_statistics', save)
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
+    try:
+        tab.export_button.click()
+        wait_until(entered.is_set)
+        assert not tab.export_button.isEnabled()
+        tab.export()
+        tab.render(deepcopy(sample_result))
+        assert calls == [sample_result] and calls[0] is not tab.displayed_result
+    finally:
+        release.set()
+    wait_until(lambda: tab._export_task is None)
+    assert tab.export_button.isEnabled()
+
+@pytest.mark.parametrize('filtered', [False, True])
+def test_source_actions_only_technical_and_total_card(window, sample_result, filtered):
+    from Application.analysis_filter import AnalysisFilter
+    _, tab = window
+    sample_result['source_actions'] = 100
+    sample_result['actions_with_product'] = 2
+    sample_result['actions_without_product'] = 98
+    sample_result['action_types'] = (('ProsmotrProdukta', 90), ('ProsmotrKategoriiProduktov', 10))
+    sample_result['diagnostics'] = tuple((key, 88 if key == 'mapped_without_product' else value)
+                                         for key, value in sample_result['diagnostics'])
+    if filtered:
+        sample_result['analysis_filter'] = AnalysisFilter(nomenclature_types=('Рубашки',)).to_dict()
+    tab.render(sample_result)
+    assert tab.card_labels[0].text() == '3'
+    actions = tab.sections.widget(0)
+    assert not any(t.horizontalHeaderItem(0).text() in ('Системное название', 'Классификация событий')
+                   for t in actions.findChildren(QTableWidget))
+    technical = tab.sections.widget(4)
+    table = next(t for t in technical.findChildren(QTableWidget) if t.horizontalHeaderItem(0).text() == 'Системное название')
+    assert [float(table.item(i, 2).text()) for i in range(2)] == [90., 10.]
+    quality = next(t for t in technical.findChildren(QTableWidget) if t.horizontalHeaderItem(0).text() == 'Классификация событий')
+    rows = {quality.item(i, 0).text(): quality.item(i, 1).text() for i in range(quality.rowCount())}
+    assert rows[ui.DIAGNOSTIC_LABELS['mapped_without_product']] == '88'
+    assert tab.export_button.isEnabled()
