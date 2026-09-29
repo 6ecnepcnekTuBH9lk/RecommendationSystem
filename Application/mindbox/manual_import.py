@@ -127,6 +127,7 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
     against the current canonical merges using the explicit interaction interval.
     """
     from . import canonical_storage as store
+    from .store_catalog import StoreSourceCollector, update_store_catalog
     root = Path(raw_root).resolve()
     if not isinstance(selection, MindboxSelectionConfig) or not isinstance(window, TrainingBatchWindow):
         raise ManualImportError("Требуются корректные период и правила отбора.")
@@ -158,10 +159,12 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
         with tempfile.TemporaryDirectory(prefix=".manual-interactions-", dir=root / "canonical") as temporary:
             staging = Path(temporary)
             counts = {}
+            collector = StoreSourceCollector()
             for name, path in (("actions", actions), ("orders", orders)):
                 counts[name] = _copy_validate(path, staging, name, cancelled=cancelled, progress=progress,
                                validate=lambda directory: store.validate_interactions(
-                                   name, directory, resolver, selection, cancelled=cancelled, progress=progress))
+                                   name, directory, resolver, selection, cancelled=cancelled, progress=progress,
+                                   store_collector=collector if name == "orders" else None))
             check_cancel(cancelled)
             store.require_manual_merges(data, since, until)
             old = data["manual_interactions"]
@@ -188,6 +191,7 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
                         committed = True  # Uncertain outcome: leave cleanup to a later safe operation.
                     if not committed:
                         shutil.rmtree(store.checked_directory(root, pair["actions"]["directory"], "actions").parent)
+            update_store_catalog(root, data, pair["orders"], collector)
             if old:
                 try:
                     shutil.rmtree(store.checked_directory(root, old["actions"]["directory"], "actions").parent)

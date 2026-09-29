@@ -108,6 +108,20 @@ Canonical catalog v1 читается без записи на диск, с manu
 snapshots v1/v2 остаются читаемыми; explicit legacy manifest можно передать в прежний
 training pipeline. Автомиграции и смешивания legacy с canonical нет.
 
+## Каталог магазинов после импорта
+
+Manual interactions использует тот же `StoreSourceCollector`, что и API publish:
+частоты externalId → название собираются в существующей валидации Orders, до
+адаптера, без второго прохода. После успешного commit пары Actions/Orders вызывается
+обновление `canonical/store_catalog.json` под storage lock. Ошибка этого derived
+индекса не отменяет canonical commit; следующий `ensure_store_catalog` восстановит
+недостающие сводки. Уже валидные сводки переиспользуются.
+
+При замене manual периода агрегат пересчитывается из source summaries по общему
+правилу `effective_entries`. Сводки перекрытых daily Orders сохраняются, поэтому
+сужение manual периода возвращает их вклад без повторного raw scan. Пользовательские
+назначения городов не меняются. Формат индекса описан в CANONICAL_STORAGE.md.
+
 ## CLI без сети
 
 ~~~text

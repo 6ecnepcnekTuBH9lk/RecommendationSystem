@@ -16,7 +16,7 @@ from Application.tabs.dataset_statistics_tab import create_dataset_statistics_ta
 from Application.tabs.train_model_tab import create_train_model_widgets_tab
 from Application.tabs.create_results_tab import create_result_widgets_tab
 from Application.settings.set_status import set_ready_status
-from Application.theme.apply_theme import apply_app_theme
+from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
 
 
 class MainWindow(QMainWindow):
@@ -239,7 +239,7 @@ class MainWindow(QMainWindow):
 # -----------------------------------------------MAIN-------------------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")
+    prepare_app_theme(app)
 
     window = MainWindow()
     window.apply_theme(True)

@@ -21,7 +21,7 @@ from Application.interactions import InteractionBuilder, InteractionBuildError, 
 from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
 from Application.mindbox.adapters._common import AdapterError, birth_date, identifier, number, objects, timestamp
 from Application.mindbox.canonical_customers import database
-from Application.mindbox.canonical_storage import catalog, checked_directory, storage_lock
+from Application.mindbox.canonical_storage import catalog, checked_directory, storage_lock, effective_entries as _entries
 from Application.mindbox.identity import CustomerIdResolver
 from Application.mindbox.order_dedup import OrderSnapshots
 from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT, iter_export, part_files
@@ -157,20 +157,6 @@ def _histogram_median(counts):
         seen += count
     return sum(values) / 2
 
-
-def _entries(data, name):
-    """All current coverage, including gaps and unpaired days.
-
-    Match canonical manual precedence, without training's longest-run selection.
-    """
-    manual = data.get("manual_interactions")
-    result = [manual[name]] if manual else []
-    for entry in data[name].values():
-        if manual and (datetime.fromisoformat(entry["since"]) < datetime.fromisoformat(manual["until"])
-                       and datetime.fromisoformat(entry["until"]) > datetime.fromisoformat(manual["since"])):
-            continue
-        result.append(entry)
-    return sorted(result, key=lambda entry: datetime.fromisoformat(entry["since"]))
 
 
 def _coverage(name, entries):

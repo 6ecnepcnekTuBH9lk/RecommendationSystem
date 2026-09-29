@@ -10,17 +10,14 @@ import test_dataset_statistics as baseline
 dataset = baseline.dataset
 
 
-def order(identity, key, name):
-    return {"ids": {"mindboxId": identity}, "firstAction": {"channel": {"ids": {"externalId": key}, "name": name}}}
-
-
-def test_identity_names_order_and_duplicates():
-    records = [order("1", "A", "Я"), order("2", "A", "А"), order("3", "B", "А"),
-               order("4", "C", "Частое"), order("5", "C", "Частое"), order("6", "C", "Редкое"),
-               order("7", None, "Без ID")]
-    expected = (("A", "А"), ("B", "А"), ("C", "Частое"))
-    assert mapping.discover_stores(records + [records[0]] * 3) == expected
-    assert mapping.discover_stores(reversed(records)) == expected
+def test_load_stores_delegates_to_catalog(monkeypatch, tmp_path):
+    calls = []
+    def ensure(root):
+        calls.append(root)
+        return (("A", "Магазин A"),)
+    monkeypatch.setattr(mapping, "ensure_store_catalog", ensure)
+    assert mapping.load_stores(tmp_path) == (("A", "Магазин A"),)
+    assert calls == [tmp_path]
 
 
 def test_orders_only_canonical_source(dataset):

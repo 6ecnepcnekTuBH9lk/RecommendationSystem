@@ -1,6 +1,5 @@
 """Independent channel-to-city settings; no statistics or weather side effects."""
 
-from collections import Counter, defaultdict
 from dataclasses import dataclass
 import csv
 import json
@@ -10,11 +9,8 @@ from pathlib import Path
 import tempfile
 
 from Application.analysis_filter_settings import _unique
-from Application.dataset_statistics import _entries
-from Application.mindbox.adapters._common import identifier, text
-from Application.mindbox.canonical_storage import catalog, checked_directory, storage_lock
-from Application.mindbox.order_dedup import OrderSnapshots
-from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT, iter_export, part_files
+from Application.mindbox.store_catalog import ensure_store_catalog
+from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT
 from Application.paths import INPUT_DATA_DIR, USER_SETTINGS_DIR
 from Application.product_resolution import CatalogError
 
@@ -23,39 +19,8 @@ CITIES_PATH = INPUT_DATA_DIR / "city_coordinates.csv"
 logger = logging.getLogger(__name__)
 
 
-def discover_stores(records):
-    names = defaultdict(Counter)
-    snapshots = OrderSnapshots()
-    for raw in records:
-        if not snapshots.accept(raw, diagnose=True):
-            continue
-        key = identifier(raw, "firstAction.channel.ids.externalId", required=False)
-        if key is None:
-            continue
-        name = (text(raw, "firstAction.channel.name") or "").strip() or "Не указано"
-        names[key][name] += 1
-    # Same frequency/lexical tie-break as OrderAggregates.result.
-    stores = [(key, min(counts, key=lambda name: (-counts[name], name))) for key, counts in names.items()]
-    return tuple(sorted(stores, key=lambda item: (item[1], item[0])))
-
-
 def load_stores(raw_root=DEFAULT_RAW_ROOT):
-    root = Path(raw_root)
-    if not (root / "canonical/catalog.json").is_file():
-        raise ValueError("Для распределения загрузите Orders.")
-    with storage_lock(root):
-        entries = _entries(catalog(root), "orders")
-        if not entries:
-            raise ValueError("Для распределения загрузите Orders.")
-
-        def records():
-            for entry in entries:
-                directory = checked_directory(root, entry["directory"], "orders")
-                if len(part_files(directory, "orders")) != entry["parts"]:
-                    raise ValueError("Некорректные части canonical Orders.")
-                yield from iter_export("orders", input_dir=directory)
-
-        return discover_stores(records())
+    return ensure_store_catalog(raw_root)
 
 
 def load_cities(path=CITIES_PATH):

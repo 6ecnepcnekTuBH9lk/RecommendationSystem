@@ -6,7 +6,7 @@ from PyQt6.QtCore import QDate, QEvent, QObject, QRunnable, QSize, QThreadPool, 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QDateEdit, QFormLayout, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                              QMenu, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
-                             QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+                             QComboBox, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
 
 from Application.analysis_filter import AnalysisFilter
 from Application.analysis_filter_settings import SETTINGS_PATH, load_filter, save_filter
@@ -99,10 +99,57 @@ class _OptionsTask(QRunnable):
             # No source values, paths or PII in UI diagnostics.
             logging.getLogger(__name__).warning("Отбор недоступен: не удалось прочитать источники или справочники.")
             options = None
-        # Compose the existing statistics prerequisites with the city reference.
-        # Publish a single readiness snapshot for all controls on the GUI thread.
-        sources = mapping.load_sources()
-        self.signals.finished.emit((options, sources), "")
+        try:
+            cities = mapping.load_cities()
+        except Exception:
+            logging.getLogger(__name__).warning("Отбор недоступен: не удалось прочитать справочник городов.")
+            cities = None
+        self.signals.finished.emit((options, cities), "")
+
+
+class _StoreCatalogTask(QRunnable):
+    def __init__(self):
+        super().__init__()
+        self.signals = _Signals()
+
+    def run(self):
+        try:
+            stores = mapping.load_stores()
+        except Exception:
+            logging.getLogger(__name__).warning("Не удалось сформировать каталог магазинов.")
+            self.signals.finished.emit(None, "Не удалось сформировать каталог магазинов.")
+        else:
+            self.signals.finished.emit(stores, "")
+
+
+class CityDelegate(QStyledItemDelegate):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.cities = ()
+
+    def createEditor(self, parent, option, index):
+        if index.column() != 1 or not self.parent().isEnabled():
+            return None
+        editor = QComboBox(parent)
+        editor.addItem("Не сопоставлено", None)
+        for city in self.cities:
+            editor.addItem(city, city)
+        editor.activated.connect(lambda: self._commit(editor))
+        return editor
+
+    def _commit(self, editor):
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor)
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentIndex(max(0, editor.findData(index.data(Qt.ItemDataRole.UserRole))))
+
+    def setModelData(self, editor, model, index):
+        if not self.parent().isEnabled():
+            return
+        city = editor.currentData()
+        model.setData(index, city, Qt.ItemDataRole.UserRole)
+        model.setData(index, city or "Не сопоставлено", Qt.ItemDataRole.DisplayRole)
 
 
 
@@ -118,6 +165,9 @@ class AnalysisFilterTab(QWidget):
         self.configured_filter = load_filter(self.settings_path)
         self.options = None
         self._loader = None
+        self._store_loader = None
+        self.cities = None
+        self._store_error = ""
         self._running = False
         self._refresh_again = False
         self._options_changed = False
@@ -207,7 +257,11 @@ class AnalysisFilterTab(QWidget):
         self.store_table.setHorizontalHeaderLabels(["Магазин / канал", "Город"])
         self.store_table.verticalHeader().hide()
         self.store_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.store_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.store_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.city_delegate = CityDelegate(self.store_table)
+        self.store_table.setItemDelegateForColumn(1, self.city_delegate)
+        self.store_table.cellClicked.connect(self._edit_city)
+        self.store_table.itemChanged.connect(self._mapping_dirty)
         self.store_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.store_table.setMaximumHeight(self.store_table.verticalHeader().defaultSectionSize() * 9)
         left_layout.addWidget(self.store_table)
@@ -215,7 +269,7 @@ class AnalysisFilterTab(QWidget):
         self.mapping_readiness = QLabel("Загрузка каналов Orders…")
         self.mapping_readiness.setWordWrap(True)
         left_layout.addWidget(self.mapping_readiness)
-        self.save_mapping_button = QPushButton(QIcon(str(ICONS_DIR / "save.png")), "Сохранить распределение")
+        self.save_mapping_button = QPushButton(QIcon(str(ICONS_DIR / "save.png")), " Сохранить распределение")
         self.save_mapping_button.setIconSize(QSize(17, 17))
         self.save_mapping_button.setEnabled(False)
         self.save_mapping_button.clicked.connect(self.save_store_mapping)
@@ -227,7 +281,6 @@ class AnalysisFilterTab(QWidget):
         self._update_readiness()
         self._size_inputs()
         QTimer.singleShot(0, self.refresh_options)
-        QTimer.singleShot(0, self.refresh_mapping)
 
     @pyqtSlot()
     def _size_inputs(self):
@@ -276,11 +329,15 @@ class AnalysisFilterTab(QWidget):
     def all_required_sources_ready(self):
         """Statistics prerequisites (load_analysis_options) plus valid cities/Orders."""
         return (self._loader is None and self.options is not None
-                and self.mapping_sources is not None and self.mapping_sources.cities is not None)
+                and self.cities is not None)
 
     @property
     def _editing_enabled(self):
         return self.all_required_sources_ready and not self._running
+
+    @property
+    def _mapping_editable(self):
+        return self._editing_enabled and self._store_loader is None and self.mapping_sources is not None and not self._store_error
 
     def _update_readiness(self):
         if self._editing_enabled and self._options_changed:
@@ -295,12 +352,15 @@ class AnalysisFilterTab(QWidget):
                 self._populate()
         enabled = self._editing_enabled
         self.controls.setEnabled(enabled)
-        self.store_table.setEnabled(enabled)
+        self.store_table.setEnabled(self._mapping_editable)
         self.reset_button.setEnabled(enabled)
         self.message.setVisible(not enabled)
-        self.message.setText("Во время расчёта статистики установить отбор невозможно." if self._running else
+        self.message.setText("Во время расчета статистики установить отбор невозможно." if self._running else
                              "Для установки отбора необходимо загрузить исходные данные и справочники.")
-        self.mapping_readiness.setVisible(bool(enabled and self.mapping_sources.error))
+        store_message = ("Формирование каталога магазинов..." if self._store_loader is not None
+                         else self._store_error or (self.mapping_sources.error if self.mapping_sources else ""))
+        self.mapping_readiness.setText(store_message)
+        self.mapping_readiness.setVisible(bool(enabled and store_message))
         self._validate()
         self._mapping_dirty()
 
@@ -312,8 +372,24 @@ class AnalysisFilterTab(QWidget):
         self._update_readiness()
 
     def refresh_mapping(self):
-        # Mapping shares the complete prerequisites refresh; no independent gate.
-        self.refresh_options()
+        if not self._editing_enabled or self._store_loader is not None:
+            return
+        self._store_error = ""
+        self._store_loader = _StoreCatalogTask()
+        self._store_loader.signals.finished.connect(self._stores_loaded)
+        self._update_readiness()
+        QThreadPool.globalInstance().start(self._store_loader)
+
+    def _stores_loaded(self, stores, error):
+        self._store_loader = None
+        self._store_error = error
+        if stores is not None:
+            self._mapping_loaded(mapping.MappingSources(stores, self.cities))
+        self._update_readiness()
+
+    def _edit_city(self, row, column):
+        if column == 1 and self._mapping_editable:
+            self.store_table.editItem(self.store_table.item(row, column))
 
     def _mapping_loaded(self, sources, error=""):
         if sources == self.mapping_sources:
@@ -323,32 +399,30 @@ class AnalysisFilterTab(QWidget):
         self.mapping_sources = sources
         current = mapping.reconcile(sources.stores, sources.cities, {**self.saved_mapping, **draft})
         self._mapping_baseline = mapping.reconcile(sources.stores, sources.cities, self.saved_mapping)
+        self.city_delegate.cities = sources.cities or ()
+        self.store_table.blockSignals(True)
         self.store_table.setRowCount(len(sources.stores))
         for row, (key, name) in enumerate(sources.stores):
             item = QTableWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.store_table.setItem(row, 0, item)
-            combo = QComboBox()
-            combo.addItem("Не сопоставлено", None)
-            for city in sources.cities or ():
-                combo.addItem(city, city)
-            combo.setCurrentIndex(max(0, combo.findData(current[key])))
-            combo.currentIndexChanged.connect(self._mapping_dirty)
-            self.store_table.setCellWidget(row, 1, combo)
-        self.mapping_readiness.setText(sources.error)
+            city = QTableWidgetItem(current[key] or "Не сопоставлено")
+            city.setData(Qt.ItemDataRole.UserRole, current[key])
+            self.store_table.setItem(row, 1, city)
+        self.store_table.blockSignals(False)
         self._update_readiness()
 
     def _current_mapping(self):
         return {self.store_table.item(row, 0).data(Qt.ItemDataRole.UserRole):
-                self.store_table.cellWidget(row, 1).currentData() for row in range(self.store_table.rowCount())}
+                self.store_table.item(row, 1).data(Qt.ItemDataRole.UserRole) for row in range(self.store_table.rowCount())}
 
     def _mapping_dirty(self):
-        self.save_mapping_button.setEnabled(self._editing_enabled
+        self.save_mapping_button.setEnabled(self._mapping_editable
             and self._current_mapping() != self._mapping_baseline)
 
     def save_store_mapping(self):
-        if not self._editing_enabled or not self.save_mapping_button.isEnabled():
+        if not self._mapping_editable or not self.save_mapping_button.isEnabled():
             return
         current = self._current_mapping()
         saved = {**self.saved_mapping, **current}
@@ -366,9 +440,12 @@ class AnalysisFilterTab(QWidget):
         super().showEvent(event)
         self._size_inputs()
         self.refresh_options()
-        self.refresh_mapping()
 
     def refresh_options(self, *, force=False):
+        # A migration holds the canonical lock. Keep the already verified quick
+        # gate rather than queueing another source read behind that migration.
+        if self._store_loader is not None and not force:
+            return
         if self._loader is not None:
             self._refresh_again |= force
             return
@@ -381,14 +458,15 @@ class AnalysisFilterTab(QWidget):
         if self._refresh_again:
             self._loader = None
             self._refresh_again = False
-            self.refresh_options()
+            self.refresh_options(force=True)
             return
-        options, sources = snapshot
-        # Keep the gate closed while both halves of the snapshot are installed.
-        self._mapping_loaded(sources)
+        options, self.cities = snapshot
+        if self.mapping_sources is not None:
+            self._mapping_loaded(mapping.MappingSources(self.mapping_sources.stores, self.cities))
         self._options_loaded(options, error)
         self._loader = None
         self._update_readiness()
+        self.refresh_mapping()
 
     def _options_loaded(self, options, error):
         self._options_changed |= options != self.options
