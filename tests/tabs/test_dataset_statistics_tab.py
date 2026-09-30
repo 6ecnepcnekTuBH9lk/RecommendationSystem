@@ -286,7 +286,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert technical.widgetResizable()
         layout = technical.widget().layout()
         assert layout.spacing() == ui.BLOCK_SPACING
-        assert layout.count() == 7
+        assert layout.count() == 5
         coverage, summary, raw, quality, diagnostics = technical.findChildren(QTableWidget)
         assert technical.findChildren(QTableWidget) == [coverage, summary, raw, quality, diagnostics]
         assert [coverage.horizontalHeaderItem(i).text() for i in range(3)] == [
