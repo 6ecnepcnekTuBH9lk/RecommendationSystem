@@ -28,9 +28,9 @@ def test_startup_and_resize_follow_available_screen(app, monkeypatch, available,
     window = main.MainWindow()
     try:
         app.processEvents()
-        assert window.tabs.count() == 6
+        assert window.tabs.count() == 5
         assert window.tabs.tabText(0) == "Получение данных"
-        assert window.tabs.tabText(1) == "Установка фильтров"
+        assert window.tabs.tabText(1) == "Пользовательские настройки"
         assert window.tabs.tabText(2) == "Статистика и анализ"
         assert window.minimumWidth() == min(1280, available.width() - 32)
         assert window.minimumHeight() == min(900, available.height() - 48)

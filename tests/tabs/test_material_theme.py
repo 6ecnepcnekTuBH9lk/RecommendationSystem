@@ -49,7 +49,7 @@ def test_material_light_dark_light(app, caplog):
 def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
     from main import MainWindow
     from Application.photo.photo_processing import _set_photo_cell
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
 
     monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("No network in theme tests"))
     window = MainWindow()
@@ -58,7 +58,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.minimumWidth() < window.maximumWidth()
         assert window.minimumHeight() < window.maximumHeight()
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-            "Получение данных", "Установка фильтров", "Статистика и анализ", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+            "Получение данных", "Пользовательские настройки", "Статистика и анализ", "Обучение модели", "Выгрузка результатов"]
         assert window.purchases_table.columnCount() == 6
         assert window.recs_table.columnCount() == 7
         assert window.mb_progress.isTextVisible()
@@ -80,7 +80,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert load_status_row.itemAt(1).widget() is window.status_files_container
         assert isinstance(window.status_files_layout, QHBoxLayout)
         assert window.status_files_layout.itemAt(0).widget() is window.prefix
-        acquisition, processing = window.tabs.widget(0), window.tabs.widget(3)
+        acquisition = window.tabs.widget(0)
         headings = [label.text() for label in acquisition.findChildren(QLabel)
                     if label.property("class") == "sectionHeader"]
         assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка из Mindbox"}
@@ -88,14 +88,10 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         for widget in (window.heading_load_data, *window.reference_controls,
                        window.btn_load, window.status_files_container, window.prefix):
             assert acquisition.isAncestorOf(widget)
-            assert not processing.isAncestorOf(widget)
         assert [b for b in window.findChildren(QPushButton) if b.text().strip() == "Загрузить справочники"] == [window.btn_load]
         assert acquisition.isAncestorOf(window.mb_log) and acquisition.isAncestorOf(window.mb_progress)
         assert window.mb_log.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Expanding
         assert window.mb_log.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
-        assert {label.text() for label in processing.findChildren(QLabel)
-                if label.property("class") == "sectionHeader"} == {
-                    "Настройки и установка отбора", "Статистика и анализ"}
         dialog = Mock(return_value=("", ""))
         handler = Mock(wraps=csv_ui.load_csv_file)
         monkeypatch.setattr(csv_ui.QFileDialog, "getOpenFileName", dialog)

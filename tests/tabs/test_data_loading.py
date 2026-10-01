@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from Application.files import reference_import as api
-from Application.tabs import create_results_tab, data_processing_tab as ui
+from Application.tabs import create_results_tab, reference_loading_section as ui
 
 
 def _nomenclature_frame(code, name, collection, stock):
@@ -44,7 +44,7 @@ def test_nomenclature_publication_and_cache_invalidation(tmp_path, monkeypatch, 
     _nomenclature_frame("new-code", "NEW name", "NEW collection", "42").to_csv(source, sep="|", index=False)
     window = SimpleNamespace(_name_by_code={"old-code": "OLD name"},
                              _collection_by_code={"old-code": "OLD collection"}, _stock_by_code={"old-code": "1"})
-    for name in ("update_file_status", "update_filter_controls_availability"):
+    for name in ("update_file_status",):
         monkeypatch.setattr(ui, name, lambda *a: None)
     if failure == "schema":
         source.write_text("wrong\nvalue\n", encoding="utf-8")

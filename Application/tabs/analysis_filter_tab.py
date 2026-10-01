@@ -532,4 +532,4 @@ class AnalysisFilterTab(QWidget):
 
 def create_analysis_filter_tab(window):
     window.analysis_filter_tab = AnalysisFilterTab(window)
-    window.tabs.addTab(window.analysis_filter_tab, "Установка фильтров")
+    window.tabs.addTab(window.analysis_filter_tab, "Пользовательские настройки")
