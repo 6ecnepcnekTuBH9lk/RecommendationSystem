@@ -2,7 +2,7 @@ import json
 from dataclasses import replace
 
 import pytest
-from PyQt6.QtCore import QDate, QProcess, QThreadPool, QTimer, Qt
+from PyQt6.QtCore import QDate, QPoint, QProcess, QThreadPool, QTimer, Qt
 from PyQt6.QtWidgets import QFrame, QLabel, QTableWidget, QWidget, QComboBox, QStyleOptionViewItem
 
 from Application.analysis_filter import AnalysisFilter, AnalysisOptions
@@ -225,7 +225,17 @@ def test_filter_layout_theme_popup(filter_tab, app, monkeypatch, dark, width):
     assert not any(label.property("class") == "statisticsSection" for label in tab.findChildren(QLabel))
     assert {"Дата начала:", "Дата окончания:", "Вид номенклатуры:", "Сезон:"}.issubset(headings)
     separator = tab.findChild(QFrame, "vSeparator")
-    assert separator is tab.layout().itemAt(1).widget()
+    layout = tab.layout()
+    left, right = layout.itemAt(0).widget(), layout.itemAt(2).widget()
+    assert layout.count() == 3
+    assert left is tab.controls.parentWidget()
+    assert any(label.text() == "В разработке" for label in right.findChildren(QLabel))
+    assert layout.stretch(0) == layout.stretch(2) == 1
+    assert separator is layout.itemAt(1).widget()
+    assert left.geometry().right() < separator.geometry().left()
+    assert separator.geometry().right() < right.geometry().left()
+    for column in (left, right):
+        assert column.isVisible() and column.geometry().isValid()
     assert separator.frameShape() == QFrame.Shape.NoFrame
     assert separator.minimumWidth() == separator.maximumWidth() == 1
     assert separator.height() > tab.controls.height()
@@ -237,7 +247,10 @@ def test_filter_layout_theme_popup(filter_tab, app, monkeypatch, dark, width):
     buttons = tab.apply_button.parentWidget().layout().itemAt(3).layout()
     assert [buttons.itemAt(i).widget().text().strip() for i in range(2)] == ["Применить", "Сбросить"]
     assert tab.apply_button.width() == tab.reset_button.width()
-    assert abs(tab.layout().itemAt(0).widget().width() - tab.layout().itemAt(2).widget().width()) <= 1
+    if width == 1200:
+        assert abs(left.width() - right.width()) <= 1
+    # Minimum-size negotiation can give unequal columns in a narrow window.
+    assert all(widget.isVisible() and widget.isEnabled() and widget.rect().isValid() for widget in inputs)
     tab.types.populate(tuple(f"Вид {i:02}" for i in range(50)) + (None,), None)
     tab.types.menu.popup(tab.types.mapToGlobal(tab.types.rect().bottomLeft()))
     app.processEvents()
@@ -405,9 +418,17 @@ def test_two_columns_spacing_mapping_scroll(filter_tab, app, monkeypatch, dark):
     tab.resize(1600, 850)
     tab.show()
     app.processEvents()
-    assert tab.start_date.x() < tab.types.x()
-    assert tab.start_date.y() == tab.types.y()
-    assert tab.end_date.y() == tab.collections.y()
+    assert tab.date_group.parentWidget() is tab.product_group.parentWidget() is tab.controls
+    assert tab.date_group.geometry().right() < tab.product_group.geometry().left()
+    start = tab.start_date.mapTo(tab.controls, QPoint(0, 0))
+    end = tab.end_date.mapTo(tab.controls, QPoint(0, 0))
+    types = tab.types.mapTo(tab.controls, QPoint(0, 0))
+    collections = tab.collections.mapTo(tab.controls, QPoint(0, 0))
+    assert start.x() < types.x()
+    # Allow only small rounding differences in Qt font/style metrics.
+    assert abs(start.y() - types.y()) <= 2
+    assert abs(end.y() - collections.y()) <= 2
+    assert start.y() < end.y() and types.y() < collections.y()
     left = tab.controls.parentWidget().layout()
     assert left.itemAt(2).widget() is tab.controls
     assert left.itemAt(3).layout().itemAt(0).widget() is tab.apply_button

@@ -883,13 +883,35 @@ def test_orders_cards_rates_full_stores_and_bright_scrollbars(window, sample_res
         for scrollbar in (page.verticalScrollBar(), table.verticalScrollBar(), table.horizontalScrollBar()):
             QApplication.sendEvent(scrollbar, QEvent(QEvent.Type.Leave))
             option = QStyleOptionSlider()
-            scrollbar.initStyleOption(option)
+            # Internal Qt scrollbars do not expose protected initStyleOption.
+            option.initFrom(scrollbar)
+            option.orientation = scrollbar.orientation()
+            option.minimum = scrollbar.minimum()
+            option.maximum = scrollbar.maximum()
+            option.sliderPosition = scrollbar.sliderPosition()
+            option.sliderValue = scrollbar.value()
+            option.singleStep = scrollbar.singleStep()
+            option.pageStep = scrollbar.pageStep()
+            option.upsideDown = scrollbar.invertedAppearance()
+            option.subControls = QStyle.SubControl.SC_All
+            option.activeSubControls = QStyle.SubControl.SC_None
+            if option.orientation == Qt.Orientation.Horizontal:
+                option.state |= QStyle.StateFlag.State_Horizontal
+                option.upsideDown ^= scrollbar.layoutDirection() == Qt.LayoutDirection.RightToLeft
+            else:
+                option.state &= ~QStyle.StateFlag.State_Horizontal
             option.state &= ~QStyle.StateFlag.State_MouseOver
             rect = scrollbar.style().subControlRect(QStyle.ComplexControl.CC_ScrollBar, option,
                                                     QStyle.SubControl.SC_ScrollBarSlider, scrollbar)
+            assert rect.isValid() and not rect.isEmpty()
+            assert rect.intersects(scrollbar.rect())
+            assert scrollbar.rect().contains(rect.center())
             pixmap = scrollbar.grab()
-            point = rect.center() * pixmap.devicePixelRatio()
-            assert pixmap.toImage().pixelColor(point) == QColor(os.environ["QTMATERIAL_PRIMARYCOLOR"])
+            image = pixmap.toImage()
+            ratio = pixmap.devicePixelRatio()
+            x, y = round(rect.center().x() * ratio), round(rect.center().y() * ratio)
+            assert 0 <= x < image.width() and 0 <= y < image.height()
+            assert image.pixelColor(x, y) == QColor(os.environ["QTMATERIAL_PRIMARYCOLOR"])
     assert sample_result == original
     sample_result["purchase_basket_distribution"] = tuple((label, 0, 0.) for label, _, _ in original["purchase_basket_distribution"])
     tab.render(sample_result)
