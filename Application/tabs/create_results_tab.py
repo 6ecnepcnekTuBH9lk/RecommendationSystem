@@ -1262,7 +1262,7 @@ def _get_discount_cards_for_mindbox(mindbox_id: str) -> list[str]:
 # -------------------------------------------ВЫГРУЗИТЬ РЕКОМЕНДАЦИИ В EXCEL-----------------------------------------
 def export_recommendations_to_excel(aboba):
 
-    # Количество клиентов берём с вкладки «Обработка датасета»
+    # Количество клиентов: явно заданное значение либо значение по умолчанию
     max_export_users_widget = getattr(
         aboba,
         "max_export_users_input",

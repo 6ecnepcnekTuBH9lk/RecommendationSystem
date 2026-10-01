@@ -8,6 +8,30 @@
 QPushButton, QLineEdit, QComboBox, QAbstractSpinBox {{ font-size: 10.5pt; }}
 
 /* Section headers */
+QFrame[class="statisticsCard"] {{
+    background-color: {QTMATERIAL_SECONDARYCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+}}
+QFrame[class="statisticsCard"] QLabel {{
+    background-color: transparent;
+    border: none;
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+}}
+QLabel[class="statisticsNumber"] {{
+    font-size: 22pt;
+    font-weight: 600;
+}}
+QLabel[class="statisticsInfo"] {{
+    font-style: italic;
+}}
+QLabel[class="statisticsSection"] {{
+    font-size: 12pt;
+    font-style: italic;
+    font-weight: normal;
+    background-color: transparent;
+    border: none;
+}}
 QLabel[class="sectionHeader"] {{
     font-size: 11pt;
     font-weight: 600;
@@ -184,4 +208,30 @@ QDoubleSpinBox,
 QDateEdit {{
     selection-background-color: rgba({APP_PRIMARY_RGB}, 110);
     selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+}}
+
+/* Match the Material hover accent within statistics only. */
+QWidget#datasetStatisticsTab QScrollBar::handle:vertical,
+QWidget#datasetStatisticsTab QScrollBar::handle:horizontal,
+QWidget#datasetStatisticsTab QScrollBar::handle:vertical:hover,
+QWidget#datasetStatisticsTab QScrollBar::handle:horizontal:hover {{
+    background: {QTMATERIAL_PRIMARYCOLOR};
+}}
+
+QToolButton#analysisMultiSelect {{
+    font-size: 10.5pt;
+    margin: 0px;
+    background-color: {QTMATERIAL_SECONDARYDARKCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 8px;
+    padding: 0px 24px 0px 10px;
+}}
+QToolButton#analysisMultiSelect::menu-indicator {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 8px;
+}}
+QWidget#analysisFilterTab QScrollBar::handle:vertical,
+QWidget#analysisFilterTab QScrollBar::handle:horizontal {{
+    background: {QTMATERIAL_PRIMARYCOLOR};
 }}

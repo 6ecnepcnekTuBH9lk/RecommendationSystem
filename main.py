@@ -9,12 +9,13 @@ from PyQt6.QtGui import QIcon, QPixmap, QGuiApplication, QCursor
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget,
                              QSizePolicy, QLayout)
 
-from Application.tabs.data_processing_tab import create_input_data_widgets_tab
 from Application.tabs.data_loading_tab import create_data_loading_widgets_tab
+from Application.tabs.analysis_filter_tab import create_analysis_filter_tab
+from Application.tabs.dataset_statistics_tab import create_dataset_statistics_tab
 from Application.tabs.train_model_tab import create_train_model_widgets_tab
 from Application.tabs.create_results_tab import create_result_widgets_tab
 from Application.settings.set_status import set_ready_status
-from Application.theme.apply_theme import apply_app_theme
+from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
 
 
 class MainWindow(QMainWindow):
@@ -23,7 +24,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         # Заголовок и иконка
-        self.setWindowTitle("Рекомендательная система")
+        self.setWindowTitle("KANZLER AI - Рекомендательная система")
         self.setWindowIcon(QIcon(str(ICONS_DIR / "app_icon.png")))
 
         # Центральный виджет и основной layout
@@ -45,9 +46,7 @@ class MainWindow(QMainWindow):
 
         # Объявление атрибутов
         self.heading_load_data = None
-        self.combo_box_add_or_not = None
         self.btn_load = None
-        self.heading_filters = None
         self.recs_table = None
         self.purchases_table = None
         self.label_recs = None
@@ -58,12 +57,6 @@ class MainWindow(QMainWindow):
         self.label_69 = None
         self.heading_enter_parameter = None
         self.prefix = None
-        self.heading_analysis = None
-        self.filter_summary = None
-        self.btn_reset = None
-        self.btn_apply = None
-        self.btn_weather = None
-        self._cities = []
         self._store_city_map = {}
         self._img_queue = deque()
         self._img_max_inflight = 3
@@ -93,8 +86,8 @@ class MainWindow(QMainWindow):
 
         # Получение согласованных наборов Mindbox
         create_data_loading_widgets_tab(self)
-        # Legacy CSV: обработка входных данных
-        create_input_data_widgets_tab(self)
+        create_analysis_filter_tab(self)
+        create_dataset_statistics_tab(self)
         # Вкладка с обучением модели
         create_train_model_widgets_tab(self)
         # Вкладка с выгрузкой результатов
@@ -221,10 +214,6 @@ class MainWindow(QMainWindow):
     # -------------------------------------------СТАТИЧЕСКИЕ ПРАВКИ РАЗМЕРОВ--------------------------------------------
     def apply_static_widget_styles(self):
 
-        self.btn_apply.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
-        self.btn_weather.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
-        self.btn_reset.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
-        self.filter_summary.setStyleSheet("""QLineEdit { margin: 5px 0px 0px 0px; }""")
         self.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
         self.btn_settings.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
         self.start_train.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
@@ -235,7 +224,7 @@ class MainWindow(QMainWindow):
 # -----------------------------------------------MAIN-------------------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")
+    prepare_app_theme(app)
 
     window = MainWindow()
     window.apply_theme(True)

@@ -116,6 +116,22 @@ def require_manual_merges(data, since, until):
     return entry
 
 
+def effective_entries(data, name):
+    """All current coverage, including gaps and unpaired days.
+
+    Match canonical manual precedence, without training's longest-run selection.
+    """
+    manual = data.get("manual_interactions")
+    result = [manual[name]] if manual else []
+    for entry in data[name].values():
+        if manual and (datetime.fromisoformat(entry["since"]) < datetime.fromisoformat(manual["until"])
+                       and datetime.fromisoformat(entry["until"]) > datetime.fromisoformat(manual["since"])):
+            continue
+        result.append(entry)
+    return sorted(result, key=lambda entry: datetime.fromisoformat(entry["since"]))
+
+
+
 def continuous_range(data):
     """Return source pairs in the longest covered run, latest on ties; no virtual days."""
     merges = data["customer_merges"]
@@ -169,7 +185,7 @@ def current_batch(root):
         window, "0" * 64, components, True, MindboxSelectionConfig(**data["selection"]), "CANONICAL")
 
 
-def validate_interactions(name, directory, resolver, selection, *, cancelled=None, progress=None):
+def validate_interactions(name, directory, resolver, selection, *, cancelled=None, progress=None, store_collector=None):
     """Shared streaming validation for API and manual raw; never filter the stored file."""
     from .adapters import adapt_order, adapt_action
     from .adapters.actions import adapt_action_system_name
@@ -180,6 +196,8 @@ def validate_interactions(name, directory, resolver, selection, *, cancelled=Non
     for raw in iter_export(name, input_dir=directory):
         check_cancel(cancelled)
         if name == "orders":
+            if store_collector is not None:
+                store_collector.add(raw)
             adapt_order(raw, resolver, product_namespaces=selection.order_product_namespaces)
         elif classify_action_system_name(adapt_action_system_name(raw), rules) is not None:
             adapt_action(raw, resolver, product_namespaces=selection.action_product_namespaces)
@@ -196,9 +214,11 @@ def publish(root, name, since, until, directory, *, source_kind="API", export_id
     root = Path(root).resolve()
     directory = Path(directory).resolve()
     parts = part_files(directory, name)
+    from .store_catalog import StoreSourceCollector, update_store_catalog
+    collector = StoreSourceCollector() if name == "orders" else None
     if name in ("actions", "orders"):
         from .canonical_customers import resolver_for
-        validate_interactions(name, directory, resolver_for(root), selection)
+        validate_interactions(name, directory, resolver_for(root), selection, store_collector=collector)
     if name == "customer_merges":
         from .adapters import adapt_customer_merge
         from .identity import CustomerIdResolver
@@ -225,6 +245,8 @@ def publish(root, name, since, until, directory, *, source_kind="API", export_id
     data["selection"] = asdict(selection)
     atomic_json(root / "canonical/training.json", {"schema_version": 5, "storage": "canonical"})
     atomic_json(root / "canonical/catalog.json", data)
+    if collector is not None:
+        update_store_catalog(root, data, entry, collector)
     if old:
         obsolete = checked_directory(root, old["directory"], name)
         # Confined to a generated canonical object, never legacy/user paths.

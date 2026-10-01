@@ -112,7 +112,7 @@ def test_polling_error_is_silent_and_next_poll_succeeds(window):
 
 
 def test_apply_reference_failure_reports_reason(window, monkeypatch):
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
     def fail(*args):
         raise ValueError("Отсутствует список категорий")
     monkeypatch.setattr(csv_ui, "apply_reference_result", fail)
@@ -331,7 +331,7 @@ def test_reference_selectors_replace_only_their_path(
     tmp_path,
     monkeypatch,
 ):
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
 
     assert not hasattr(window, "combo_box_types")
     assert len(window.reference_fields) == len(window.reference_buttons) == 3
@@ -462,7 +462,7 @@ def select_references(window, root, indexes):
 
 @pytest.mark.parametrize("indexes", [(0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2)])
 def test_reference_queue_runs_selected_files_sequentially(window, tmp_path, monkeypatch, indexes):
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
     kinds = select_references(window, tmp_path, indexes)
     applied = Mock()
     monkeypatch.setattr(csv_ui, "apply_reference_result", applied)
@@ -501,7 +501,7 @@ def test_finished_reference_does_not_prefix_next_validation_error(window, tmp_pa
 
 @pytest.mark.parametrize("failure", ["exit", "missing_result", "apply", "failed_to_start"])
 def test_reference_failure_does_not_stop_remaining_queue(window, tmp_path, monkeypatch, failure):
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
     kinds = select_references(window, tmp_path, (0, 1, 2))
     applied = []
     def apply(widget, result):
@@ -531,7 +531,7 @@ def test_reference_failure_does_not_stop_remaining_queue(window, tmp_path, monke
 
 
 def test_reference_cancel_stops_queue_and_retains_success(window, tmp_path, monkeypatch):
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
     kinds = select_references(window, tmp_path, (0, 1, 2))
     applied = Mock()
     monkeypatch.setattr(csv_ui, "apply_reference_result", applied)
@@ -605,7 +605,7 @@ def test_reference_partial_failure_keeps_real_snapshots_and_refreshes_ui(window,
     assert old_categories.read_bytes() == b"previous categories snapshot"
     assert (output / "city_coordinates.csv").is_file()
     assert window._name_by_code is None
-    assert window._cities == ["Synthetic"]
+    assert pd.read_csv(output / "city_coordinates.csv", sep="|", encoding="utf-8-sig")["Город"].tolist() == ["Synthetic"]
     assert window.reference_status_overrides == {kinds[0]: True, kinds[1]: False, kinds[2]: True}
 
 
@@ -884,19 +884,19 @@ def test_close_waits_asynchronously_for_process(window):
     assert not window.isVisible()
 
 
-def test_all_four_tabs_themes_and_legacy_controls(app):
+def test_all_tabs_themes_and_reference_controls(app):
     from main import MainWindow
     window = MainWindow()
     QApplication.processEvents()
     wait_until(lambda: not window.mb_controller.tasks)
-    assert [window.tabs.tabText(i) for i in range(4)] == [
-        "Получение данных", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
+        "Получение данных", "Пользовательские настройки", "Статистика и анализ", "Обучение модели", "Выгрузка результатов"]
     assert window.btn_load is not None and window.start_train is not None
     window.mb_controller.start()
     for dark in (False, True, False):
         window.apply_theme(dark)
-        window.tabs.setCurrentIndex(2)
-        assert window.tabs.currentIndex() == 2
+        window.tabs.setCurrentIndex(3)
+        assert window.tabs.currentIndex() == 3
         assert window.theme_switch.isEnabled()
     window.mb_controller.cancel()
     window.mb_process.finish(1, True)
@@ -1354,7 +1354,7 @@ def test_manual_preflight_cancel_does_not_launch_late_process(window, tmp_path, 
 
 
 def test_reference_options_and_background_process(window, monkeypatch, tmp_path):
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
     assert list(window.reference_fields) == [
         "Номенклатура из 1С", "Категории сайта из 1С", "Координаты городов и погода"]
     assert getattr(window, "combo_box_add_or_not", None) is None

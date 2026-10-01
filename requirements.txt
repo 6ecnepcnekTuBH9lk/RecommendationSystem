@@ -1,4 +1,6 @@
 PyQt6==6.10.0
+PyQt6-Charts==6.10.0
+PyQt6-Charts-Qt6==6.10.0
 qt-material==2.17
 pandas==2.3.3
 numpy==2.2.6

@@ -18,7 +18,7 @@ from PyQt6.QtGui import QIcon, QPainter
 from PyQt6.QtWidgets import (QDateEdit, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QScrollArea,
                              QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSizePolicy)
 
-from Application.tabs.data_processing_tab import create_csv_loading_section
+from Application.tabs.reference_loading_section import create_csv_loading_section
 from Application.loading_errors import error_record, format_error, safe_message
 from Application.mindbox.manual_sources import normalize_sources
 from Application.mindbox.selection import DEFAULT_SELECTION, MindboxSelectionConfig, SELECTION_OPTIONS
@@ -130,15 +130,28 @@ class LoadingState(Enum):
 
 
 class _BusyProgressBar(QProgressBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        font = self.font()
+        font.setItalic(True)
+        self.setFont(font)
+
     def text(self):
         return "Идёт загрузка..." if self.maximum() == 0 else super().text()
 
     def paintEvent(self, event):
         super().paintEvent(event)
+
         if self.maximum() == 0:
             painter = QPainter(self)
             painter.setPen(self.palette().text().color())
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+            painter.setFont(self.font())
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                self.text(),
+            )
 
 
 def _heading(text, layout):
@@ -1124,7 +1137,7 @@ class _LoadingController(QObject):
                                        "--file", str(path), "--kind", kind])
 
     def _reference_finished(self, code, status):
-        from Application.tabs.data_processing_tab import apply_reference_result, update_file_status
+        from Application.tabs.reference_loading_section import apply_reference_result, update_file_status
         kind = self.reference_kind or "Справочник"
         failed = code != 0 or status != QProcess.ExitStatus.NormalExit or self.error_reported
         if failed:

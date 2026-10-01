@@ -280,7 +280,7 @@ def create_train_model_widgets_tab(aboba):
     aboba.item_feature_cols_input.setStyleSheet("""QLineEdit { margin: 3px 0px 0px 0px; }""")
     left_layout.addWidget(aboba.item_feature_cols_input, 0)
 
-    # Копия поля со вкладки "Обработка датасета" (обновляется из update_filter_summary)
+    # Сводка параметров обучения (обновляется из update_filter_summary)
     aboba.train_filter_summary = QLineEdit()
     aboba.train_filter_summary.setReadOnly(True)
     aboba.train_filter_summary.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

@@ -1438,7 +1438,7 @@ def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
             path = _path_csv(cfg.data_dir, name)
             if not os.path.isfile(path):
                 print(f"  - {path}")
-        print("\nДля начала нужно загрузить датасеты на вкладке 'Обработка датасета'.")
+        print("\nДля начала нужно загрузить датасеты на вкладке 'Получение данных'.")
         return False
     except (_InvalidInteractionSchemaError, PreparedDataError) as exc:
         print(f"[{_now()}] {exc}")

@@ -4,11 +4,12 @@ import os
 import socket
 from unittest.mock import Mock
 from pathlib import Path
+import importlib
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QDir
 from PyQt6.QtGui import QFont
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QTableWidgetItem, QLabel, QPushButton, QSizePolicy, QGridLayout, QHBoxLayout
@@ -44,10 +45,11 @@ def test_material_light_dark_light(app, caplog):
     assert "must be imported after" not in caplog.text
 
 
+@pytest.mark.usefixtures("window_settings")
 def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
     from main import MainWindow
     from Application.photo.photo_processing import _set_photo_cell
-    from Application.tabs import data_processing_tab as csv_ui
+    from Application.tabs import reference_loading_section as csv_ui
 
     monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("No network in theme tests"))
     window = MainWindow()
@@ -56,7 +58,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.minimumWidth() < window.maximumWidth()
         assert window.minimumHeight() < window.maximumHeight()
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-            "Получение данных", "Обработка датасета", "Обучение модели", "Выгрузка результатов"]
+            "Получение данных", "Пользовательские настройки", "Статистика и анализ", "Обучение модели", "Выгрузка результатов"]
         assert window.purchases_table.columnCount() == 6
         assert window.recs_table.columnCount() == 7
         assert window.mb_progress.isTextVisible()
@@ -78,7 +80,7 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert load_status_row.itemAt(1).widget() is window.status_files_container
         assert isinstance(window.status_files_layout, QHBoxLayout)
         assert window.status_files_layout.itemAt(0).widget() is window.prefix
-        acquisition, processing = window.tabs.widget(0), window.tabs.widget(1)
+        acquisition = window.tabs.widget(0)
         headings = [label.text() for label in acquisition.findChildren(QLabel)
                     if label.property("class") == "sectionHeader"]
         assert set(headings) == {"Загрузка через API Mindbox", "Загрузка справочников", "Ручная загрузка из Mindbox"}
@@ -86,14 +88,10 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         for widget in (window.heading_load_data, *window.reference_controls,
                        window.btn_load, window.status_files_container, window.prefix):
             assert acquisition.isAncestorOf(widget)
-            assert not processing.isAncestorOf(widget)
         assert [b for b in window.findChildren(QPushButton) if b.text().strip() == "Загрузить справочники"] == [window.btn_load]
         assert acquisition.isAncestorOf(window.mb_log) and acquisition.isAncestorOf(window.mb_progress)
         assert window.mb_log.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Expanding
         assert window.mb_log.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
-        assert {label.text() for label in processing.findChildren(QLabel)
-                if label.property("class") == "sectionHeader"} == {
-                    "Настройки и установка отбора", "Статистика и анализ"}
         dialog = Mock(return_value=("", ""))
         handler = Mock(wraps=csv_ui.load_csv_file)
         monkeypatch.setattr(csv_ui.QFileDialog, "getOpenFileName", dialog)
@@ -122,3 +120,31 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_warmed_switch_uses_cache_and_one_global_application(app, monkeypatch):
+    theme = importlib.import_module("Application.theme.apply_theme")
+    apply_app_theme(app, False)
+    expected = {}
+    for dark in (False, True):
+        apply_app_theme(app, dark)
+        expected[dark] = (app.styleSheet(), {key: value for key, value in os.environ.items()
+                                           if key.startswith("QTMATERIAL_")}, QDir.searchPaths("icon"))
+        assert ("dark" if dark else "light") in QDir.searchPaths("icon")[0]
+    def unexpected(*args, **kwargs):
+        pytest.fail("A warmed switch must not rebuild, read files, reset style/font or enumerate fonts")
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", unexpected)
+        patch.setattr(theme, "build_stylesheet", unexpected)
+        patch.setattr(theme.QFontDatabase, "families", unexpected)
+        patch.setattr(app, "setFont", unexpected)
+        patch.setattr(app, "setStyle", unexpected)
+        apply = Mock(wraps=app.setStyleSheet)
+        patch.setattr(app, "setStyleSheet", apply)
+        for dark in (False, True, False):
+            apply.reset_mock()
+            apply_app_theme(app, dark)
+            stylesheet, environment, icons = expected[dark]
+            apply.assert_called_once_with(stylesheet)
+            assert all(os.environ[key] == value for key, value in environment.items())
+            assert QDir.searchPaths("icon") == icons
