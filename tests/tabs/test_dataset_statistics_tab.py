@@ -573,7 +573,8 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
             "2", "2", "1", "0", "—", "—"]
         headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
-        assert headings == ["ПОРТРЕТ КЛИЕНТА", "АКТИВНОСТЬ КЛИЕНТОВ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ"]
+        assert headings == ["ПОРТРЕТ КЛИЕНТА", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ",
+                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ"]
         tables = page.findChildren(QTableWidget)
         assert [table.rowCount() for table in tables] == [3, 8, 9, 7, 5, 3]
         assert tables[2].item(8, 1).text() == "50.00"
@@ -627,7 +628,8 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         assert len(card_titles(page)) == 8
         labels = [label.text() for label in page.findChildren(QLabel)]
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
-            "КОРЗИНА ЗАКАЗА", "ФИНАНСОВЫЕ ПОКАЗАТЕЛИ", "ДИНАМИКА ПОКУПОК", "МАГАЗИНЫ И КАНАЛЫ — RUB",
+            "КОРЗИНА ЗАКАЗА", "ФИНАНСОВЫЕ ПОКАЗАТЕЛИ", "ДИНАМИКА КОЛИЧЕСТВА ПОКУПОК — RUB", "ДИНАМИКА КОЛИЧЕСТВА ПОКУПОК — KZT", "ДИНАМИКА СУММЫ ПОКУПОК — RUB", "ДИНАМИКА СУММЫ ПОКУПОК — KZT",
+            "МАГАЗИНЫ И КАНАЛЫ — RUB",
             "МАГАЗИНЫ И КАНАЛЫ — KZT", "ОПЛАТА", "СТАТУСЫ ПОЗИЦИЙ"]
         assert not any("превышать 100%" in label for label in labels)
         assert not any(label.startswith("RUB —") for label in labels)
@@ -674,7 +676,8 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             assert card_titles(page) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["2", "0", "1", "0"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
-                "АКТИВНОСТЬ КЛИЕНТОВ", "КАНАЛЫ ВЗАИМОДЕЙСТВИЙ", "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
+                "АКТИВНОСТЬ КЛИЕНТОВ", "КАНАЛЫ ПО ПРОСМОТРАМ", "КАНАЛЫ ПО ИЗБРАННОМУ",
+                "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
             assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
@@ -1013,3 +1016,30 @@ def test_source_actions_only_technical_and_total_card(window, sample_result, fil
     rows = {quality.item(i, 0).text(): quality.item(i, 1).text() for i in range(quality.rowCount())}
     assert rows[ui.DIAGNOSTIC_LABELS['mapped_without_product']] == '88'
     assert tab.export_button.isEnabled()
+
+
+def test_final_chart_set_preserves_tables_and_section_titles(window, sample_result):
+    from Application.statistics_charts import StatisticsChart
+    from test_statistics_charts import _populated
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    _, tab = window
+    result = _populated(sample_result)
+    for _ in range(3):
+        tab.render(result)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(5)] == [4, 6, 4, 3, 0]
+        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [7, 7, 9, 6, 5]
+        chart_widgets = tab.findChildren(StatisticsChart)
+        assert len(chart_widgets) == 17
+        clients = tab.sections.widget(3).widget().layout()
+        frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
+        index = clients.indexOf(frequency)
+        following = clients.itemAt(index + 1).widget()
+        assert isinstance(following, QTableWidget)
+        assert following.horizontalHeaderItem(0).text() == 'Количество взаимодействий'
+        assert sorted(chart.chart().title() for chart in chart_widgets if chart.chart().title()) == [
+            'ДИНАМИКА ИЗБРАННОГО', 'ДИНАМИКА ПРОСМОТРОВ']
+        for chart in chart_widgets:
+            page = next(tab.sections.widget(i) for i in range(4) if chart in tab.sections.widget(i).findChildren(StatisticsChart))
+            assert page.horizontalScrollBar().maximum() == 0

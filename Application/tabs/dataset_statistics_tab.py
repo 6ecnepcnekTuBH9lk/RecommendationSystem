@@ -156,7 +156,9 @@ def _actions_page(layout, result):
          result["mean_favorites_per_user"], result["median_favorites_per_user"])])
     table(["Количество просмотров", "Количество клиентов", "Доля, %"], result["view_user_activity_distribution"])
     table(["Количество избранного", "Количество клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
-    _section_heading(layout, "Каналы взаимодействий")
+    for kind in ('views', 'favorites'):
+        _section_heading(layout, charts.channel_chart_data(result, kind).title)
+        layout.addWidget(charts.create_channel_chart(result, kind))
     table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
                     "Избранное", "Клиенты с избранным", "Доля избранного, %"],
            [row[1:] for row in result["action_channel_statistics"]])
@@ -195,9 +197,11 @@ def _products_page(layout, result):
                     ("Товары в избранном", result["products_with_favorites"]),
                     ("Купленные товары", result["products_with_purchases"])])
     _section_heading(layout, "Популярные товары по просмотрам")
+    layout.addWidget(charts.create_product_ranking_chart(result, "views"))
     table(["Код", "Название", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Покупки"],
           result["top_viewed_products"])
     _section_heading(layout, "Популярные товары по избранному")
+    layout.addWidget(charts.create_product_ranking_chart(result, "favorites"))
     table(["Код", "Название", "Добавления в избранное", "Клиенты с избранным", "Просмотры", "Покупки"],
           result["top_favorited_products"])
     _section_heading(layout, "Популярные товары по покупкам")
@@ -210,6 +214,8 @@ def _products_page(layout, result):
     for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
                          ("Спрос по стилевой группе", "product_style_statistics")):
         _section_heading(layout, title)
+        if field == "product_season_statistics":
+            layout.addWidget(charts.create_season_chart(result))
         group("Значение", field)
     _section_heading(layout, "Качество сопоставления")
     table(["Показатель", "Значение"], [
@@ -253,8 +259,12 @@ def _orders_page(layout, result):
     mixed, unknown = result["mixed_currency_purchase_orders"], result["unknown_currency_purchase_orders"]
     if mixed or unknown:
         layout.addWidget(_label(f"Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}."))
-    _section_heading(layout, "Динамика покупок")
-    layout.addWidget(charts.create_order_dynamics_chart(result))
+    for currency in ('RUB', 'KZT'):
+        _section_heading(layout, charts.purchase_count_data(result, currency).title)
+        layout.addWidget(charts.create_order_dynamics_chart(result, currency))
+    for currency in ('RUB', 'KZT'):
+        _section_heading(layout, 'Динамика суммы покупок — ' + currency)
+        layout.addWidget(charts.create_revenue_chart(result, currency))
     table(["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
            [(month[5:] + "." + month[:4], rub_n, _decimal_display(rub), kzt_n, _decimal_display(kzt))
             for month, rub_n, rub, kzt_n, kzt in result["order_monthly_dynamics"]])
@@ -264,6 +274,7 @@ def _orders_page(layout, result):
                [(name, n, buyers, lines, _decimal_display(units, money=False), _decimal_display(amount), _decimal_display(mean))
                 for unit, key, name, n, buyers, lines, units, amount, mean in result["store_statistics"] if unit == currency])
     _section_heading(layout, "Оплата")
+    layout.addWidget(charts.create_payment_chart(result))
     table(["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"], result["payment_type_distribution"])
     _section_heading(layout, "Статусы позиций")
     table(["Статус", "Позиции", "Доля, %", "Считается покупкой"],
@@ -636,8 +647,11 @@ class DatasetStatisticsTab(QWidget):
         _section_heading(customers, "Портрет клиента")
         if result["customers"] is None:
             customers.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))
+        _section_heading(customers, "Распределение по полу")
+        customers.addWidget(charts.create_gender_chart(result))
         _table(customers, ["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
         _cards(customers, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
+        _section_heading(customers, "Возрастная структура клиентов")
         customers.addWidget(charts.create_age_chart(result))
         _table(customers, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
         _section_heading(customers, "Активность клиентов")
@@ -651,6 +665,8 @@ class DatasetStatisticsTab(QWidget):
             ("Среднее число взаимодействий на активного клиента", result["mean_interactions"]),
             ("Медиана числа взаимодействий на активного клиента", result["median_interactions"]),
             ("Доля активных клиентов, совершивших покупку, %", result["active_buyer_rate"])])
+        _section_heading(customers, charts.interaction_frequency_data(result).title)
+        customers.addWidget(charts.create_interaction_frequency_chart(result))
         _table(customers, ["Количество взаимодействий", "Клиентов", "Доля, %"], result["interaction_activity_distribution"])
         _section_heading(customers, "Покупательская активность")
         _table(customers, ["Количество заказов", "Покупателей", "Доля покупателей, %"], result["purchase_order_distribution"])
