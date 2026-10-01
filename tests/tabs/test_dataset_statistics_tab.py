@@ -302,7 +302,8 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
         for index, counts in enumerate((7, 7, 9, 6)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
-        customers = tab.sections.widget(3).findChildren(QTableWidget)[0]
+        customers = next(table for table in tab.sections.widget(3).findChildren(QTableWidget)
+                         if table.horizontalHeaderItem(0).text() == 'Пол')
         assert customers.rowCount() == 3
         assert customers.item(2, 1).text() == "2"
         for index in range(5):
@@ -573,10 +574,10 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
             "2", "2", "1", "0", "—", "—"]
         headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
-        assert headings == ["ПОРТРЕТ КЛИЕНТА", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ",
+        assert headings == ["ПОРТРЕТ КЛИЕНТА", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ",
                             "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ"]
         tables = page.findChildren(QTableWidget)
-        assert [table.rowCount() for table in tables] == [3, 8, 9, 7, 5, 3]
+        assert [table.rowCount() for table in tables] == [8, 3, 9, 7, 5, 3]
         assert tables[2].item(8, 1).text() == "50.00"
         for table in tables:
             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
@@ -586,6 +587,50 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         bottom = tables[-1].mapTo(page.viewport(), tables[-1].rect().bottomLeft())
         assert page.viewport().rect().contains(bottom)
         assert_section_names(tab)
+
+
+@pytest.mark.parametrize('customers', [2, None])
+def test_customer_demographic_layout_order_and_missing_profiles(window, sample_result, customers):
+    from copy import deepcopy
+    from Application.statistics_charts import StatisticsChart
+    from test_statistics_charts import _populated
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    _, tab = window
+    result = _populated(sample_result)
+    result['customers'] = customers
+    before = deepcopy(result)
+    for _ in range(2):
+        tab.render(result)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        page = tab.sections.widget(3)
+        layout = page.widget().layout()
+        assert layout.itemAt(0).layout().count() == 4
+        assert layout.itemAt(1).widget().text() == 'ПОРТРЕТ КЛИЕНТА'
+        index = 2
+        if customers is None:
+            assert layout.itemAt(index).widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
+            index += 1
+        assert layout.itemAt(index).widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
+        cards = layout.itemAt(index + 1).layout()
+        assert cards.count() == 2
+        assert [cards.itemAt(i).widget().findChildren(QLabel)[0].text() for i in range(2)] == ['Средний возраст', 'Медианный возраст']
+        age = layout.itemAt(index + 2).widget()
+        age_table = layout.itemAt(index + 3).widget()
+        assert isinstance(age, StatisticsChart) and age.data.title == 'Возрастная структура клиентов'
+        assert isinstance(age_table, QTableWidget) and age_table.horizontalHeaderItem(0).text() == 'Возрастная группа'
+        assert layout.itemAt(index + 4).widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
+        gender = layout.itemAt(index + 5).widget()
+        gender_table = layout.itemAt(index + 6).widget()
+        assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
+        assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
+        assert layout.itemAt(index + 7).widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
+        assert len(page.findChildren(QTableWidget)) == 6
+        assert len(page.findChildren(StatisticsChart)) == 3
+        assert len(tab.findChildren(StatisticsChart)) == 17
+        assert card_titles(page) == ['Количество клиентов', 'Активные клиенты', 'Покупатели',
+                                    'Повторные покупатели (от 2 покупок)', 'Средний возраст', 'Медианный возраст']
+        assert result == before
 
 
 def test_old_complete_cache_opens_empty_without_modifying_it(app, sample_result):

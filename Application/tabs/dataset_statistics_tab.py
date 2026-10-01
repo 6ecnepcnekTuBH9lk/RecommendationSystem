@@ -649,13 +649,13 @@ class DatasetStatisticsTab(QWidget):
         _section_heading(customers, "Портрет клиента")
         if result["customers"] is None:
             customers.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))
+        _section_heading(customers, "Возрастная структура клиентов")
+        _cards(customers, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
+        customers.addWidget(charts.create_age_chart(result))
+        _table(customers, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
         _section_heading(customers, "Распределение по полу")
         customers.addWidget(charts.create_gender_chart(result))
         _table(customers, ["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
-        _cards(customers, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
-        _section_heading(customers, "Возрастная структура клиентов")
-        customers.addWidget(charts.create_age_chart(result))
-        _table(customers, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
         _section_heading(customers, "Активность клиентов")
         _table(customers, ["Показатель", "Значение"], [
             ("Клиенты с просмотрами", result["view_users"]),
