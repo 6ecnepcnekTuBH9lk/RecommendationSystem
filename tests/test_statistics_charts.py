@@ -59,12 +59,70 @@ def test_empty_and_all_zero_widgets(app, value):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
+@pytest.mark.parametrize('kind,field,noun', [('views', 'view_user_activity_distribution', 'просмотров'),
+                                           ('favorites', 'favorite_user_activity_distribution', 'избранного')])
+def test_activity_distribution_source_order_tooltip_and_no_mutation(kind, field, noun):
+    rows = (('1', 9999, 10.), ('2–5', 1248, 18.37), ('101+', 7, .02))
+    result = {field: rows, 'action_monthly_dynamics': (('2025-01', 999999, 888888, 777777, 666666),)}
+    before = deepcopy(result)
+    data = charts.activity_distribution_data(result, kind)
+    assert data.kind == 'bar' and data.labels == ('1', '2–5', '101+')
+    assert data.series == (('Клиентов', (9999, 1248, 7)),)
+    assert data.secondary == (kind == 'favorites') and not data.inner_title
+    assert data.title == f'Распределение клиентов по количеству {noun}'
+    assert data.tooltips[0][1] == f'Количество {noun}: 2–5\nКлиентов: 1 248\nДоля: 18,37 %'
+    assert result == before
+
+
+@pytest.mark.parametrize('kind', ['views', 'favorites'])
+@pytest.mark.parametrize('value', [None, (), (('1', 0, 0.),)])
+def test_activity_distribution_empty_widgets(app, kind, value):
+    field = {'views': 'view_user_activity_distribution', 'favorites': 'favorite_user_activity_distribution'}[kind]
+    result = {field: value}
+    widget = charts.create_activity_distribution_chart(result, kind)
+    assert widget.objectName() == 'statisticsChartEmpty'
+    assert any(label.text() == 'Нет данных для отображения.' for label in widget.findChildren(QLabel))
+    widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_activity_distributions_independent_scales_resize_tooltip(app):
+    result = {'view_user_activity_distribution': (('1', 50000, 30.), ('2–5', 83000, 70.)),
+              'favorite_user_activity_distribution': (('1', 7, 40.), ('2', 10, 50.), ('3–5', 2, 5.),
+                                                      ('6–10', 1, 3.), ('11+', 1, 2.))}
+    view = charts.create_activity_distribution_chart(result, 'views')
+    favorite = charts.create_activity_distribution_chart(result, 'favorites')
+    assert view.count_axis.max() > 83000 and favorite.count_axis.max() < 100
+    try:
+        for widget in (view, favorite):
+            widget.show()
+            for width in (480, 1400, 480):
+                widget.resize(width, 320); app.processEvents()
+                assert widget.chart().plotArea().width() > 100
+                assert not widget.chart().legend().isVisible() and not widget.chart().title()
+                assert [item.toPlainText() for item in widget._bar_labels] == list(widget.data.labels)
+                widget.show_tooltip(0, 0, True)
+                assert widget.viewport().rect().contains(widget.tooltip.geometry())
+                app.sendEvent(widget, QEvent(QEvent.Type.Leave))
+                assert not widget.tooltip.isVisible()
+            widget.show_tooltip(0, 0, True)
+            widget.resize(700, 320); app.processEvents()
+            assert not widget.tooltip.isVisible()
+            widget.show_tooltip(0, 0, True)
+            widget.hide(); assert not widget.tooltip.isVisible()
+    finally:
+        for widget in (view, favorite):
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
 def _populated(result):
     result = deepcopy(result)
     result['action_monthly_dynamics'] = (('2025-01', 2, 1, 1, 1),)
     result['action_channel_statistics'] = (('web', 'Сайт', 2, 1, 100., 1, 1, 100.),)
     result['order_monthly_dynamics'] = (('2025-01', 1, '40.25', 1, '50.75'),)
     result['top_favorited_products'] = (('A', 'Избранный', 1, 1, 2, 1),)
+    result['favorite_user_activity_distribution'] = (('1', 1, 100.), ('2', 0, 0.), ('3–5', 0, 0.), ('6–10', 0, 0.), ('11+', 0, 0.))
     return result
 
 
@@ -240,9 +298,6 @@ def test_new_projections_order_decimal_and_empty(sample_result):
     result['payment_type_distribution'] = (('Карта', 3, 75.), ('Наличные', 1, 25.))
     result['wear_season_statistics'] = (('СезонНоски: игнорировать', 1000000),)
     original = deepcopy(result)
-    assert charts.channel_chart_data(result, 'views').series[0][1] == tuple(range(11, 1, -1))
-    assert charts.channel_chart_data(result, 'favorites').series[0][1] == tuple(range(20, 10, -1))
-    assert 'channel.ru11' in charts.channel_chart_data(result, 'views').tooltips[0][0]
     assert charts.revenue_chart_data(result, 'RUB').series == (('RUB', (Decimal('40.25'),)),)
     assert charts.revenue_chart_data(result, 'KZT').series == (('KZT', (Decimal('50.75'),)),)
     assert '40,25 RUB' in charts.revenue_chart_data(result, 'RUB').tooltips[0][0]
@@ -265,7 +320,7 @@ def test_new_projections_order_decimal_and_empty(sample_result):
     assert result == original
     assert charts.compact_number(1250000000) == '1,2 млрд'
     assert charts.compact_number(.25) == '0,25'
-    for helper in (lambda r: charts.channel_chart_data(r, 'views'), lambda r: charts.channel_chart_data(r, 'favorites'),
+    for helper in (lambda r: charts.activity_distribution_data(r, 'views'), lambda r: charts.activity_distribution_data(r, 'favorites'),
                    lambda r: charts.revenue_chart_data(r, 'RUB'), lambda r: charts.revenue_chart_data(r, 'KZT'),
                    charts.payment_chart_data, lambda r: charts.product_ranking_data(r, 'views'),
                    lambda r: charts.product_ranking_data(r, 'favorites'), charts.season_chart_data, charts.gender_chart_data):
@@ -292,7 +347,7 @@ def test_long_season_scroll_and_payment_top_ten(app):
 
 
 def test_new_empty_widgets_and_donut_hover(app, sample_result):
-    helpers = (lambda r: charts.channel_chart_data(r, 'views'), lambda r: charts.channel_chart_data(r, 'favorites'),
+    helpers = (lambda r: charts.activity_distribution_data(r, 'views'), lambda r: charts.activity_distribution_data(r, 'favorites'),
                lambda r: charts.revenue_chart_data(r, 'RUB'), lambda r: charts.revenue_chart_data(r, 'KZT'),
                charts.payment_chart_data, lambda r: charts.product_ranking_data(r, 'views'),
                lambda r: charts.product_ranking_data(r, 'favorites'), charts.season_chart_data, charts.gender_chart_data)
@@ -332,7 +387,7 @@ def test_vertical_season_labels_fit_narrow_and_wide(app):
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
-def test_purchase_split_roles_and_channel_headings(sample_result):
+def test_purchase_split_and_requested_color_roles(sample_result):
     result = _populated(sample_result)
     result['order_monthly_dynamics'] = (('2025-01', 12000, '40.25', 2, '50.75'), ('2025-02', 8000, '10', 3, '20'))
     result['action_channel_statistics'] *= 12
@@ -344,11 +399,9 @@ def test_purchase_split_roles_and_channel_headings(sample_result):
         assert data.tooltips[0][0] == f'Январь 2025\nПокупок: {charts.exact_number(expected[0])}\nВалюта: {currency}'
         assert data.secondary == (currency == 'KZT')
         assert charts.revenue_chart_data(result, currency).secondary == (currency == 'KZT')
-    assert charts.payment_chart_data(result).secondary
-    assert charts.season_chart_data(result).secondary
-    for kind, title in [('views', 'Каналы по просмотрам'), ('favorites', 'Каналы по избранному')]:
-        data = charts.channel_chart_data(result, kind)
-        assert data.title == title and len(data.labels) == 10
+    assert not charts.payment_chart_data(result).secondary
+    assert not charts.season_chart_data(result).secondary
+    assert not charts.product_ranking_data(result, 'favorites').secondary
     assert result == before
 
 

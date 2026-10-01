@@ -676,7 +676,8 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             assert card_titles(page) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["2", "0", "1", "0"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
-                "АКТИВНОСТЬ КЛИЕНТОВ", "КАНАЛЫ ПО ПРОСМОТРАМ", "КАНАЛЫ ПО ИЗБРАННОМУ",
+                "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ПРОСМОТРОВ",
+                "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ИЗБРАННОГО", "КАНАЛЫ",
                 "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
             assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
             tables = page.findChildren(QTableWidget)
@@ -1032,6 +1033,22 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [7, 7, 9, 6, 5]
         chart_widgets = tab.findChildren(StatisticsChart)
         assert len(chart_widgets) == 17
+        actions = tab.sections.widget(0).widget().layout()
+        action_charts = tab.sections.widget(0).findChildren(StatisticsChart)
+        assert {chart.data.title for chart in action_charts} == {
+            'Распределение клиентов по количеству просмотров', 'Распределение клиентов по количеству избранного',
+            'Динамика просмотров', 'Динамика избранного'}
+        for kind, header in [('просмотров', 'Количество просмотров'), ('избранного', 'Количество избранного')]:
+            chart = next(chart for chart in action_charts if chart.data.title.endswith(kind))
+            index = actions.indexOf(chart)
+            assert actions.itemAt(index - 1).widget().text() == chart.data.title.upper()
+            following = actions.itemAt(index + 1).widget()
+            assert isinstance(following, QTableWidget) and following.horizontalHeaderItem(0).text() == header
+        view = next(chart for chart in action_charts if chart.data.title.endswith('просмотров'))
+        favorite = next(chart for chart in action_charts if chart.data.title.endswith('избранного'))
+        assert actions.indexOf(favorite) == actions.indexOf(view) + 3
+        assert not any(label.text() == 'ДИНАМИКА КЛИЕНТОВ С ПРОСМОТРАМИ' for label in tab.findChildren(QLabel))
+        assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 17
         clients = tab.sections.widget(3).widget().layout()
         frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
         index = clients.indexOf(frequency)

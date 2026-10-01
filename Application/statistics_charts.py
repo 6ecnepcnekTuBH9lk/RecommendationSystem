@@ -103,14 +103,15 @@ def purchased_products_data(result):
                             f'Продано единиц: {exact_number(quantity)}' for code, name, count, users, quantity, *_ in rows),), ranked=True)
 
 
-def channel_chart_data(result, kind):
-    index, users, share, unit = {'views': (2, 3, 4, 'Просмотры'), 'favorites': (5, 6, 7, 'Избранное')}[kind]
-    rows = sorted(result.get('action_channel_statistics') or (), key=lambda row: (-row[index], str(row[1]), str(row[0])))[:10]
-    return ChartData(f'Каналы по {"просмотрам" if kind == "views" else "избранному"}', 'horizontal',
-                     tuple(row[1] for row in rows), ((unit, tuple(row[index] for row in rows)),),
-                     (tuple(f'{row[1]}\n{unit}: {exact_number(row[index])}\nКлиентов: {exact_number(row[users])}\n'
-                            f'Доля: {format(row[share], ".2f").replace(".", ",")} %' for row in rows),),
-                     ranked=True, secondary=kind == 'favorites')
+def activity_distribution_data(result, kind):
+    field, noun = {'views': ('view_user_activity_distribution', 'просмотров'),
+                   'favorites': ('favorite_user_activity_distribution', 'избранного')}[kind]
+    rows = result.get(field) or ()
+    return ChartData(f'Распределение клиентов по количеству {noun}', 'bar', tuple(row[0] for row in rows),
+                     (('Клиентов', tuple(row[1] for row in rows)),),
+                     (tuple(f'Количество {noun}: {label}\nКлиентов: {exact_number(count)}\n'
+                            f'Доля: {format(rate, ".2f").replace(".", ",")} %' for label, count, rate in rows),),
+                     secondary=kind == 'favorites')
 
 
 def revenue_chart_data(result, currency):
@@ -127,7 +128,7 @@ def payment_chart_data(result):
     if len(rows) > 10:
         rows = sorted(rows, key=lambda row: (-row[1], row[0]))[:10]
     return ChartData('Оплата', 'horizontal', tuple(row[0] for row in rows), (('Заказов', tuple(row[1] for row in rows)),),
-                     (tuple(f'{name}\nЗаказов с этим способом: {exact_number(count)}\nДоля заказов: {format(rate, ".2f").replace(".", ",")} %' for name, count, rate in rows),), secondary=True)
+                     (tuple(f'{name}\nЗаказов с этим способом: {exact_number(count)}\nДоля заказов: {format(rate, ".2f").replace(".", ",")} %' for name, count, rate in rows),))
 
 
 def product_ranking_data(result, kind):
@@ -139,7 +140,7 @@ def product_ranking_data(result, kind):
     return ChartData(title, 'horizontal', tuple(row[1] for row in rows), ((unit, tuple(row[2] for row in rows)),),
                      (tuple(f'Код: {code}\n{name}\n{unit}: {exact_number(count)}\n{user_unit}: {exact_number(users)}\n'
                             f'{extra}: {exact_number(other)}\nПокупки: {exact_number(purchases)}'
-                            for code, name, count, users, other, purchases in rows),), ranked=True, secondary=kind == 'favorites')
+                            for code, name, count, users, other, purchases in rows),), ranked=True)
 
 
 def season_chart_data(result):
@@ -149,7 +150,7 @@ def season_chart_data(result):
                      (('Покупки', tuple(row[4] for row in rows)),),
                      (tuple(f'{name}\nТоваров: {exact_number(items)}\nПросмотры: {exact_number(views)}\n'
                             f'Добавления в избранное: {exact_number(favorites)}\nПокупки: {exact_number(purchases)}\n'
-                            f'Продано единиц: {exact_number(quantity)}' for name, items, views, favorites, purchases, quantity in rows),), secondary=True)
+                            f'Продано единиц: {exact_number(quantity)}' for name, items, views, favorites, purchases, quantity in rows),))
 
 
 def gender_chart_data(result):
@@ -513,8 +514,8 @@ def create_age_chart(result):
     return create_chart(distribution_data(result, 'age'))
 
 
-def create_channel_chart(result, kind):
-    return create_chart(channel_chart_data(result, kind))
+def create_activity_distribution_chart(result, kind):
+    return create_chart(activity_distribution_data(result, kind))
 
 
 def create_revenue_chart(result, currency):

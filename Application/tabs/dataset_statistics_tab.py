@@ -154,11 +154,13 @@ def _actions_page(layout, result):
         ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
         ("Добавления в избранное", result["favorite_interactions"], result["favorite_users"],
          result["mean_favorites_per_user"], result["median_favorites_per_user"])])
+    _section_heading(layout, charts.activity_distribution_data(result, 'views').title)
+    layout.addWidget(charts.create_activity_distribution_chart(result, 'views'))
     table(["Количество просмотров", "Количество клиентов", "Доля, %"], result["view_user_activity_distribution"])
+    _section_heading(layout, charts.activity_distribution_data(result, 'favorites').title)
+    layout.addWidget(charts.create_activity_distribution_chart(result, 'favorites'))
     table(["Количество избранного", "Количество клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
-    for kind in ('views', 'favorites'):
-        _section_heading(layout, charts.channel_chart_data(result, kind).title)
-        layout.addWidget(charts.create_channel_chart(result, kind))
+    _section_heading(layout, "Каналы")
     table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
                     "Избранное", "Клиенты с избранным", "Доля избранного, %"],
            [row[1:] for row in result["action_channel_statistics"]])
