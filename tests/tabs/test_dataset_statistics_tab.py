@@ -25,6 +25,19 @@ from Application.settings.set_status import set_ready_status, schedule_status_re
 pytestmark = pytest.mark.usefixtures("window_settings")
 
 
+def _visual_items(layout):
+    """Preserve content-order checks across the explicit section containers."""
+    items = []
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        section = item.layout()
+        if section is not None and section.objectName() == 'statisticsSectionLayout':
+            items.extend(section.itemAt(i) for i in range(section.count()))
+        else:
+            items.append(item)
+    return items
+
+
 @pytest.fixture
 def app():
     application = QApplication.instance() or QApplication([])
@@ -285,7 +298,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert isinstance(technical, QScrollArea)
         assert technical.widgetResizable()
         layout = technical.widget().layout()
-        assert layout.spacing() == ui.BLOCK_SPACING
+        assert layout.spacing() == ui.SECTION_SPACING
         assert layout.count() == 5
         coverage, summary, raw, quality, diagnostics = technical.findChildren(QTableWidget)
         assert technical.findChildren(QTableWidget) == [coverage, summary, raw, quality, diagnostics]
@@ -342,7 +355,7 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert card_titles(tab.sections.widget(2)) == ["Товары с взаимодействиями", "Товары с просмотрами",
                                                 "Товары в избранном", "Купленные товары"]
     for index in range(5):
-        assert tab.sections.widget(index).widget().layout().spacing() == ui.BLOCK_SPACING
+        assert tab.sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
     labels = [label.text() for label in tab.findChildren(QLabel)]
     cells = []
     for table in tab.findChildren(QTableWidget):
@@ -568,7 +581,7 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         QApplication.processEvents()
         page = tab.sections.widget(3)
         assert page.widgetResizable()
-        assert page.widget().layout().spacing() == ui.BLOCK_SPACING
+        assert page.widget().layout().spacing() == ui.SECTION_SPACING
         assert card_titles(page) == ["Количество клиентов", "Активные клиенты", "Покупатели", "Повторные покупатели (от 2 покупок)",
                                     "Средний возраст", "Медианный возраст"]
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
@@ -605,26 +618,27 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         QApplication.processEvents()
         page = tab.sections.widget(3)
         layout = page.widget().layout()
-        assert layout.itemAt(0).layout().count() == 4
-        assert layout.itemAt(1).widget().text() == 'ПОРТРЕТ КЛИЕНТА'
+        items = _visual_items(layout)
+        assert items[0].layout().count() == 4
+        assert items[1].widget().text() == 'ПОРТРЕТ КЛИЕНТА'
         index = 2
         if customers is None:
-            assert layout.itemAt(index).widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
+            assert items[index].widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
             index += 1
-        assert layout.itemAt(index).widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
-        cards = layout.itemAt(index + 1).layout()
+        assert items[index].widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
+        cards = items[index + 1].layout()
         assert cards.count() == 2
         assert [cards.itemAt(i).widget().findChildren(QLabel)[0].text() for i in range(2)] == ['Средний возраст', 'Медианный возраст']
-        age = layout.itemAt(index + 2).widget()
-        age_table = layout.itemAt(index + 3).widget()
+        age = items[index + 2].widget()
+        age_table = items[index + 3].widget()
         assert isinstance(age, StatisticsChart) and age.data.title == 'Возрастная структура клиентов'
         assert isinstance(age_table, QTableWidget) and age_table.horizontalHeaderItem(0).text() == 'Возрастная группа'
-        assert layout.itemAt(index + 4).widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
-        gender = layout.itemAt(index + 5).widget()
-        gender_table = layout.itemAt(index + 6).widget()
+        assert items[index + 4].widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
+        gender = items[index + 5].widget()
+        gender_table = items[index + 6].widget()
         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
-        assert layout.itemAt(index + 7).widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
+        assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
         assert len(page.findChildren(QTableWidget)) == 6
         assert len(page.findChildren(StatisticsChart)) == 3
         assert len(tab.findChildren(StatisticsChart)) == 17
@@ -668,7 +682,7 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         tab.sections.setCurrentIndex(1)
         QApplication.processEvents()
         page = tab.sections.widget(1)
-        assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+        assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
         assert card_titles(page)[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
         assert len(card_titles(page)) == 8
         labels = [label.text() for label in page.findChildren(QLabel)]
@@ -685,7 +699,7 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         assert tables[1].rowCount() == 2  # No cross-currency total.
         assert tables[1].item(0, 4).text() == "40.00"
         assert tables[2].item(0, 0).text() == "01.2025"
-        assert page.widget().layout().itemAt(page.widget().layout().count() - 1).widget() is tables[-1]
+        assert _visual_items(page.widget().layout())[-1].widget() is tables[-1]
         for table in tables:
             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
         assert page.verticalScrollBar().maximum() > 0
@@ -724,7 +738,7 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
                 "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ПРОСМОТРОВ",
                 "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ИЗБРАННОГО", "КАНАЛЫ",
                 "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
-            assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+            assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
             assert tables[4].item(0, 0).text() == "01.2025"
@@ -776,7 +790,7 @@ def test_products_analytics_themes_headers_scroll_and_no_duplicates(window, samp
             assert all(tables[i].item(0, 0).text() == "Не указано" for i in range(3, 7))
             assert tables[7].rowCount() == 5 and tables[7].item(2, 1).text() == "3"
             assert tables[8].item(0, 0).text() == "offline1C"
-            assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+            assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
             for table in tables:
                 assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
             wait_until(lambda: page.verticalScrollBar().maximum() > 0)
@@ -1100,26 +1114,26 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [7, 7, 9, 6, 5]
         chart_widgets = tab.findChildren(StatisticsChart)
         assert len(chart_widgets) == 17
-        actions = tab.sections.widget(0).widget().layout()
+        actions = _visual_items(tab.sections.widget(0).widget().layout())
         action_charts = tab.sections.widget(0).findChildren(StatisticsChart)
         assert {chart.data.title for chart in action_charts} == {
             'Распределение клиентов по количеству просмотров', 'Распределение клиентов по количеству избранного',
             'Динамика просмотров', 'Динамика избранного'}
         for kind, header in [('просмотров', 'Количество просмотров'), ('избранного', 'Количество избранного')]:
             chart = next(chart for chart in action_charts if chart.data.title.endswith(kind))
-            index = actions.indexOf(chart)
-            assert actions.itemAt(index - 1).widget().text() == chart.data.title.upper()
-            following = actions.itemAt(index + 1).widget()
+            index = next(i for i, item in enumerate(actions) if item.widget() is chart)
+            assert actions[index - 1].widget().text() == chart.data.title.upper()
+            following = actions[index + 1].widget()
             assert isinstance(following, QTableWidget) and following.horizontalHeaderItem(0).text() == header
         view = next(chart for chart in action_charts if chart.data.title.endswith('просмотров'))
         favorite = next(chart for chart in action_charts if chart.data.title.endswith('избранного'))
-        assert actions.indexOf(favorite) == actions.indexOf(view) + 3
+        assert next(i for i, item in enumerate(actions) if item.widget() is favorite) == next(i for i, item in enumerate(actions) if item.widget() is view) + 3
         assert not any(label.text() == 'ДИНАМИКА КЛИЕНТОВ С ПРОСМОТРАМИ' for label in tab.findChildren(QLabel))
         assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 17
-        clients = tab.sections.widget(3).widget().layout()
+        clients = _visual_items(tab.sections.widget(3).widget().layout())
         frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
-        index = clients.indexOf(frequency)
-        following = clients.itemAt(index + 1).widget()
+        index = next(i for i, item in enumerate(clients) if item.widget() is frequency)
+        following = clients[index + 1].widget()
         assert isinstance(following, QTableWidget)
         assert following.horizontalHeaderItem(0).text() == 'Количество взаимодействий'
         assert sorted(chart.chart().title() for chart in chart_widgets if chart.chart().title()) == [

@@ -101,7 +101,7 @@ def test_main_window_has_only_current_tabs_and_reference_section(app, monkeypatc
             assert not hasattr(window, attr)
         for dark in (True, False, True):
             window.apply_theme(dark)
-            window.apply_static_widget_styles()
+            assert not hasattr(window, 'apply_static_widget_styles')
             app.processEvents()
             assert window._current_is_dark is dark
             assert [window.tabs.tabText(i) for i in range(5)] == titles

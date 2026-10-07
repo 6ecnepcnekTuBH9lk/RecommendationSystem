@@ -15,7 +15,7 @@ from Application import store_city_mapping as mapping
 from Application.paths import ICONS_DIR
 from Application.settings.set_status import set_status_ok, set_status_error, schedule_status_reset
 from Application.tabs.data_loading_tab import _heading
-from Application.tabs.dataset_statistics_tab import BLOCK_SPACING
+from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
 
 
 class MultiSelect(QToolButton):
@@ -31,7 +31,11 @@ class MultiSelect(QToolButton):
         self.setMenu(self.menu)
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+        layout.setSpacing(BLOCK_SPACING)
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(CONTROL_SPACING)
         self.select_all = QPushButton("Выбрать все")
         self.select_none = QPushButton("Снять все")
         buttons.addWidget(self.select_all)
@@ -188,12 +192,16 @@ class AnalysisFilterTab(QWidget):
         layout.addWidget(separator)
         layout.addWidget(right, 1)
         left_layout, right_layout = QVBoxLayout(left), QVBoxLayout(right)
+        for panel in (left_layout, right_layout):
+            panel.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
         left_layout.setSpacing(BLOCK_SPACING)
-        right_layout.setSpacing(10)
+        right_layout.setSpacing(BLOCK_SPACING)
         self._headings = []
         for target, title in ((left_layout, "Отбор для анализа"),
                               (right_layout, "Правила формирования рекомендаций")):
             heading_row = QHBoxLayout()
+            heading_row.setContentsMargins(0, 0, 0, 0)
+            heading_row.setSpacing(CONTROL_SPACING)
             heading_row.addStretch()
             heading = _heading(title, heading_row)
             heading.setWordWrap(True)
@@ -211,10 +219,13 @@ class AnalysisFilterTab(QWidget):
         self.controls = QWidget()
         groups = QHBoxLayout(self.controls)
         groups.setContentsMargins(0, 0, 0, 0)
+        groups.setSpacing(CONTROL_SPACING)
         self.date_group, self.product_group = QWidget(), QWidget()
         self.date_form, self.product_form = QFormLayout(self.date_group), QFormLayout(self.product_group)
         for form in (self.date_form, self.product_form):
             form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(CONTROL_SPACING)
+            form.setVerticalSpacing(CONTROL_SPACING)
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         groups.addWidget(self.date_group)
@@ -235,6 +246,8 @@ class AnalysisFilterTab(QWidget):
         self.collections.changed.connect(self._validate)
         left_layout.addWidget(self.controls)
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(CONTROL_SPACING)
         self.apply_button = QPushButton(QIcon(str(ICONS_DIR / "filter.png")), " Применить")
         self.reset_button = QPushButton(QIcon(str(ICONS_DIR / "cart.png")), " Сбросить")
         for button in (self.apply_button, self.reset_button):
@@ -246,11 +259,14 @@ class AnalysisFilterTab(QWidget):
         self.reset_button.clicked.connect(self.reset)
         self.apply_button.clicked.connect(self.apply)
         heading_row = QHBoxLayout()
+        heading_row.setContentsMargins(0, 0, 0, 0)
+        heading_row.setSpacing(CONTROL_SPACING)
         heading_row.addStretch()
         heading = _heading("Распределение магазинов по городам", heading_row)
         heading.setWordWrap(True)
         heading.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         heading_row.addStretch()
+        left_layout.addSpacing(SECTION_SPACING - BLOCK_SPACING)
         left_layout.addLayout(heading_row)
         self._headings.append(heading)
         self.store_table = QTableWidget(0, 2)
@@ -290,10 +306,10 @@ class AnalysisFilterTab(QWidget):
         label_width = max(self.date_form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget().sizeHint().width()
                           for i in range(2)) + max(
             self.product_form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget().sizeHint().width() for i in range(2))
-        narrow = self.controls.width() < 2 * width + label_width + 3 * BLOCK_SPACING
+        narrow = self.controls.width() < 2 * width + label_width + 3 * SECTION_SPACING
         for form in (self.date_form, self.product_form):
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows if narrow else QFormLayout.RowWrapPolicy.DontWrapRows)
-        width = max(80, min(width, (self.controls.width() - BLOCK_SPACING) // 2))
+        width = max(80, min(width, (self.controls.width() - SECTION_SPACING) // 2))
         for group, form in ((self.date_group, self.date_form), (self.product_group, self.product_form)):
             labels = max(form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget().sizeHint().width() for i in range(2))
             group.setFixedWidth(width if narrow else width + labels + max(0, form.horizontalSpacing()))

@@ -1,0 +1,1428 @@
+--- before/Application/tabs/analysis_filter_tab.py
++++ after/Application/tabs/analysis_filter_tab.py
+@@ -15,7 +15,7 @@
+ from Application.paths import ICONS_DIR
+ from Application.settings.set_status import set_status_ok, set_status_error, schedule_status_reset
+ from Application.tabs.data_loading_tab import _heading
+-from Application.tabs.dataset_statistics_tab import BLOCK_SPACING
++from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
+ 
+ 
+ class MultiSelect(QToolButton):
+@@ -31,7 +31,11 @@
+         self.setMenu(self.menu)
+         container = QWidget()
+         layout = QVBoxLayout(container)
++        layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++        layout.setSpacing(BLOCK_SPACING)
+         buttons = QHBoxLayout()
++        buttons.setContentsMargins(0, 0, 0, 0)
++        buttons.setSpacing(CONTROL_SPACING)
+         self.select_all = QPushButton("Выбрать все")
+         self.select_none = QPushButton("Снять все")
+         buttons.addWidget(self.select_all)
+@@ -188,12 +192,16 @@
+         layout.addWidget(separator)
+         layout.addWidget(right, 1)
+         left_layout, right_layout = QVBoxLayout(left), QVBoxLayout(right)
++        for panel in (left_layout, right_layout):
++            panel.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+         left_layout.setSpacing(BLOCK_SPACING)
+-        right_layout.setSpacing(10)
++        right_layout.setSpacing(BLOCK_SPACING)
+         self._headings = []
+         for target, title in ((left_layout, "Отбор для анализа"),
+                               (right_layout, "Правила формирования рекомендаций")):
+             heading_row = QHBoxLayout()
++            heading_row.setContentsMargins(0, 0, 0, 0)
++            heading_row.setSpacing(CONTROL_SPACING)
+             heading_row.addStretch()
+             heading = _heading(title, heading_row)
+             heading.setWordWrap(True)
+@@ -211,10 +219,13 @@
+         self.controls = QWidget()
+         groups = QHBoxLayout(self.controls)
+         groups.setContentsMargins(0, 0, 0, 0)
++        groups.setSpacing(CONTROL_SPACING)
+         self.date_group, self.product_group = QWidget(), QWidget()
+         self.date_form, self.product_form = QFormLayout(self.date_group), QFormLayout(self.product_group)
+         for form in (self.date_form, self.product_form):
+             form.setContentsMargins(0, 0, 0, 0)
++            form.setHorizontalSpacing(CONTROL_SPACING)
++            form.setVerticalSpacing(CONTROL_SPACING)
+             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+         groups.addWidget(self.date_group)
+@@ -235,6 +246,8 @@
+         self.collections.changed.connect(self._validate)
+         left_layout.addWidget(self.controls)
+         buttons = QHBoxLayout()
++        buttons.setContentsMargins(0, 0, 0, 0)
++        buttons.setSpacing(CONTROL_SPACING)
+         self.apply_button = QPushButton(QIcon(str(ICONS_DIR / "filter.png")), " Применить")
+         self.reset_button = QPushButton(QIcon(str(ICONS_DIR / "cart.png")), " Сбросить")
+         for button in (self.apply_button, self.reset_button):
+@@ -246,11 +259,14 @@
+         self.reset_button.clicked.connect(self.reset)
+         self.apply_button.clicked.connect(self.apply)
+         heading_row = QHBoxLayout()
++        heading_row.setContentsMargins(0, 0, 0, 0)
++        heading_row.setSpacing(CONTROL_SPACING)
+         heading_row.addStretch()
+         heading = _heading("Распределение магазинов по городам", heading_row)
+         heading.setWordWrap(True)
+         heading.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+         heading_row.addStretch()
++        left_layout.addSpacing(SECTION_SPACING - BLOCK_SPACING)
+         left_layout.addLayout(heading_row)
+         self._headings.append(heading)
+         self.store_table = QTableWidget(0, 2)
+@@ -290,10 +306,10 @@
+         label_width = max(self.date_form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget().sizeHint().width()
+                           for i in range(2)) + max(
+             self.product_form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget().sizeHint().width() for i in range(2))
+-        narrow = self.controls.width() < 2 * width + label_width + 3 * BLOCK_SPACING
++        narrow = self.controls.width() < 2 * width + label_width + 3 * SECTION_SPACING
+         for form in (self.date_form, self.product_form):
+             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows if narrow else QFormLayout.RowWrapPolicy.DontWrapRows)
+-        width = max(80, min(width, (self.controls.width() - BLOCK_SPACING) // 2))
++        width = max(80, min(width, (self.controls.width() - SECTION_SPACING) // 2))
+         for group, form in ((self.date_group, self.date_form), (self.product_group, self.product_form)):
+             labels = max(form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget().sizeHint().width() for i in range(2))
+             group.setFixedWidth(width if narrow else width + labels + max(0, form.horizontalSpacing()))
+--- before/Application/tabs/create_results_tab.py
++++ after/Application/tabs/create_results_tab.py
+@@ -11,6 +11,7 @@
+                              QTableWidgetItem)
+ 
+ from Application.photo.photo_processing import (_ensure_photo_map, _photo_url_for_code, _set_photo_cell)
++from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING, PAGE_MARGIN
+ 
+ from Application.settings.settings_and_filter import (
+     get_selected_list_values
+@@ -43,8 +44,8 @@
+ 
+     # ================== 1) ВЕРХНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ (2 строки) ==================
+     top_controls = QVBoxLayout()
+-    top_controls.setContentsMargins(10, 10, 10, 0)
+-    top_controls.setSpacing(10)
++    top_controls.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, BLOCK_SPACING)
++    top_controls.setSpacing(CONTROL_SPACING)
+ 
+     # ---- фильтр клиента ----
+     aboba.client_filter_field = QComboBox()
+@@ -70,7 +71,8 @@
+ 
+     # ---- 1 строка: Идентификатор клиента: ----
+     row1 = QHBoxLayout()
+-    row1.setSpacing(10)
++    row1.setContentsMargins(0, 0, 0, 0)
++    row1.setSpacing(CONTROL_SPACING)
+ 
+     lbl_client = QLabel("Идентификатор клиента:")
+ 
+@@ -80,7 +82,8 @@
+ 
+     # ---- 2 строка: Количество рекомендаций ----
+     row2 = QHBoxLayout()
+-    row2.setSpacing(10)
++    row2.setContentsMargins(0, 0, 0, 0)
++    row2.setSpacing(CONTROL_SPACING)
+ 
+     lbl_recs = QLabel("Количество рекомендаций:")
+     lbl_recs.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+@@ -101,6 +104,8 @@
+ 
+     # ====== ОБЁРТКА: верхняя панель = 2 колонки (левая 50%, правая 50%) ======
+     top_wrap = QHBoxLayout()
++    top_wrap.setContentsMargins(0, 0, 0, 0)
++    top_wrap.setSpacing(CONTROL_SPACING)
+ 
+     top_left = QWidget()
+     top_left.setLayout(top_controls)
+@@ -108,11 +113,13 @@
+     aboba.top_right = QWidget()
+ 
+     right_box = QVBoxLayout(aboba.top_right)
+-    right_box.setContentsMargins(10, 10, 10, 0)
++    right_box.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, BLOCK_SPACING)
++    right_box.setSpacing(BLOCK_SPACING)
+     right_box.setAlignment(Qt.AlignmentFlag.AlignTop)
+ 
+     grid = QGridLayout()
+-    grid.setHorizontalSpacing(15)
++    grid.setContentsMargins(0, 0, 0, 0)
++    grid.setHorizontalSpacing(BLOCK_SPACING)
+     grid.setVerticalSpacing(0)
+ 
+     def _mk_readonly_line() -> QLineEdit:
+@@ -125,8 +132,8 @@
+         w = QWidget()
+         form = QFormLayout(w)
+         form.setContentsMargins(0, 0, 0, 0)
+-        form.setHorizontalSpacing(5)
+-        form.setVerticalSpacing(10)
++        form.setHorizontalSpacing(CONTROL_SPACING)
++        form.setVerticalSpacing(CONTROL_SPACING)
+         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+ 
+@@ -174,7 +181,6 @@
+     top_wrap.addWidget(aboba.top_right, 1)
+ 
+     outer.addLayout(top_wrap)
+-    outer.addSpacing(10)
+ 
+     # ================== 2) ГОРИЗОНТАЛЬНАЯ ЛИНИЯ ==================
+     hline = QFrame()
+@@ -186,21 +192,21 @@
+     # ================== 3) НИЖНЯЯ ЧАСТЬ: ДВЕ КОЛОНКИ ==================
+     root = QHBoxLayout()
+     root.setContentsMargins(0, 0, 0, 0)
+-    root.setSpacing(10)
++    root.setSpacing(0)
+     outer.addLayout(root, 1)
+ 
+     # Левая панель
+     left_wrap = QWidget()
+     left_layout = QVBoxLayout(left_wrap)
+-    left_layout.setContentsMargins(0, 0, 0, 0)
+-    left_layout.setSpacing(0)
++    left_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++    left_layout.setSpacing(BLOCK_SPACING)
+ 
+     # Правая панель
+     right_wrap = QWidget()
+     right_layout = QVBoxLayout(right_wrap)
+     right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+-    right_layout.setContentsMargins(0, 0, 0, 0)
+-    right_layout.setSpacing(0)
++    right_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++    right_layout.setSpacing(BLOCK_SPACING)
+ 
+     # Вертикальный разделитель
+     separator = QFrame()
+@@ -234,7 +240,6 @@
+     aboba.purchases_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+     aboba.purchases_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+     aboba.purchases_table.setGridStyle(Qt.PenStyle.SolidLine)
+-    aboba.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
+ 
+     left_layout.addWidget(aboba.purchases_table, 1)
+ 
+@@ -262,7 +267,6 @@
+     aboba.recs_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+     aboba.recs_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+     aboba.recs_table.setGridStyle(Qt.PenStyle.SolidLine)
+-    aboba.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")
+ 
+     right_layout.addWidget(aboba.recs_table, 1)
+ 
+--- before/Application/tabs/data_loading_tab.py
++++ after/Application/tabs/data_loading_tab.py
+@@ -331,6 +331,7 @@
+ 
+ 
+ def create_data_loading_widgets_tab(aboba):
++    from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
+     tab = QWidget()
+ 
+     # Корень вкладки:
+@@ -353,8 +354,16 @@
+     left = QVBoxLayout(left_wrap)
+     right = QVBoxLayout(right_wrap)
+ 
+-    left.setSpacing(10)
+-    right.setSpacing(10)
++    for panel in (left, right):
++        panel.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++        panel.setSpacing(SECTION_SPACING)
++    api, operation, manual_section = QVBoxLayout(), QVBoxLayout(), QVBoxLayout()
++    for section in (api, operation, manual_section):
++        section.setContentsMargins(0, 0, 0, 0)
++        section.setSpacing(BLOCK_SPACING)
++    left.addLayout(api)
++    left.addLayout(operation)
++    right.addLayout(manual_section)
+ 
+     # Вертикальный разделитель между колонками
+     separator = QFrame()
+@@ -371,6 +380,7 @@
+     left_panel = QWidget()
+     left_panel_layout = QVBoxLayout(left_panel)
+     left_panel_layout.setContentsMargins(0, 0, 0, 0)
++    left_panel_layout.setSpacing(0)
+     left_panel_layout.addWidget(left_scroll, 1)
+     top.addWidget(left_panel, 1)
+     top.addWidget(separator)
+@@ -380,7 +390,7 @@
+     root.addLayout(top, 2)
+ 
+     aboba.mb_headings = [
+-        _heading("Загрузка через API Mindbox", left),
++        _heading("Загрузка через API Mindbox", api),
+     ]
+ 
+     # ==================================================================
+@@ -391,7 +401,7 @@
+     # ---------------- Период взаимодействий ----------------
+     period_row = QHBoxLayout()
+     period_row.setContentsMargins(0, 0, 0, 0)
+-    period_row.setSpacing(8)
++    period_row.setSpacing(CONTROL_SPACING)
+ 
+     period_label = QLabel("Период взаимодействий:")
+     period_label.setSizePolicy(
+@@ -419,21 +429,23 @@
+     period_row.addWidget(QLabel("По"))
+     period_row.addWidget(aboba.mb_interaction_until, 1)
+ 
+-    left.addLayout(period_row)
++    api.addLayout(period_row)
+ 
+     customers_period = QHBoxLayout()
++    customers_period.setContentsMargins(0, 0, 0, 0)
++    customers_period.setSpacing(CONTROL_SPACING)
+     aboba.mb_customers_since = _date_widget(today.addMonths(-1))
+     aboba.mb_customers_until = _date_widget(today)
+     customers_period.addWidget(QLabel("Период клиентов: С"))
+     customers_period.addWidget(aboba.mb_customers_since, 1)
+     customers_period.addWidget(QLabel("По"))
+     customers_period.addWidget(aboba.mb_customers_until, 1)
+-    left.addLayout(customers_period)
++    api.addLayout(customers_period)
+ 
+     # ---------------- История объединений клиентов ----------------
+     merge_row = QHBoxLayout()
+     merge_row.setContentsMargins(0, 0, 0, 0)
+-    merge_row.setSpacing(8)
++    merge_row.setSpacing(CONTROL_SPACING)
+ 
+     merge_label = QLabel("Объединения клиентов:")
+     merge_label.setSizePolicy(
+@@ -450,11 +462,12 @@
+     merge_row.addWidget(merge_label)
+     merge_row.addWidget(aboba.mb_merge_since, 1)
+ 
+-    left.addLayout(merge_row)
++    api.addLayout(merge_row)
+ 
+     # ---------------- Selection ----------------
+     selection_grid = QGridLayout()
+-    selection_grid.setVerticalSpacing(8)
++    selection_grid.setContentsMargins(0, 0, 0, 0)
++    selection_grid.setSpacing(CONTROL_SPACING)
+ 
+     aboba.mb_selection_fields = {}
+ 
+@@ -484,7 +497,7 @@
+ 
+         aboba.mb_selection_fields[field] = editor
+ 
+-    left.addLayout(selection_grid)
++    api.addLayout(selection_grid)
+ 
+     # ---------------- Информационная подпись ----------------
+     aboba.mb_sources_info = QLabel(
+@@ -500,10 +513,12 @@
+         "infoLabel",
+     )
+ 
+-    left.addWidget(aboba.mb_sources_info)
++    api.addWidget(aboba.mb_sources_info)
+ 
+     # ---------------- Кнопки API ----------------
+     buttons = QHBoxLayout()
++    buttons.setContentsMargins(0, 0, 0, 0)
++    buttons.setSpacing(CONTROL_SPACING)
+ 
+     aboba.mb_start_button = QPushButton(
+         " Получить данные"
+@@ -553,13 +568,15 @@
+     buttons.addWidget(aboba.mb_customers_button)
+     buttons.addWidget(aboba.mb_cancel_button)
+ 
+-    left.addLayout(buttons)
++    api.addLayout(buttons)
+ 
+     # ==================================================================
+     # ЛЕВАЯ КОЛОНКА
+     # Состояние операции
+     # ==================================================================
+     state_grid = QGridLayout()
++    state_grid.setContentsMargins(0, 0, 0, 0)
++    state_grid.setSpacing(CONTROL_SPACING)
+     state_grid.setColumnStretch(1, 1)
+     for row, (name, title) in enumerate((
+         ("orders", "Заказы"), ("actions", "Действия"),
+@@ -570,14 +587,14 @@
+         setattr(aboba, f"mb_{name}_status_label", value)
+         state_grid.addWidget(QLabel(title + ":"), row, 0)
+         state_grid.addWidget(value, row, 1)
+-    left.addLayout(state_grid)
++    operation.addLayout(state_grid)
+ 
+     aboba.mb_progress = _BusyProgressBar()
+     aboba.mb_progress.setTextVisible(True)
+     aboba.mb_progress.setRange(0, 1)
+     aboba.mb_progress.setValue(0)
+     aboba.mb_progress.setFormat("Прогресс загрузки")
+-    left.addWidget(aboba.mb_progress)
++    operation.addWidget(aboba.mb_progress)
+ 
+     # ---------------- Resume block ----------------
+     aboba.mb_resume_block = QWidget()
+@@ -586,7 +603,7 @@
+         aboba.mb_resume_block
+     )
+     resume.setContentsMargins(0, 0, 0, 0)
+-    resume.setSpacing(6)
++    resume.setSpacing(BLOCK_SPACING)
+ 
+     resume_title = QLabel("Загрузка не завершена")
+     resume_title.setAlignment(
+@@ -627,7 +644,7 @@
+         aboba.mb_resume_button
+     )
+ 
+-    left.addWidget(
++    operation.addWidget(
+         aboba.mb_resume_block
+     )
+ 
+@@ -639,10 +656,12 @@
+     # ==================================================================
+     _heading(
+         "Ручная загрузка из Mindbox",
+-        right,
++        manual_section,
+     )
+ 
+     manual = QGridLayout()
++    manual.setContentsMargins(0, 0, 0, 0)
++    manual.setSpacing(CONTROL_SPACING)
+ 
+     aboba.mb_manual_files = {}
+     aboba.mb_manual_paths = {name: () for name in ("actions", "orders", "customers")}
+@@ -713,11 +732,11 @@
+             (editor, button)
+         )
+ 
+-    right.addLayout(manual)
++    manual_section.addLayout(manual)
+ 
+     manual_period = QHBoxLayout()
+     manual_period.setContentsMargins(0, 0, 0, 0)
+-    manual_period.setSpacing(8)
++    manual_period.setSpacing(CONTROL_SPACING)
+ 
+     manual_period_label = QLabel("Период выгрузки действий и заказов:")
+     manual_period_label.setSizePolicy(
+@@ -747,7 +766,7 @@
+         (aboba.mb_manual_since, aboba.mb_manual_until)
+     )
+ 
+-    right.addLayout(manual_period)
++    manual_section.addLayout(manual_period)
+ 
+     manual_hint = QLabel(
+         "Укажите тот же период, что при выгрузке Действий и Заказов в Mindbox. "
+@@ -758,10 +777,12 @@
+     manual_hint.setWordWrap(True)
+     manual_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+ 
+-    right.addWidget(manual_hint)
++    manual_section.addWidget(manual_hint)
+ 
+     # ---------------- Кнопки manual import ----------------
+     manual_buttons = QHBoxLayout()
++    manual_buttons.setContentsMargins(0, 0, 0, 0)
++    manual_buttons.setSpacing(CONTROL_SPACING)
+ 
+     aboba.mb_manual_interactions_button = QPushButton(
+         " Импорт действий и заказов"
+@@ -804,7 +825,7 @@
+             button
+         )
+ 
+-    right.addLayout(
++    manual_section.addLayout(
+         manual_buttons
+     )
+ 
+@@ -843,7 +864,7 @@
+     log_layout = QVBoxLayout(
+         log_wrap
+     )
+-    log_layout.setContentsMargins(8, 8, 8, 0)
++    log_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+     log_layout.setSpacing(0)
+ 
+     aboba.mb_log = QTextEdit()
+--- before/Application/tabs/dataset_statistics_tab.py
++++ after/Application/tabs/dataset_statistics_tab.py
+@@ -28,9 +28,9 @@
+ from Application.statistics_cache import CACHE_PATH, load_result, save_result, validate_result
+ from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, WARNING_LABELS, DIAGNOSTIC_LABELS,
+                                                  _date, _date_time, _calculation_message)
+-
+-
+-BLOCK_SPACING = 18
++from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
++
++
+ SOURCE_DESCRIPTION = "Исходные данные Mindbox. Отбор не установлен."
+ PROCESSING_STATUS = "Расчет статистики..."
+ PROGRESS_LABELS = {"actions": "Действия", "orders": "Заказы", "customer_merges": "Объединения клиентов"}
+@@ -61,10 +61,16 @@
+ 
+ 
+ def _section_heading(layout, title):
++    section = QVBoxLayout()
++    section.setObjectName('statisticsSectionLayout')
++    section.setContentsMargins(0, 0, 0, 0)
++    section.setSpacing(BLOCK_SPACING)
+     label = _label(title.upper())
+     label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+     label.setProperty("class", "statisticsSection")
+-    layout.addWidget(label)
++    section.addWidget(label)
++    layout.addLayout(section)
++    return section
+ 
+ 
+ class _StatisticsTable(QTableWidget):
+@@ -84,11 +90,15 @@
+ 
+ def _cards(layout, values):
+     grid = QGridLayout()
++    grid.setContentsMargins(0, 0, 0, 0)
++    grid.setSpacing(BLOCK_SPACING)
+     labels = []
+     for column, (title, value) in enumerate(values):
+         card = QFrame()
+         card.setProperty("class", "statisticsCard")
+         box = QVBoxLayout(card)
++        box.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++        box.setSpacing(COMPACT_SPACING)
+         box.addWidget(_label(title))
+         number = _label(_number(value))
+         number.setProperty("class", "statisticsNumber")
+@@ -132,8 +142,9 @@
+ 
+ 
+ def _actions_page(layout, result):
++    section = layout
+     def table(headers, rows):
+-        widget = _table(layout, headers, rows)
++        widget = _table(section, headers, rows)
+         widget.ensurePolished()
+         header = widget.horizontalHeader()
+         header.ensurePolished()
+@@ -145,31 +156,31 @@
+             size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
+             widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
+ 
+-    _cards(layout, [("Просмотры товаров", result["view_interactions"]),
++    _cards(section, [("Просмотры товаров", result["view_interactions"]),
+                     ("Добавления в избранное", result["favorite_interactions"]),
+                     ("Клиенты с просмотрами", result["view_users"]),
+                     ("Клиенты с избранным", result["favorite_users"])])
+-    _section_heading(layout, "Активность клиентов")
++    section = _section_heading(layout, "Активность клиентов")
+     table(["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"], [
+         ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
+         ("Добавления в избранное", result["favorite_interactions"], result["favorite_users"],
+          result["mean_favorites_per_user"], result["median_favorites_per_user"])])
+-    _section_heading(layout, charts.activity_distribution_data(result, 'views').title)
+-    layout.addWidget(charts.create_activity_distribution_chart(result, 'views'))
++    section = _section_heading(layout, charts.activity_distribution_data(result, 'views').title)
++    section.addWidget(charts.create_activity_distribution_chart(result, 'views'))
+     table(["Количество просмотров", "Количество клиентов", "Доля, %"], result["view_user_activity_distribution"])
+-    _section_heading(layout, charts.activity_distribution_data(result, 'favorites').title)
+-    layout.addWidget(charts.create_activity_distribution_chart(result, 'favorites'))
++    section = _section_heading(layout, charts.activity_distribution_data(result, 'favorites').title)
++    section.addWidget(charts.create_activity_distribution_chart(result, 'favorites'))
+     table(["Количество избранного", "Количество клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
+-    _section_heading(layout, "Каналы")
++    section = _section_heading(layout, "Каналы")
+     table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
+                     "Избранное", "Клиенты с избранным", "Доля избранного, %"],
+            [row[1:] for row in result["action_channel_statistics"]])
+-    _section_heading(layout, "Динамика действий")
+-    layout.addWidget(charts.create_view_dynamics_chart(result))
+-    layout.addWidget(charts.create_favorite_dynamics_chart(result))
++    section = _section_heading(layout, "Динамика действий")
++    section.addWidget(charts.create_view_dynamics_chart(result))
++    section.addWidget(charts.create_favorite_dynamics_chart(result))
+     table(["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
+            [(month[5:] + "." + month[:4], *values) for month, *values in result["action_monthly_dynamics"]])
+-    _section_heading(layout, "Параметры просмотров")
++    section = _section_heading(layout, "Параметры просмотров")
+     table(["Доступность", "Просмотров", "Доля, %"], result["view_availability_distribution"])
+     table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
+            [(currency, n, _decimal_display(mean), _decimal_display(middle))
+@@ -178,8 +189,9 @@
+ 
+ 
+ def _products_page(layout, result):
++    section = layout
+     def table(headers, rows):
+-        widget = _table(layout, headers, rows)
++        widget = _table(section, headers, rows)
+         widget.ensurePolished()
+         header = widget.horizontalHeader()
+         header.ensurePolished()
+@@ -194,32 +206,32 @@
+         table([first, "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
+               [(*row[:5], _decimal_display(row[5], money=False)) for row in result[field]])
+ 
+-    _cards(layout, [("Товары с взаимодействиями", result["unique_resolved_items"]),
++    _cards(section, [("Товары с взаимодействиями", result["unique_resolved_items"]),
+                     ("Товары с просмотрами", result["products_with_views"]),
+                     ("Товары в избранном", result["products_with_favorites"]),
+                     ("Купленные товары", result["products_with_purchases"])])
+-    _section_heading(layout, "Популярные товары по просмотрам")
+-    layout.addWidget(charts.create_product_ranking_chart(result, "views"))
++    section = _section_heading(layout, "Популярные товары по просмотрам")
++    section.addWidget(charts.create_product_ranking_chart(result, "views"))
+     table(["Код", "Название", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Покупки"],
+           result["top_viewed_products"])
+-    _section_heading(layout, "Популярные товары по избранному")
+-    layout.addWidget(charts.create_product_ranking_chart(result, "favorites"))
++    section = _section_heading(layout, "Популярные товары по избранному")
++    section.addWidget(charts.create_product_ranking_chart(result, "favorites"))
+     table(["Код", "Название", "Добавления в избранное", "Клиенты с избранным", "Просмотры", "Покупки"],
+           result["top_favorited_products"])
+-    _section_heading(layout, "Популярные товары по покупкам")
+-    layout.addWidget(charts.create_purchased_products_chart(result))
++    section = _section_heading(layout, "Популярные товары по покупкам")
++    section.addWidget(charts.create_purchased_products_chart(result))
+     table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
+           [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
+-    _section_heading(layout, "Категории товаров")
++    section = _section_heading(layout, "Категории товаров")
+     table(["Категория", "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
+           [(*row[1:6], _decimal_display(row[6], money=False)) for row in result["product_category_statistics"]])
+     for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
+                          ("Спрос по стилевой группе", "product_style_statistics")):
+-        _section_heading(layout, title)
++        section = _section_heading(layout, title)
+         if field == "product_season_statistics":
+-            layout.addWidget(charts.create_season_chart(result))
++            section.addWidget(charts.create_season_chart(result))
+         group("Значение", field)
+-    _section_heading(layout, "Качество сопоставления")
++    section = _section_heading(layout, "Качество сопоставления")
+     table(["Показатель", "Значение"], [
+         ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
+         ("Уникальные распознанные товары", result["unique_resolved_items"]),
+@@ -232,8 +244,9 @@
+ 
+ 
+ def _orders_page(layout, result):
++    section = layout
+     def table(headers, rows):
+-        widget = _table(layout, headers, rows)
++        widget = _table(section, headers, rows)
+         header = widget.horizontalHeader()
+         header.ensurePolished()
+         for column, title in enumerate(headers):
+@@ -243,42 +256,42 @@
+             size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
+             widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
+ 
+-    _cards(layout, [("Заказы с покупкой", result["purchase_orders"]),
++    _cards(section, [("Заказы с покупкой", result["purchase_orders"]),
+                     ("Невыкупленные заказы", result["orders_without_purchase"]),
+                     ("Позиции покупок", result["purchase_interactions"]), ("Покупатели", result["purchase_users"])])
+-    _section_heading(layout, "Корзина заказа")
++    section = _section_heading(layout, "Корзина заказа")
+     basket_rates = {label: rate for label, _, rate in result["purchase_basket_distribution"]}
+-    _cards(layout, [("Среднее число позиций на заказ", result["mean_purchase_lines_per_order"]),
++    _cards(section, [("Среднее число позиций на заказ", result["mean_purchase_lines_per_order"]),
+                     ("Медиана числа позиций на заказ", result["median_purchase_lines_per_order"]),
+                     ("Доля заказов с 1 позицией", f"{basket_rates['1 позиция']:.2f}%"),
+                     ("Доля заказов с 3+ позициями", f"{sum(basket_rates[key] for key in ('3–5 позиций', '6–10 позиций', '11+ позиций')):.2f}%")])
+-    layout.addWidget(charts.create_basket_chart(result))
++    section.addWidget(charts.create_basket_chart(result))
+     table(["Количество позиций", "Заказов", "Доля, %"], result["purchase_basket_distribution"])
+-    _section_heading(layout, "Финансовые показатели")
++    section = _section_heading(layout, "Финансовые показатели")
+     table(["Валюта", "Заказов", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа", "Медианная сумма заказа"],
+            [(currency, n, lines, _decimal_display(units, money=False), *(_decimal_display(v) for v in (amount, mean, median)))
+             for currency, n, lines, units, amount, mean, median in result["order_financials"]])
+     mixed, unknown = result["mixed_currency_purchase_orders"], result["unknown_currency_purchase_orders"]
+     if mixed or unknown:
+-        layout.addWidget(_label(f"Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}."))
++        section.addWidget(_label(f"Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}."))
+     for currency in ('RUB', 'KZT'):
+-        _section_heading(layout, charts.purchase_count_data(result, currency).title)
+-        layout.addWidget(charts.create_order_dynamics_chart(result, currency))
++        section = _section_heading(layout, charts.purchase_count_data(result, currency).title)
++        section.addWidget(charts.create_order_dynamics_chart(result, currency))
+     for currency in ('RUB', 'KZT'):
+-        _section_heading(layout, 'Динамика суммы покупок — ' + currency)
+-        layout.addWidget(charts.create_revenue_chart(result, currency))
++        section = _section_heading(layout, 'Динамика суммы покупок — ' + currency)
++        section.addWidget(charts.create_revenue_chart(result, currency))
+     table(["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
+            [(month[5:] + "." + month[:4], rub_n, _decimal_display(rub), kzt_n, _decimal_display(kzt))
+             for month, rub_n, rub, kzt_n, kzt in result["order_monthly_dynamics"]])
+     for currency in ("RUB", "KZT"):
+-        _section_heading(layout, "Магазины и каналы — " + currency)
++        section = _section_heading(layout, "Магазины и каналы — " + currency)
+         table(["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
+                [(name, n, buyers, lines, _decimal_display(units, money=False), _decimal_display(amount), _decimal_display(mean))
+                 for unit, key, name, n, buyers, lines, units, amount, mean in result["store_statistics"] if unit == currency])
+-    _section_heading(layout, "Оплата")
+-    layout.addWidget(charts.create_payment_chart(result))
++    section = _section_heading(layout, "Оплата")
++    section.addWidget(charts.create_payment_chart(result))
+     table(["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"], result["payment_type_distribution"])
+-    _section_heading(layout, "Статусы позиций")
++    section = _section_heading(layout, "Статусы позиций")
+     table(["Статус", "Позиции", "Доля, %", "Считается покупкой"],
+            [(name, count, 100 * count / result["order_lines"] if result["order_lines"] else 0, "Да" if purchase else "Нет")
+             for name, count, purchase in result["line_statuses"]])
+@@ -328,13 +341,15 @@
+         self.kill_timer.setSingleShot(True)
+         self.kill_timer.timeout.connect(self._kill)
+         layout = QVBoxLayout(self)
++        layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+         layout.setSpacing(BLOCK_SPACING)
+         self.description = _information_label(SOURCE_DESCRIPTION)
+         layout.addWidget(self.description)
+         self.card_labels = _cards(layout, [(name, None) for name in (
+             "Количество взаимодействий", "Количество заказов", "Количество позиций в заказах", "Количество клиентов")])
+         controls = QHBoxLayout()
+-        controls.setSpacing(BLOCK_SPACING)
++        controls.setContentsMargins(0, 0, 0, 0)
++        controls.setSpacing(CONTROL_SPACING)
+ 
+         self.refresh = QPushButton(
+             QIcon(str(ICONS_DIR / "statistic.png")),
+@@ -475,7 +490,8 @@
+             scroll.setWidgetResizable(True)
+             content = QWidget()
+             layout = QVBoxLayout(content)
+-            layout.setSpacing(BLOCK_SPACING)
++            layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++            layout.setSpacing(SECTION_SPACING)
+             layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+             scroll.setWidget(content)
+             self.sections.addTab(scroll, name)
+@@ -646,18 +662,18 @@
+         _cards(customers, [("Количество клиентов", result["customers"]),
+                           ("Активные клиенты", result["interaction_users"]),
+                           ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
+-        _section_heading(customers, "Портрет клиента")
++        customer_section = _section_heading(customers, "Портрет клиента")
+         if result["customers"] is None:
+-            customers.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))
+-        _section_heading(customers, "Возрастная структура клиентов")
+-        _cards(customers, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
+-        customers.addWidget(charts.create_age_chart(result))
+-        _table(customers, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
+-        _section_heading(customers, "Распределение по полу")
+-        customers.addWidget(charts.create_gender_chart(result))
+-        _table(customers, ["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
+-        _section_heading(customers, "Активность клиентов")
+-        _table(customers, ["Показатель", "Значение"], [
++            customer_section.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))
++        customer_section = _section_heading(customers, "Возрастная структура клиентов")
++        _cards(customer_section, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
++        customer_section.addWidget(charts.create_age_chart(result))
++        _table(customer_section, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
++        customer_section = _section_heading(customers, "Распределение по полу")
++        customer_section.addWidget(charts.create_gender_chart(result))
++        _table(customer_section, ["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
++        customer_section = _section_heading(customers, "Активность клиентов")
++        _table(customer_section, ["Показатель", "Значение"], [
+             ("Клиенты с просмотрами", result["view_users"]),
+             ("Клиенты с добавлениями в избранное", result["favorite_users"]),
+             ("Клиенты с покупками", result["purchase_users"]),
+@@ -667,12 +683,12 @@
+             ("Среднее число взаимодействий на активного клиента", result["mean_interactions"]),
+             ("Медиана числа взаимодействий на активного клиента", result["median_interactions"]),
+             ("Доля активных клиентов, совершивших покупку, %", result["active_buyer_rate"])])
+-        _section_heading(customers, charts.interaction_frequency_data(result).title)
+-        customers.addWidget(charts.create_interaction_frequency_chart(result))
+-        _table(customers, ["Количество взаимодействий", "Клиентов", "Доля, %"], result["interaction_activity_distribution"])
+-        _section_heading(customers, "Покупательская активность")
+-        _table(customers, ["Количество заказов", "Покупателей", "Доля покупателей, %"], result["purchase_order_distribution"])
+-        _table(customers, ["Показатель", "Значение"], [
++        customer_section = _section_heading(customers, charts.interaction_frequency_data(result).title)
++        customer_section.addWidget(charts.create_interaction_frequency_chart(result))
++        _table(customer_section, ["Количество взаимодействий", "Клиентов", "Доля, %"], result["interaction_activity_distribution"])
++        customer_section = _section_heading(customers, "Покупательская активность")
++        _table(customer_section, ["Количество заказов", "Покупателей", "Доля покупателей, %"], result["purchase_order_distribution"])
++        _table(customer_section, ["Показатель", "Значение"], [
+             ("Среднее число заказов на покупателя", result["mean_orders_per_buyer"]),
+             ("Медиана числа заказов на покупателя", result["median_orders_per_buyer"]),
+             ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
+--- before/Application/tabs/reference_loading_section.py
++++ after/Application/tabs/reference_loading_section.py
+@@ -12,6 +12,7 @@
+ 
+ from Application.paths import ICONS_DIR
+ from Application.files.reference_import import REFERENCE_TYPES
++from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING
+ 
+ 
+ def create_csv_loading_section(aboba):
+@@ -19,7 +20,7 @@
+     section = QWidget()
+     left_layout = QVBoxLayout(section)
+     left_layout.setContentsMargins(0, 0, 0, 0)
+-    left_layout.setSpacing(12)
++    left_layout.setSpacing(BLOCK_SPACING)
+ 
+     # Заголовок CSV-раздела
+     aboba.heading_load_data = QLabel("Загрузка справочников")
+@@ -44,8 +45,8 @@
+     aboba.reference_status_overrides = {}
+ 
+     fields = QGridLayout()
+-    fields.setVerticalSpacing(10)
+-    fields.setHorizontalSpacing(12)
++    fields.setContentsMargins(0, 0, 0, 0)
++    fields.setSpacing(CONTROL_SPACING)
+ 
+     button_specs = (
+         (
+@@ -162,7 +163,7 @@
+         0,
+         0,
+     )
+-    aboba.status_files_layout.setSpacing(0)
++    aboba.status_files_layout.setSpacing(CONTROL_SPACING)
+ 
+     aboba.status_files_container = QWidget()
+     aboba.status_files_container.setLayout(
+@@ -177,7 +178,7 @@
+         0,
+         0,
+     )
+-    load_status_row.setSpacing(12)
++    load_status_row.setSpacing(BLOCK_SPACING)
+ 
+     load_status_row.addWidget(
+         aboba.btn_load,
+@@ -218,14 +219,13 @@
+ 
+     # Префикс
+     aboba.prefix = QLabel("Статус загрузки:")
+-    aboba.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
+     aboba.status_files_layout.addWidget(aboba.prefix, 0, Qt.AlignmentFlag.AlignLeft)
+ 
+     # Основная часть
+     right_widget = QWidget()
+     right_layout = QHBoxLayout()
+     right_layout.setContentsMargins(0, 0, 0, 0)
+-    right_layout.setSpacing(3)
++    right_layout.setSpacing(CONTROL_SPACING)
+     right_widget.setLayout(right_layout)
+ 
+     ok_path = str(ICONS_DIR / "success.png")
+@@ -238,12 +238,13 @@
+         exists = getattr(aboba, "reference_status_overrides", {}).get(kind, exists)
+ 
+         block = QWidget()
++        block.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+         block_l = QHBoxLayout()
+         block_l.setContentsMargins(0, 0, 0, 0)
+-        block_l.setSpacing(2)  # расстояние между словом и иконкой
++        block_l.setSpacing(COMPACT_SPACING)
+         block.setLayout(block_l)
+ 
+-        text_lbl = QLabel(title)
++        text_lbl = QLabel(title.strip())
+ 
+         icon_lbl = QLabel()
+         pix = QPixmap(ok_path if exists else fail_path)
+@@ -260,6 +261,8 @@
+         # Добавляем блок в правую часть
+         right_layout.addWidget(block, 0, Qt.AlignmentFlag.AlignVCenter)
+ 
++    right_layout.addStretch(1)
++
+ 
+     # добавляем правую часть с растягивающим коэффициентом
+     aboba.status_files_layout.addWidget(right_widget, 1)
+--- before/Application/tabs/train_model_tab.py
++++ after/Application/tabs/train_model_tab.py
+@@ -20,6 +20,7 @@
+ from Application.evaluation.experiments.gui_history import ExperimentHistory, now, clean_record, RESEARCH_FIXED
+ from Application.mindbox.canonical_storage import atomic_json
+ from Application.training_charts import TrainingChart
++from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
+ from .training_workflow import input_values, metadata_readiness, production_config
+ 
+ 
+@@ -52,8 +53,16 @@
+     left_panel.setObjectName('trainingLeftPanel')
+     right_panel.setObjectName('trainingChartsPanel')
+     left, right = QVBoxLayout(left_panel), QVBoxLayout(right_panel)
+-    left.setContentsMargins(8, 0, 8, 8)
+-    right.setContentsMargins(8, 0, 8, 8)
++    for panel in (left, right):
++        panel.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++    left.setSpacing(SECTION_SPACING)
++    right.setSpacing(BLOCK_SPACING)
++    parameters, process = QVBoxLayout(), QVBoxLayout()
++    for section in (parameters, process):
++        section.setContentsMargins(0, 0, 0, 0)
++        section.setSpacing(BLOCK_SPACING)
++    left.addLayout(parameters)
++    left.addLayout(process, 1)
+     top.addWidget(left_panel, 4)
+     separator = QFrame()
+     separator.setObjectName('vSeparator')
+@@ -69,10 +78,13 @@
+         layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignHCenter)
+         return label
+ 
+-    aboba.heading_enter_parameter = heading(left, 'Параметры')
++    aboba.heading_enter_parameter = heading(parameters, 'Параметры')
+     form = QFormLayout()
++    form.setContentsMargins(0, 0, 0, 0)
++    form.setHorizontalSpacing(CONTROL_SPACING)
++    form.setVerticalSpacing(CONTROL_SPACING)
+     form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+-    left.addLayout(form)
++    parameters.addLayout(form)
+     aboba.training_mode = QComboBox()
+     aboba.training_mode.addItems(['Эксперимент', 'Рабочая модель'])
+     form.addRow('Режим обучения:', aboba.training_mode)
+@@ -102,32 +114,36 @@
+     aboba.cancel_train.clicked.connect(lambda: cancel_training(aboba))
+     buttons = QHBoxLayout()
+     buttons.setContentsMargins(0, 0, 0, 0)
+-    buttons.setSpacing(8)
++    buttons.setSpacing(CONTROL_SPACING)
+ 
+     for button, stretch in ((aboba.start_train, 3), (aboba.cancel_train, 1)):
+         button.setSizePolicy(
+             QSizePolicy.Policy.Expanding,
+             QSizePolicy.Policy.Preferred,
+         )
+-        buttons.addWidget(button, stretch)
+-
+-    aboba.label_69 = heading(left, 'Процесс обучения')
++        buttons.addWidget(button, stretch, alignment=Qt.AlignmentFlag.AlignVCenter)
++
++    aboba.label_69 = heading(process, 'Процесс обучения')
+     aboba.training_progress_text = QLabel('Ожидание запуска')
+     aboba.training_progress_text.setWordWrap(True)
+     aboba.training_progress_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+     aboba.training_progress = QProgressBar()
+     aboba.training_progress.setRange(0, 50)
+     aboba.training_progress.setValue(0)
+-    left.addWidget(aboba.training_progress_text)
+-    left.addWidget(aboba.training_progress)
++    progress = QVBoxLayout()
++    progress.setContentsMargins(0, 0, 0, 0)
++    progress.setSpacing(COMPACT_SPACING)
++    progress.addWidget(aboba.training_progress_text)
++    progress.addWidget(aboba.training_progress)
++    process.addLayout(progress)
+     aboba.train_log = QTextEdit()
+     aboba.train_log.setAcceptRichText(False)
+     aboba.train_log.setReadOnly(True)
+     aboba.train_log.setPlaceholderText('Логи подготовки, обучения и оценки появятся здесь…')
+     aboba.train_log.document().setMaximumBlockCount(5000)
+-    left.addWidget(aboba.train_log, 1)
+-    left.addWidget(aboba.training_reason)
+-    left.addLayout(buttons)
++    process.addWidget(aboba.train_log, 1)
++    process.addWidget(aboba.training_reason)
++    process.addLayout(buttons)
+     heading(right, 'Визуализация обучения')
+     aboba.training_loss_chart = TrainingChart('Ошибка обучения', ('Ошибка',), 'Ошибка')
+     aboba.training_metric_chart = TrainingChart('Метрики валидации', ('NDCG@10', 'Recall@10'), 'Значение')
+@@ -139,8 +155,8 @@
+     separator.setFrameShape(QFrame.Shape.NoFrame)
+     root.addWidget(separator)
+     history = QVBoxLayout()
+-    history.setSpacing(4)
+-    history.setContentsMargins(8, 4, 8, 0)
++    history.setSpacing(COMPACT_SPACING)
++    history.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+     root.addLayout(history, 2)
+     heading(history, 'История экспериментов')
+     aboba.history_notice = QLabel()
+--- before/Application/theme/custom.qss
++++ after/Application/theme/custom.qss
+@@ -40,7 +40,7 @@
+     border: 1px solid rgba({APP_TEXT_RGB}, 55);
+     border-radius: 8px;
+     padding: 8px 32px;
+-    margin: 8px 0px;
++    margin: 0px;
+ }}
+ 
+ /* Buttons: one shared appearance for ordinary actions. */
+--- before/main.py
++++ after/main.py
+@@ -16,6 +16,7 @@
+ from Application.tabs.create_results_tab import create_result_widgets_tab
+ from Application.settings.set_status import set_ready_status
+ from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
++from Application.theme.layout_metrics import PAGE_MARGIN, CONTROL_SPACING, COMPACT_SPACING
+ 
+ 
+ class MainWindow(QMainWindow):
+@@ -31,6 +32,8 @@
+         central_widget = QWidget()
+         self.setCentralWidget(central_widget)
+         main_layout = QVBoxLayout()
++        main_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
++        main_layout.setSpacing(CONTROL_SPACING)
+         # Long tab forms must not impose their full sizeHint on the window.
+         # Their deeper adaptation to small windows is a separate UI task.
+         main_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+@@ -92,19 +95,16 @@
+         # Вкладка с выгрузкой результатов
+         create_result_widgets_tab(self)
+ 
+-        # Отступы на форме
+-        self.apply_static_widget_styles()
+-
+         # --- Кастомный нижний бар ---
+         bottom_bar = QHBoxLayout()
+         bottom_bar.setContentsMargins(0, 0, 0, 0)
+-        bottom_bar.setSpacing(10)
++        bottom_bar.setSpacing(CONTROL_SPACING)
+ 
+         # Контейнер статуса
+         status_wrap = QWidget()
+         status_layout = QHBoxLayout(status_wrap)
+         status_layout.setContentsMargins(0, 0, 0, 0)
+-        status_layout.setSpacing(6)
++        status_layout.setSpacing(COMPACT_SPACING)
+         status_layout.addWidget(self.status_label)
+         status_layout.addWidget(self.status_icon)
+         status_layout.addStretch(1)
+@@ -210,13 +210,6 @@
+             self.setUpdatesEnabled(True)
+             self.update()
+ 
+-    # -------------------------------------------СТАТИЧЕСКИЕ ПРАВКИ РАЗМЕРОВ--------------------------------------------
+-    def apply_static_widget_styles(self):
+-
+-        self.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
+-        self.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
+-        self.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")
+-
+ 
+ # -----------------------------------------------MAIN-------------------------------------------------------------------
+ if __name__ == "__main__":
+--- before/tests/tabs/test_dataset_statistics_tab.py
++++ after/tests/tabs/test_dataset_statistics_tab.py
+@@ -23,6 +23,19 @@
+ from Application.settings.set_status import set_ready_status, schedule_status_reset
+ 
+ pytestmark = pytest.mark.usefixtures("window_settings")
++
++
++def _visual_items(layout):
++    """Preserve content-order checks across the explicit section containers."""
++    items = []
++    for index in range(layout.count()):
++        item = layout.itemAt(index)
++        section = item.layout()
++        if section is not None and section.objectName() == 'statisticsSectionLayout':
++            items.extend(section.itemAt(i) for i in range(section.count()))
++        else:
++            items.append(item)
++    return items
+ 
+ 
+ @pytest.fixture
+@@ -285,7 +298,7 @@
+         assert isinstance(technical, QScrollArea)
+         assert technical.widgetResizable()
+         layout = technical.widget().layout()
+-        assert layout.spacing() == ui.BLOCK_SPACING
++        assert layout.spacing() == ui.SECTION_SPACING
+         assert layout.count() == 5
+         coverage, summary, raw, quality, diagnostics = technical.findChildren(QTableWidget)
+         assert technical.findChildren(QTableWidget) == [coverage, summary, raw, quality, diagnostics]
+@@ -342,7 +355,7 @@
+     assert card_titles(tab.sections.widget(2)) == ["Товары с взаимодействиями", "Товары с просмотрами",
+                                                 "Товары в избранном", "Купленные товары"]
+     for index in range(5):
+-        assert tab.sections.widget(index).widget().layout().spacing() == ui.BLOCK_SPACING
++        assert tab.sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
+     labels = [label.text() for label in tab.findChildren(QLabel)]
+     cells = []
+     for table in tab.findChildren(QTableWidget):
+@@ -568,7 +581,7 @@
+         QApplication.processEvents()
+         page = tab.sections.widget(3)
+         assert page.widgetResizable()
+-        assert page.widget().layout().spacing() == ui.BLOCK_SPACING
++        assert page.widget().layout().spacing() == ui.SECTION_SPACING
+         assert card_titles(page) == ["Количество клиентов", "Активные клиенты", "Покупатели", "Повторные покупатели (от 2 покупок)",
+                                     "Средний возраст", "Медианный возраст"]
+         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
+@@ -605,26 +618,27 @@
+         QApplication.processEvents()
+         page = tab.sections.widget(3)
+         layout = page.widget().layout()
+-        assert layout.itemAt(0).layout().count() == 4
+-        assert layout.itemAt(1).widget().text() == 'ПОРТРЕТ КЛИЕНТА'
++        items = _visual_items(layout)
++        assert items[0].layout().count() == 4
++        assert items[1].widget().text() == 'ПОРТРЕТ КЛИЕНТА'
+         index = 2
+         if customers is None:
+-            assert layout.itemAt(index).widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
++            assert items[index].widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
+             index += 1
+-        assert layout.itemAt(index).widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
+-        cards = layout.itemAt(index + 1).layout()
++        assert items[index].widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
++        cards = items[index + 1].layout()
+         assert cards.count() == 2
+         assert [cards.itemAt(i).widget().findChildren(QLabel)[0].text() for i in range(2)] == ['Средний возраст', 'Медианный возраст']
+-        age = layout.itemAt(index + 2).widget()
+-        age_table = layout.itemAt(index + 3).widget()
++        age = items[index + 2].widget()
++        age_table = items[index + 3].widget()
+         assert isinstance(age, StatisticsChart) and age.data.title == 'Возрастная структура клиентов'
+         assert isinstance(age_table, QTableWidget) and age_table.horizontalHeaderItem(0).text() == 'Возрастная группа'
+-        assert layout.itemAt(index + 4).widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
+-        gender = layout.itemAt(index + 5).widget()
+-        gender_table = layout.itemAt(index + 6).widget()
++        assert items[index + 4].widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
++        gender = items[index + 5].widget()
++        gender_table = items[index + 6].widget()
+         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
+         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
+-        assert layout.itemAt(index + 7).widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
++        assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
+         assert len(page.findChildren(QTableWidget)) == 6
+         assert len(page.findChildren(StatisticsChart)) == 3
+         assert len(tab.findChildren(StatisticsChart)) == 17
+@@ -668,7 +682,7 @@
+         tab.sections.setCurrentIndex(1)
+         QApplication.processEvents()
+         page = tab.sections.widget(1)
+-        assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
++        assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
+         assert card_titles(page)[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
+         assert len(card_titles(page)) == 8
+         labels = [label.text() for label in page.findChildren(QLabel)]
+@@ -685,7 +699,7 @@
+         assert tables[1].rowCount() == 2  # No cross-currency total.
+         assert tables[1].item(0, 4).text() == "40.00"
+         assert tables[2].item(0, 0).text() == "01.2025"
+-        assert page.widget().layout().itemAt(page.widget().layout().count() - 1).widget() is tables[-1]
++        assert _visual_items(page.widget().layout())[-1].widget() is tables[-1]
+         for table in tables:
+             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
+         assert page.verticalScrollBar().maximum() > 0
+@@ -724,7 +738,7 @@
+                 "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ПРОСМОТРОВ",
+                 "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ИЗБРАННОГО", "КАНАЛЫ",
+                 "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
+-            assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
++            assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
+             tables = page.findChildren(QTableWidget)
+             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
+             assert tables[4].item(0, 0).text() == "01.2025"
+@@ -776,7 +790,7 @@
+             assert all(tables[i].item(0, 0).text() == "Не указано" for i in range(3, 7))
+             assert tables[7].rowCount() == 5 and tables[7].item(2, 1).text() == "3"
+             assert tables[8].item(0, 0).text() == "offline1C"
+-            assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
++            assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
+             for table in tables:
+                 assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
+             wait_until(lambda: page.verticalScrollBar().maximum() > 0)
+@@ -1100,26 +1114,26 @@
+         assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [7, 7, 9, 6, 5]
+         chart_widgets = tab.findChildren(StatisticsChart)
+         assert len(chart_widgets) == 17
+-        actions = tab.sections.widget(0).widget().layout()
++        actions = _visual_items(tab.sections.widget(0).widget().layout())
+         action_charts = tab.sections.widget(0).findChildren(StatisticsChart)
+         assert {chart.data.title for chart in action_charts} == {
+             'Распределение клиентов по количеству просмотров', 'Распределение клиентов по количеству избранного',
+             'Динамика просмотров', 'Динамика избранного'}
+         for kind, header in [('просмотров', 'Количество просмотров'), ('избранного', 'Количество избранного')]:
+             chart = next(chart for chart in action_charts if chart.data.title.endswith(kind))
+-            index = actions.indexOf(chart)
+-            assert actions.itemAt(index - 1).widget().text() == chart.data.title.upper()
+-            following = actions.itemAt(index + 1).widget()
++            index = next(i for i, item in enumerate(actions) if item.widget() is chart)
++            assert actions[index - 1].widget().text() == chart.data.title.upper()
++            following = actions[index + 1].widget()
+             assert isinstance(following, QTableWidget) and following.horizontalHeaderItem(0).text() == header
+         view = next(chart for chart in action_charts if chart.data.title.endswith('просмотров'))
+         favorite = next(chart for chart in action_charts if chart.data.title.endswith('избранного'))
+-        assert actions.indexOf(favorite) == actions.indexOf(view) + 3
++        assert next(i for i, item in enumerate(actions) if item.widget() is favorite) == next(i for i, item in enumerate(actions) if item.widget() is view) + 3
+         assert not any(label.text() == 'ДИНАМИКА КЛИЕНТОВ С ПРОСМОТРАМИ' for label in tab.findChildren(QLabel))
+         assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 17
+-        clients = tab.sections.widget(3).widget().layout()
++        clients = _visual_items(tab.sections.widget(3).widget().layout())
+         frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
+-        index = clients.indexOf(frequency)
+-        following = clients.itemAt(index + 1).widget()
++        index = next(i for i, item in enumerate(clients) if item.widget() is frequency)
++        following = clients[index + 1].widget()
+         assert isinstance(following, QTableWidget)
+         assert following.horizontalHeaderItem(0).text() == 'Количество взаимодействий'
+         assert sorted(chart.chart().title() for chart in chart_widgets if chart.chart().title()) == [
+--- before/tests/tabs/test_reference_loading_section.py
++++ after/tests/tabs/test_reference_loading_section.py
+@@ -101,7 +101,7 @@
+             assert not hasattr(window, attr)
+         for dark in (True, False, True):
+             window.apply_theme(dark)
+-            window.apply_static_widget_styles()
++            assert not hasattr(window, 'apply_static_widget_styles')
+             app.processEvents()
+             assert window._current_is_dark is dark
+             assert [window.tabs.tabText(i) for i in range(5)] == titles
+--- before/tests/tabs/test_training_research_ui.py
++++ after/tests/tabs/test_training_research_ui.py
+@@ -78,7 +78,7 @@
+     assert not hasattr(w, 'embedding_dim_input') and not hasattr(w, 'top_rec')
+     assert w.start_train.isEnabled()
+     w.training_mode.setCurrentIndex(1)
+-    assert w.start_train.text() == 'Обучить рабочую модель'
++    assert w.start_train.text().strip() == 'Обучить рабочую модель'
+     assert not w.cancel_train.isEnabled()
+ 
+ 
+@@ -539,9 +539,9 @@
+     assert w.training_loss_chart.parentWidget() is right and w.training_metric_chart.parentWidget() is right
+     row = next(layout for layout in left.findChildren(QHBoxLayout) if layout.indexOf(w.start_train) >= 0)
+     assert row.indexOf(w.cancel_train) >= 0 and row.contentsMargins() == QMargins()
+-    assert w.start_train.minimumHeight() == w.cancel_train.minimumHeight() == 36
++    assert w.start_train.minimumHeight() == w.cancel_train.minimumHeight() == 0
+     for button in (w.start_train, w.cancel_train):
+-        assert button.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
++        assert button.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Preferred
+         assert row.itemAt(row.indexOf(button)).alignment() & Qt.AlignmentFlag.AlignVCenter
+     assert not w.cancel_train.icon().isNull()
+     assert w.cancel_train.icon().pixmap(17, 17).toImage() == QIcon(str(tab.ICONS_DIR / 'failure.png')).pixmap(17, 17).toImage()
+@@ -778,7 +778,8 @@
+         app.processEvents()
+         start, cancel = w.start_train, w.cancel_train
+         assert start.height() == cancel.height() == 36
+-        assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
++        assert start.minimumHeight() == cancel.minimumHeight() == 0
++        assert start.maximumHeight() == cancel.maximumHeight() > start.minimumHeight()
+         assert start.geometry().top() == cancel.geometry().top()
+         assert start.geometry().bottom() == cancel.geometry().bottom()
+         assert start.contentsMargins() == cancel.contentsMargins() == QMargins()
+--- before/Application/theme/layout_metrics.py
++++ after/Application/theme/layout_metrics.py
+@@ -0,0 +1,11 @@
++"""Presentation spacing: indicators, controls, blocks, sections and panel edges.
++
++Structural zero spacing keeps separator intersections and overlay layouts intact.
++Control sizes, icon sizes and adaptive geometry remain separate from this scale.
++"""
++
++COMPACT_SPACING = 4
++CONTROL_SPACING = 8
++BLOCK_SPACING = 12
++SECTION_SPACING = 18
++PAGE_MARGIN = 8
+--- before/tests/tabs/test_ui_spacing.py
++++ after/tests/tabs/test_ui_spacing.py
+@@ -0,0 +1,188 @@
++"""Semantic layout invariants in fully initialized, synthetic MainWindow."""
++import ast
++from pathlib import Path
++
++import pytest
++from PyQt6.QtCore import QMargins, QSize
++from PyQt6.QtWidgets import QApplication, QHBoxLayout, QFormLayout, QPushButton, QScrollArea
++
++from Application.theme import layout_metrics as metrics
++from Application.theme.apply_theme import prepare_app_theme
++
++
++@pytest.fixture
++def spacing_window(window_settings, monkeypatch, tmp_path):
++    from Application.tabs import analysis_filter_tab as analysis, data_loading_tab as data
++    from Application.tabs import train_model_tab as training
++    from main import MainWindow
++    app = QApplication.instance() or QApplication([])
++    prepare_app_theme(app)
++    monkeypatch.setattr(analysis.AnalysisFilterTab, 'refresh_options', lambda *a, **k: None)
++    monkeypatch.setattr(data._LoadingController, 'refresh_persisted', lambda *a: None)
++    monkeypatch.setattr(training, 'USER_SETTINGS_DIR', tmp_path / 'settings')
++    monkeypatch.setattr(training, 'metadata_readiness', lambda *a: (True, 'Synthetic ready', 'a' * 32))
++    monkeypatch.setattr(training.QProcess, 'start', lambda *a: pytest.fail('No training/data process in spacing tests'))
++    window = MainWindow()
++    window.apply_theme(False)
++    window.setMinimumSize(0, 0)
++    window.resize(1920, 1080)
++    window.show()
++    for _ in range(4):
++        app.processEvents()
++    yield window
++    window._training_active = False
++    window._training_timer.stop()
++    window.mb_state_timer.stop()
++    window.close()
++    window.deleteLater()
++    for _ in range(3):
++        app.processEvents()
++
++
++def row_for(widget):
++    return next(layout for layout in widget.parentWidget().findChildren(QHBoxLayout)
++                if layout.indexOf(widget) >= 0)
++
++
++def test_shared_spacing_scale():
++    assert (metrics.COMPACT_SPACING, metrics.CONTROL_SPACING, metrics.BLOCK_SPACING,
++            metrics.SECTION_SPACING, metrics.PAGE_MARGIN) == (4, 8, 12, 18, 8)
++
++
++@pytest.mark.parametrize('names', [
++    ('mb_start_button', 'mb_customers_button', 'mb_cancel_button'),
++    ('mb_manual_interactions_button', 'mb_manual_customers_button'),
++    ('analysis_filter_tab.apply_button', 'analysis_filter_tab.reset_button'),
++    ('dataset_statistics_tab.refresh', 'dataset_statistics_tab.export_button', 'dataset_statistics_tab.cancel_button'),
++    ('start_train', 'cancel_train'), ('btn_excel', 'btn_show_history'),
++    ('analysis_filter_tab.types.select_all', 'analysis_filter_tab.types.select_none'),
++])
++def test_action_rows_share_control_spacing(spacing_window, names):
++    def resolve(name):
++        target = spacing_window
++        for part in name.split('.'):
++            target = getattr(target, part)
++        return target
++    controls = [resolve(name) for name in names]
++    row = row_for(controls[0])
++    assert row.spacing() == metrics.CONTROL_SPACING
++    assert all(row.indexOf(control) >= 0 for control in controls)
++    assert [row.indexOf(control) for control in controls] == sorted(row.indexOf(control) for control in controls)
++
++
++@pytest.mark.parametrize('dark', [False, True])
++def test_main_window_training_geometry_comes_from_global_qss_in_both_states(spacing_window, dark):
++    window = spacing_window
++    window.tabs.setCurrentIndex(3)
++    window.apply_theme(dark)
++    app = QApplication.instance()
++    for running in (False, True, False):
++        window.start_train.setEnabled(not running)
++        window.cancel_train.setEnabled(running)
++        for _ in range(4):
++            app.processEvents()
++        start, cancel = window.start_train, window.cancel_train
++        assert start.height() == cancel.height()
++        assert start.geometry().top() == cancel.geometry().top()
++        assert start.geometry().bottom() == cancel.geometry().bottom()
++        assert start.minimumHeight() < start.maximumHeight()
++        assert cancel.minimumHeight() < cancel.maximumHeight()
++        assert start.styleSheet() == cancel.styleSheet() == ''
++        assert start.iconSize() == cancel.iconSize() == QSize(17, 17)
++        assert not cancel.icon().isNull()
++        assert row_for(start) is row_for(cancel)
++    assert not hasattr(window, 'apply_static_widget_styles')
++    assert getattr(window, 'train_proc', None) is None
++
++
++def test_panel_and_section_metrics_and_form_spacing(spacing_window):
++    w = spacing_window
++    page = QMargins(metrics.PAGE_MARGIN, metrics.PAGE_MARGIN, metrics.PAGE_MARGIN, metrics.PAGE_MARGIN)
++    data_top = w.tabs.widget(0).layout().itemAt(0).layout()
++    left_scroll = data_top.itemAt(0).widget().findChild(QScrollArea)
++    left, right = left_scroll.widget().layout(), data_top.itemAt(2).widget().layout()
++    assert left.contentsMargins() == right.contentsMargins() == page
++    assert left.spacing() == right.spacing() == metrics.SECTION_SPACING
++    assert left.itemAt(0).layout().spacing() == left.itemAt(1).layout().spacing() == metrics.BLOCK_SPACING
++    analysis = w.analysis_filter_tab
++    left, right = analysis.layout().itemAt(0).widget().layout(), analysis.layout().itemAt(2).widget().layout()
++    assert left.contentsMargins() == right.contentsMargins() == page
++    assert left.spacing() == right.spacing() == metrics.BLOCK_SPACING
++    assert left.itemAt(4).spacerItem().sizeHint().height() == metrics.SECTION_SPACING - metrics.BLOCK_SPACING
++    for form in (analysis.date_form, analysis.product_form):
++        assert form.horizontalSpacing() == form.verticalSpacing() == metrics.CONTROL_SPACING
++        assert form.rowWrapPolicy() in (QFormLayout.RowWrapPolicy.DontWrapRows, QFormLayout.RowWrapPolicy.WrapAllRows)
++    train_top = w.tabs.widget(3).layout().itemAt(0).layout()
++    left, right = train_top.itemAt(0).widget().layout(), train_top.itemAt(2).widget().layout()
++    assert left.contentsMargins() == right.contentsMargins() == page
++    assert left.spacing() == metrics.SECTION_SPACING and right.spacing() == metrics.BLOCK_SPACING
++    forms = w.tabs.widget(3).findChildren(QFormLayout)
++    assert len(forms) == 1 and forms[0].horizontalSpacing() == forms[0].verticalSpacing() == metrics.CONTROL_SPACING
++    history = w.tabs.widget(3).layout().itemAt(2).layout()
++    assert history.contentsMargins() == page and history.spacing() == metrics.COMPACT_SPACING
++    assert w.dataset_statistics_tab.layout().contentsMargins() == page
++    assert w.dataset_statistics_tab.layout().spacing() == metrics.BLOCK_SPACING
++
++
++def test_status_indicator_spacing_and_main_bar(spacing_window):
++    w = spacing_window
++    status_groups = w.status_files_layout.itemAt(1).widget().layout()
++    assert status_groups.spacing() == metrics.CONTROL_SPACING
++    for index in range(3):
++        assert status_groups.itemAt(index).widget().layout().spacing() == metrics.COMPACT_SPACING
++    assert w.prefix.styleSheet() == ''
++    assert w.status_label.parentWidget().layout().spacing() == metrics.COMPACT_SPACING
++    assert w.centralWidget().layout().spacing() == metrics.CONTROL_SPACING
++    assert w.centralWidget().layout().contentsMargins() == QMargins(*(metrics.PAGE_MARGIN,) * 4)
++
++
++def test_separator_layouts_keep_structural_zeros_and_results_tables_use_layout(spacing_window):
++    w = spacing_window
++    for index in (0, 3):
++        root = w.tabs.widget(index).layout()
++        top = root.itemAt(0).layout()
++        assert root.contentsMargins() == top.contentsMargins() == QMargins()
++        assert root.spacing() == top.spacing() == 0
++        assert top.itemAt(1).widget().objectName() == 'vSeparator'
++        assert root.itemAt(1).widget().objectName() == 'hSeparator'
++    root = w.tabs.widget(4).layout()
++    assert root.spacing() == 0 and root.contentsMargins() == QMargins()
++    assert root.itemAt(1).widget().objectName() == 'hSeparator'
++    bottom = root.itemAt(2).layout()
++    assert bottom.spacing() == 0 and bottom.contentsMargins() == QMargins()
++    assert bottom.itemAt(1).widget().objectName() == 'vSeparator'
++    for table in (w.purchases_table, w.recs_table):
++        assert table.styleSheet() == ''
++        assert table.parentWidget().layout().spacing() == metrics.BLOCK_SPACING
++        assert table.parentWidget().layout().contentsMargins() == QMargins(*(metrics.PAGE_MARGIN,) * 4)
++
++
++def test_analysis_spacing_has_no_statistics_tab_dependency():
++    from Application.tabs import analysis_filter_tab
++    tree = ast.parse(Path(analysis_filter_tab.__file__).read_text(encoding='utf-8'))
++    assert not any(isinstance(node, ast.ImportFrom) and node.module == 'Application.tabs.dataset_statistics_tab'
++                   for node in ast.walk(tree))
++
++
++def test_ordinary_buttons_have_no_local_height_or_padding_constraints(spacing_window):
++    for button in spacing_window.findChildren(QPushButton):
++        assert button.minimumHeight() < button.maximumHeight()
++        assert not any(word in button.styleSheet() for word in ('padding', 'margin', 'height'))
++
++
++def test_theme_switch_keeps_geometry_of_action_rows_and_headers(spacing_window):
++    from PyQt6.QtWidgets import QLabel
++    window = spacing_window
++    app = QApplication.instance()
++    for index in range(5):
++        window.tabs.setCurrentIndex(index)
++        records = []
++        for dark in (False, True, False):
++            window.apply_theme(dark)
++            for _ in range(4):
++                app.processEvents()
++            page = window.tabs.widget(index)
++            controls = page.findChildren(QPushButton)
++            headers = [label for label in page.findChildren(QLabel) if label.property('class') == 'sectionHeader']
++            records.append([widget.geometry() for widget in controls + headers])
++        assert records[0] == records[1] == records[2]

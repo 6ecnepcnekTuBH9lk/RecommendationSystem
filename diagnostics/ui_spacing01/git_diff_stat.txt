@@ -1,0 +1,12 @@
+ Application/tabs/analysis_filter_tab.py       |  24 ++++-
+ Application/tabs/create_results_tab.py        |  36 ++++---
+ Application/tabs/data_loading_tab.py          |  67 ++++++++-----
+ Application/tabs/dataset_statistics_tab.py    | 136 ++++++++++++++------------
+ Application/tabs/reference_loading_section.py |  21 ++--
+ Application/tabs/train_model_tab.py           |  44 ++++++---
+ Application/theme/custom.qss                  |   2 +-
+ main.py                                       |  18 +---
+ tests/tabs/test_dataset_statistics_tab.py     |  66 ++++++++-----
+ tests/tabs/test_reference_loading_section.py  |   2 +-
+ tests/tabs/test_training_research_ui.py       |   9 +-
+ 11 files changed, 254 insertions(+), 171 deletions(-)

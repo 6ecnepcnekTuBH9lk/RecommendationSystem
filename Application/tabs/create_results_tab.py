@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
                              QTableWidgetItem)
 
 from Application.photo.photo_processing import (_ensure_photo_map, _photo_url_for_code, _set_photo_cell)
+from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING, PAGE_MARGIN
 
 from Application.settings.settings_and_filter import (
     get_selected_list_values
@@ -43,8 +44,8 @@ def create_result_widgets_tab(aboba):
 
     # ================== 1) ВЕРХНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ (2 строки) ==================
     top_controls = QVBoxLayout()
-    top_controls.setContentsMargins(10, 10, 10, 0)
-    top_controls.setSpacing(10)
+    top_controls.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, BLOCK_SPACING)
+    top_controls.setSpacing(CONTROL_SPACING)
 
     # ---- фильтр клиента ----
     aboba.client_filter_field = QComboBox()
@@ -70,7 +71,8 @@ def create_result_widgets_tab(aboba):
 
     # ---- 1 строка: Идентификатор клиента: ----
     row1 = QHBoxLayout()
-    row1.setSpacing(10)
+    row1.setContentsMargins(0, 0, 0, 0)
+    row1.setSpacing(CONTROL_SPACING)
 
     lbl_client = QLabel("Идентификатор клиента:")
 
@@ -80,7 +82,8 @@ def create_result_widgets_tab(aboba):
 
     # ---- 2 строка: Количество рекомендаций ----
     row2 = QHBoxLayout()
-    row2.setSpacing(10)
+    row2.setContentsMargins(0, 0, 0, 0)
+    row2.setSpacing(CONTROL_SPACING)
 
     lbl_recs = QLabel("Количество рекомендаций:")
     lbl_recs.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -101,6 +104,8 @@ def create_result_widgets_tab(aboba):
 
     # ====== ОБЁРТКА: верхняя панель = 2 колонки (левая 50%, правая 50%) ======
     top_wrap = QHBoxLayout()
+    top_wrap.setContentsMargins(0, 0, 0, 0)
+    top_wrap.setSpacing(CONTROL_SPACING)
 
     top_left = QWidget()
     top_left.setLayout(top_controls)
@@ -108,11 +113,13 @@ def create_result_widgets_tab(aboba):
     aboba.top_right = QWidget()
 
     right_box = QVBoxLayout(aboba.top_right)
-    right_box.setContentsMargins(10, 10, 10, 0)
+    right_box.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, BLOCK_SPACING)
+    right_box.setSpacing(BLOCK_SPACING)
     right_box.setAlignment(Qt.AlignmentFlag.AlignTop)
 
     grid = QGridLayout()
-    grid.setHorizontalSpacing(15)
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(BLOCK_SPACING)
     grid.setVerticalSpacing(0)
 
     def _mk_readonly_line() -> QLineEdit:
@@ -125,8 +132,8 @@ def create_result_widgets_tab(aboba):
         w = QWidget()
         form = QFormLayout(w)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(5)
-        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(CONTROL_SPACING)
+        form.setVerticalSpacing(CONTROL_SPACING)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -174,7 +181,6 @@ def create_result_widgets_tab(aboba):
     top_wrap.addWidget(aboba.top_right, 1)
 
     outer.addLayout(top_wrap)
-    outer.addSpacing(10)
 
     # ================== 2) ГОРИЗОНТАЛЬНАЯ ЛИНИЯ ==================
     hline = QFrame()
@@ -186,21 +192,21 @@ def create_result_widgets_tab(aboba):
     # ================== 3) НИЖНЯЯ ЧАСТЬ: ДВЕ КОЛОНКИ ==================
     root = QHBoxLayout()
     root.setContentsMargins(0, 0, 0, 0)
-    root.setSpacing(10)
+    root.setSpacing(0)
     outer.addLayout(root, 1)
 
     # Левая панель
     left_wrap = QWidget()
     left_layout = QVBoxLayout(left_wrap)
-    left_layout.setContentsMargins(0, 0, 0, 0)
-    left_layout.setSpacing(0)
+    left_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+    left_layout.setSpacing(BLOCK_SPACING)
 
     # Правая панель
     right_wrap = QWidget()
     right_layout = QVBoxLayout(right_wrap)
     right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-    right_layout.setContentsMargins(0, 0, 0, 0)
-    right_layout.setSpacing(0)
+    right_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+    right_layout.setSpacing(BLOCK_SPACING)
 
     # Вертикальный разделитель
     separator = QFrame()
@@ -234,7 +240,6 @@ def create_result_widgets_tab(aboba):
     aboba.purchases_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
     aboba.purchases_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
     aboba.purchases_table.setGridStyle(Qt.PenStyle.SolidLine)
-    aboba.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
 
     left_layout.addWidget(aboba.purchases_table, 1)
 
@@ -262,7 +267,6 @@ def create_result_widgets_tab(aboba):
     aboba.recs_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
     aboba.recs_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
     aboba.recs_table.setGridStyle(Qt.PenStyle.SolidLine)
-    aboba.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")
 
     right_layout.addWidget(aboba.recs_table, 1)
 

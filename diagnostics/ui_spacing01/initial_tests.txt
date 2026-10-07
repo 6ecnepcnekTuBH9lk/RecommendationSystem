@@ -1,0 +1,24 @@
+..........F............................................................. [ 36%]
+.........................................................F.............. [ 72%]
+.......................................................                  [100%]
+================================== FAILURES ===================================
+_______________ test_panel_and_section_metrics_and_form_spacing _______________
+tests\tabs\test_ui_spacing.py:113: in test_panel_and_section_metrics_and_form_spacing
+    assert form.rowWrapPolicy() == QFormLayout.RowWrapPolicy.WrapLongRows
+E   AssertionError: assert <RowWrapPolicy.WrapAllRows: 2> == <RowWrapPolicy.WrapLongRows: 1>
+E    +  where <RowWrapPolicy.WrapAllRows: 2> = <built-in method rowWrapPolicy of QFormLayout object at 0x000002519CD32170>()
+E    +    where <built-in method rowWrapPolicy of QFormLayout object at 0x000002519CD32170> = <PyQt6.QtWidgets.QFormLayout object at 0x000002519CD32170>.rowWrapPolicy
+E    +  and   <RowWrapPolicy.WrapLongRows: 1> = <enum 'RowWrapPolicy'>.WrapLongRows
+E    +    where <enum 'RowWrapPolicy'> = QFormLayout.RowWrapPolicy
+___________ test_four_inputs_default_research_and_removed_controls ____________
+tests\tabs\test_training_research_ui.py:81: in test_four_inputs_default_research_and_removed_controls
+    assert w.start_train.text() == '������� ������� ������'
+E   AssertionError: assert ' ������� ������� ������' == '������� ������� ������'
+E     
+E     - ������� ������� ������
+E     +  ������� ������� ������
+E     ? +
+=========================== short test summary info ===========================
+FAILED tests/tabs/test_ui_spacing.py::test_panel_and_section_metrics_and_form_spacing
+FAILED tests/tabs/test_training_research_ui.py::test_four_inputs_default_research_and_removed_controls
+2 failed, 197 passed in 133.03s (0:02:13)

@@ -1,0 +1,56 @@
+FFFFF                                                                    [100%]
+================================== FAILURES ===================================
+_____________ test_ui03_layout_separator_junction_and_button_row ______________
+tests\tabs\test_training_research_ui.py:542: in test_ui03_layout_separator_junction_and_button_row
+    assert w.start_train.minimumHeight() == w.cancel_train.minimumHeight() == 36
+E   assert 0 == 36
+E    +  where 0 = <built-in method minimumHeight of QPushButton object at 0x0000025A0067CF50>()
+E    +    where <built-in method minimumHeight of QPushButton object at 0x0000025A0067CF50> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A0067CF50>.minimumHeight
+E    +      where <PyQt6.QtWidgets.QPushButton object at 0x0000025A0067CF50> = <PyQt6.QtWidgets.QWidget object at 0x0000025A005E4550>.cancel_train
+_ test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[0-False] _
+tests\tabs\test_training_research_ui.py:795: in test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states
+    aligned()
+tests\tabs\test_training_research_ui.py:781: in aligned
+    assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
+E   assert 0 == 16777215
+E    +  where 0 = <built-in method minimumHeight of QPushButton object at 0x0000025A0071F570>()
+E    +    where <built-in method minimumHeight of QPushButton object at 0x0000025A0071F570> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A0071F570>.minimumHeight
+E    +  and   16777215 = <built-in method maximumHeight of QPushButton object at 0x0000025A0071F570>()
+E    +    where <built-in method maximumHeight of QPushButton object at 0x0000025A0071F570> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A0071F570>.maximumHeight
+_ test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[0-True] _
+tests\tabs\test_training_research_ui.py:795: in test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states
+    aligned()
+tests\tabs\test_training_research_ui.py:781: in aligned
+    assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
+E   assert 0 == 16777215
+E    +  where 0 = <built-in method minimumHeight of QPushButton object at 0x0000025A007B4410>()
+E    +    where <built-in method minimumHeight of QPushButton object at 0x0000025A007B4410> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A007B4410>.minimumHeight
+E    +  and   16777215 = <built-in method maximumHeight of QPushButton object at 0x0000025A007B4410>()
+E    +    where <built-in method maximumHeight of QPushButton object at 0x0000025A007B4410> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A007B4410>.maximumHeight
+_ test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[1-False] _
+tests\tabs\test_training_research_ui.py:795: in test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states
+    aligned()
+tests\tabs\test_training_research_ui.py:781: in aligned
+    assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
+E   assert 0 == 16777215
+E    +  where 0 = <built-in method minimumHeight of QPushButton object at 0x0000025A00795130>()
+E    +    where <built-in method minimumHeight of QPushButton object at 0x0000025A00795130> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A00795130>.minimumHeight
+E    +  and   16777215 = <built-in method maximumHeight of QPushButton object at 0x0000025A00795130>()
+E    +    where <built-in method maximumHeight of QPushButton object at 0x0000025A00795130> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A00795130>.maximumHeight
+_ test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[1-True] _
+tests\tabs\test_training_research_ui.py:795: in test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states
+    aligned()
+tests\tabs\test_training_research_ui.py:781: in aligned
+    assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
+E   assert 0 == 16777215
+E    +  where 0 = <built-in method minimumHeight of QPushButton object at 0x0000025A01991A90>()
+E    +    where <built-in method minimumHeight of QPushButton object at 0x0000025A01991A90> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A01991A90>.minimumHeight
+E    +  and   16777215 = <built-in method maximumHeight of QPushButton object at 0x0000025A01991A90>()
+E    +    where <built-in method maximumHeight of QPushButton object at 0x0000025A01991A90> = <PyQt6.QtWidgets.QPushButton object at 0x0000025A01991A90>.maximumHeight
+=========================== short test summary info ===========================
+FAILED tests/tabs/test_training_research_ui.py::test_ui03_layout_separator_junction_and_button_row
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[0-False]
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[0-True]
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[1-False]
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states[1-True]
+5 failed, 65 deselected in 7.63s

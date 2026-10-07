@@ -1,0 +1,172 @@
+[
+  {
+    "name": "01_data_loading",
+    "dark": false,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      245,
+      36
+    ],
+    "cancel": [
+      245,
+      36
+    ]
+  },
+  {
+    "name": "02_analysis_filter",
+    "dark": false,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      245,
+      36
+    ],
+    "cancel": [
+      245,
+      36
+    ]
+  },
+  {
+    "name": "03_statistics",
+    "dark": false,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      245,
+      36
+    ],
+    "cancel": [
+      245,
+      36
+    ]
+  },
+  {
+    "name": "04_training",
+    "dark": false,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  },
+  {
+    "name": "05_results",
+    "dark": false,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  },
+  {
+    "name": "01_data_loading",
+    "dark": true,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  },
+  {
+    "name": "02_analysis_filter",
+    "dark": true,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  },
+  {
+    "name": "03_statistics",
+    "dark": true,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  },
+  {
+    "name": "04_training",
+    "dark": true,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  },
+  {
+    "name": "05_results",
+    "dark": true,
+    "size": [
+      1920,
+      1080
+    ],
+    "dpi": 96,
+    "start": [
+      547,
+      36
+    ],
+    "cancel": [
+      547,
+      36
+    ]
+  }
+]

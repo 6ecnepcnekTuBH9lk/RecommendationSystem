@@ -20,6 +20,7 @@ from Application.settings.set_status import (set_status_processing, schedule_sta
 from Application.evaluation.experiments.gui_history import ExperimentHistory, now, clean_record, RESEARCH_FIXED
 from Application.mindbox.canonical_storage import atomic_json
 from Application.training_charts import TrainingChart
+from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
 from .training_workflow import input_values, metadata_readiness, production_config
 
 
@@ -52,8 +53,16 @@ def create_train_model_widgets_tab(aboba):
     left_panel.setObjectName('trainingLeftPanel')
     right_panel.setObjectName('trainingChartsPanel')
     left, right = QVBoxLayout(left_panel), QVBoxLayout(right_panel)
-    left.setContentsMargins(8, 0, 8, 8)
-    right.setContentsMargins(8, 0, 8, 8)
+    for panel in (left, right):
+        panel.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+    left.setSpacing(SECTION_SPACING)
+    right.setSpacing(BLOCK_SPACING)
+    parameters, process = QVBoxLayout(), QVBoxLayout()
+    for section in (parameters, process):
+        section.setContentsMargins(0, 0, 0, 0)
+        section.setSpacing(BLOCK_SPACING)
+    left.addLayout(parameters)
+    left.addLayout(process, 1)
     top.addWidget(left_panel, 4)
     separator = QFrame()
     separator.setObjectName('vSeparator')
@@ -69,10 +78,13 @@ def create_train_model_widgets_tab(aboba):
         layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignHCenter)
         return label
 
-    aboba.heading_enter_parameter = heading(left, 'Параметры')
+    aboba.heading_enter_parameter = heading(parameters, 'Параметры')
     form = QFormLayout()
+    form.setContentsMargins(0, 0, 0, 0)
+    form.setHorizontalSpacing(CONTROL_SPACING)
+    form.setVerticalSpacing(CONTROL_SPACING)
     form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-    left.addLayout(form)
+    parameters.addLayout(form)
     aboba.training_mode = QComboBox()
     aboba.training_mode.addItems(['Эксперимент', 'Рабочая модель'])
     form.addRow('Режим обучения:', aboba.training_mode)
@@ -102,32 +114,36 @@ def create_train_model_widgets_tab(aboba):
     aboba.cancel_train.clicked.connect(lambda: cancel_training(aboba))
     buttons = QHBoxLayout()
     buttons.setContentsMargins(0, 0, 0, 0)
-    buttons.setSpacing(8)
+    buttons.setSpacing(CONTROL_SPACING)
 
     for button, stretch in ((aboba.start_train, 3), (aboba.cancel_train, 1)):
         button.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
         )
-        buttons.addWidget(button, stretch)
+        buttons.addWidget(button, stretch, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-    aboba.label_69 = heading(left, 'Процесс обучения')
+    aboba.label_69 = heading(process, 'Процесс обучения')
     aboba.training_progress_text = QLabel('Ожидание запуска')
     aboba.training_progress_text.setWordWrap(True)
     aboba.training_progress_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
     aboba.training_progress = QProgressBar()
     aboba.training_progress.setRange(0, 50)
     aboba.training_progress.setValue(0)
-    left.addWidget(aboba.training_progress_text)
-    left.addWidget(aboba.training_progress)
+    progress = QVBoxLayout()
+    progress.setContentsMargins(0, 0, 0, 0)
+    progress.setSpacing(COMPACT_SPACING)
+    progress.addWidget(aboba.training_progress_text)
+    progress.addWidget(aboba.training_progress)
+    process.addLayout(progress)
     aboba.train_log = QTextEdit()
     aboba.train_log.setAcceptRichText(False)
     aboba.train_log.setReadOnly(True)
     aboba.train_log.setPlaceholderText('Логи подготовки, обучения и оценки появятся здесь…')
     aboba.train_log.document().setMaximumBlockCount(5000)
-    left.addWidget(aboba.train_log, 1)
-    left.addWidget(aboba.training_reason)
-    left.addLayout(buttons)
+    process.addWidget(aboba.train_log, 1)
+    process.addWidget(aboba.training_reason)
+    process.addLayout(buttons)
     heading(right, 'Визуализация обучения')
     aboba.training_loss_chart = TrainingChart('Ошибка обучения', ('Ошибка',), 'Ошибка')
     aboba.training_metric_chart = TrainingChart('Метрики валидации', ('NDCG@10', 'Recall@10'), 'Значение')
@@ -139,8 +155,8 @@ def create_train_model_widgets_tab(aboba):
     separator.setFrameShape(QFrame.Shape.NoFrame)
     root.addWidget(separator)
     history = QVBoxLayout()
-    history.setSpacing(4)
-    history.setContentsMargins(8, 4, 8, 0)
+    history.setSpacing(COMPACT_SPACING)
+    history.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
     root.addLayout(history, 2)
     heading(history, 'История экспериментов')
     aboba.history_notice = QLabel()

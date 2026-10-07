@@ -1,0 +1,40 @@
+{
+  "baseline_count": 191,
+  "changed": [
+    "Application/tabs/analysis_filter_tab.py",
+    "Application/tabs/create_results_tab.py",
+    "Application/tabs/data_loading_tab.py",
+    "Application/tabs/dataset_statistics_tab.py",
+    "Application/tabs/reference_loading_section.py",
+    "Application/tabs/train_model_tab.py",
+    "Application/theme/custom.qss",
+    "main.py",
+    "tests/tabs/test_dataset_statistics_tab.py",
+    "tests/tabs/test_reference_loading_section.py",
+    "tests/tabs/test_training_research_ui.py"
+  ],
+  "added": [
+    "Application/theme/layout_metrics.py",
+    "tests/tabs/test_ui_spacing.py"
+  ],
+  "protected_count": 23,
+  "protected_unchanged": true,
+  "non_presentation_method_count": 190,
+  "methods_unchanged": true,
+  "button_qss_unchanged": true,
+  "training_chart_queue_fix_unchanged": true
+}
+Application/tabs/analysis_filter_tab.py: +20 / -4
+Application/tabs/create_results_tab.py: +20 / -16
+Application/tabs/data_loading_tab.py: +44 / -23
+Application/tabs/dataset_statistics_tab.py: +78 / -62
+Application/tabs/reference_loading_section.py: +12 / -9
+Application/tabs/train_model_tab.py: +31 / -15
+Application/theme/custom.qss: +1 / -1
+main.py: +5 / -12
+tests/tabs/test_dataset_statistics_tab.py: +40 / -26
+tests/tabs/test_reference_loading_section.py: +1 / -1
+tests/tabs/test_training_research_ui.py: +5 / -4
+Application/theme/layout_metrics.py: +11 / -0
+tests/tabs/test_ui_spacing.py: +188 / -0
+13 files: +456 / -173

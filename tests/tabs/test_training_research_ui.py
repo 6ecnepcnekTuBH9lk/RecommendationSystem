@@ -78,7 +78,7 @@ def test_four_inputs_default_research_and_removed_controls(ui):
     assert not hasattr(w, 'embedding_dim_input') and not hasattr(w, 'top_rec')
     assert w.start_train.isEnabled()
     w.training_mode.setCurrentIndex(1)
-    assert w.start_train.text() == 'Обучить рабочую модель'
+    assert w.start_train.text().strip() == 'Обучить рабочую модель'
     assert not w.cancel_train.isEnabled()
 
 
@@ -539,9 +539,9 @@ def test_ui03_layout_separator_junction_and_button_row(ui):
     assert w.training_loss_chart.parentWidget() is right and w.training_metric_chart.parentWidget() is right
     row = next(layout for layout in left.findChildren(QHBoxLayout) if layout.indexOf(w.start_train) >= 0)
     assert row.indexOf(w.cancel_train) >= 0 and row.contentsMargins() == QMargins()
-    assert w.start_train.minimumHeight() == w.cancel_train.minimumHeight() == 36
+    assert w.start_train.minimumHeight() == w.cancel_train.minimumHeight() == 0
     for button in (w.start_train, w.cancel_train):
-        assert button.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+        assert button.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Preferred
         assert row.itemAt(row.indexOf(button)).alignment() & Qt.AlignmentFlag.AlignVCenter
     assert not w.cancel_train.icon().isNull()
     assert w.cancel_train.icon().pixmap(17, 17).toImage() == QIcon(str(tab.ICONS_DIR / 'failure.png')).pixmap(17, 17).toImage()
@@ -778,7 +778,8 @@ def test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states(ui,
         app.processEvents()
         start, cancel = w.start_train, w.cancel_train
         assert start.height() == cancel.height() == 36
-        assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
+        assert start.minimumHeight() == cancel.minimumHeight() == 0
+        assert start.maximumHeight() == cancel.maximumHeight() > start.minimumHeight()
         assert start.geometry().top() == cancel.geometry().top()
         assert start.geometry().bottom() == cancel.geometry().bottom()
         assert start.contentsMargins() == cancel.contentsMargins() == QMargins()

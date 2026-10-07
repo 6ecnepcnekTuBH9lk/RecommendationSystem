@@ -16,6 +16,7 @@ from Application.tabs.train_model_tab import create_train_model_widgets_tab
 from Application.tabs.create_results_tab import create_result_widgets_tab
 from Application.settings.set_status import set_ready_status
 from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
+from Application.theme.layout_metrics import PAGE_MARGIN, CONTROL_SPACING, COMPACT_SPACING
 
 
 class MainWindow(QMainWindow):
@@ -31,6 +32,8 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+        main_layout.setSpacing(CONTROL_SPACING)
         # Long tab forms must not impose their full sizeHint on the window.
         # Their deeper adaptation to small windows is a separate UI task.
         main_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
@@ -92,19 +95,16 @@ class MainWindow(QMainWindow):
         # Вкладка с выгрузкой результатов
         create_result_widgets_tab(self)
 
-        # Отступы на форме
-        self.apply_static_widget_styles()
-
         # --- Кастомный нижний бар ---
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(0, 0, 0, 0)
-        bottom_bar.setSpacing(10)
+        bottom_bar.setSpacing(CONTROL_SPACING)
 
         # Контейнер статуса
         status_wrap = QWidget()
         status_layout = QHBoxLayout(status_wrap)
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(6)
+        status_layout.setSpacing(COMPACT_SPACING)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.status_icon)
         status_layout.addStretch(1)
@@ -209,14 +209,6 @@ class MainWindow(QMainWindow):
         finally:
             self.setUpdatesEnabled(True)
             self.update()
-
-    # -------------------------------------------СТАТИЧЕСКИЕ ПРАВКИ РАЗМЕРОВ--------------------------------------------
-    def apply_static_widget_styles(self):
-
-        self.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
-        self.start_train.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
-        self.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
-        self.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")
 
 
 # -----------------------------------------------MAIN-------------------------------------------------------------------
