@@ -1,0 +1,45 @@
+{
+  "audit_reference": "GPU-COST-01 frozen source provenance plus exact BPRMF before-CONV copy",
+  "prior_source_files_checked": 104,
+  "changed_existing": [
+    "Application/model/BPRMF.py"
+  ],
+  "code_added": [
+    "scripts/run_bpr_convergence.py",
+    "tests/evaluation/test_bpr_convergence.py",
+    "diagnostics/bpr_conv01a/render_report.py"
+  ],
+  "prior_experiment_source_changes": [],
+  "artifacts": [
+    "analysis.json",
+    "artifact_validation.json",
+    "code_before.py.txt",
+    "environment.json",
+    "evaluation_model_tests.txt",
+    "frozen_config.json",
+    "full_pytest.txt",
+    "git_status.txt",
+    "loss.png",
+    "loss.svg",
+    "math_unchanged.json",
+    "memory.png",
+    "memory.svg",
+    "ndcg10.png",
+    "ndcg10.svg",
+    "observer.diff.txt",
+    "processes_after.json",
+    "protected_files_after.json",
+    "protected_files_before.json",
+    "recall10.png",
+    "recall10.svg",
+    "render_report.py",
+    "results.json",
+    "run.log",
+    "summary.md",
+    "targeted_tests.txt",
+    "task_changes.json",
+    "tests_before_run.json",
+    "trajectory.csv",
+    "trajectory.json"
+  ]
+}

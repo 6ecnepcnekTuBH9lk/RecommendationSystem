@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 import json
+import io
 from pathlib import Path
 import socket
 import subprocess
@@ -11,6 +12,7 @@ import requests
 import torch
 
 from Application.mindbox import daily_training_batch as daily
+from Application.mindbox import canonical_storage as store
 from Application.mindbox import customer_profile_snapshot as profiles
 from Application.mindbox.client import MindboxClient
 from Application.mindbox.training_batch import TrainingBatchWindow, TrainingBatchExport
@@ -25,6 +27,53 @@ EXTERNAL = "2" * 32
 
 def forbidden(*args, **kwargs):
     pytest.fail("Forbidden dependency in production training")
+
+
+def test_gui_cancellation_at_epoch_preserves_publication(tmp_path):
+    args = source(tmp_path)
+    args['cfg'].epochs = 2
+    old = old_model(production.MODEL_ROOT)
+    epochs = []
+    def observer(model, epoch):
+        epochs.append(epoch.epoch)
+        raise KeyboardInterrupt
+    result = production.train_and_publish_production_model(**args, epoch_observer=observer)
+    assert epochs == [1] and result.cancelled and not result.publication_started
+    assert_old(production.MODEL_ROOT, old)
+
+
+def test_gui_cancellation_during_artifact_precommit_keeps_old_generation(tmp_path, monkeypatch):
+    args = source(tmp_path)
+    old = old_model(production.MODEL_ROOT)
+    cancelled = []
+    save = core._save_artifacts
+    def artifacts(*args, **kwargs):
+        cancelled.append(True)
+        return save(*args, **kwargs)
+    def check():
+        if cancelled:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(core, '_save_artifacts', artifacts)
+    result = production.train_and_publish_production_model(**args, check_cancel=check)
+    assert result.cancelled and result.publication_started and not result.published
+    assert_old(production.MODEL_ROOT, old)
+
+
+@pytest.mark.parametrize('answer,expected', [('NO\n', 130), ('', 130), ('PUBLISH\n', 0)])
+def test_managed_gui_publication_handshake(tmp_path, monkeypatch, capsys, answer, expected):
+    args = canonical_source(tmp_path)
+    old = old_model(production.MODEL_ROOT)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(answer))
+    assert cli.main(gui_argv(args) + ['--cancel-file', str(tmp_path / 'cancel')]) == expected
+    recorded = events(capsys.readouterr().out)
+    assert any(e['stage'] == 'epoch' and e['epoch'] == 1 for e in recorded)
+    assert any(e['stage'] == 'publication_ready' for e in recorded)
+    result = next(e for e in recorded if e['stage'] == 'finished')
+    if expected:
+        assert result['cancelled'] and not result['published']
+        assert_old(production.MODEL_ROOT, old)
+    else:
+        assert result['published'] and result['postpublish_validation']
 
 
 @pytest.fixture(autouse=True)
@@ -396,3 +445,160 @@ def test_orphan_cleanup_failure_preserves_current_and_reports_flag(tmp_path, mon
     assert result.cleanup_failed and not result.published
     assert (production.MODEL_ROOT / "current.json").read_bytes() == old
     assert len(list((production.MODEL_ROOT / "runs").iterdir())) == 2
+
+
+def canonical_source(tmp_path, problem="pass"):
+    args = source(tmp_path, problem)
+    batch = daily.load_chunked_training_batch(args["training_manifest"], raw_root=args["raw_root"])
+    with store.storage_lock(args["raw_root"]):
+        for component in batch.components:
+            store.publish(args["raw_root"], component.name, component.since, component.until,
+                          args["raw_root"] / component.export.relative_directory)
+    args["training_manifest"] = args["raw_root"] / "canonical/training.json"
+    return args
+
+
+@pytest.mark.parametrize("entrypoint", ["production", "shadow"])
+def test_canonical_training_entrypoints_use_exact_event_time(tmp_path, monkeypatch, entrypoint):
+    args = source(tmp_path)
+    batch = daily.load_chunked_training_batch(args["training_manifest"], raw_root=args["raw_root"])
+    actions_component = next(c for c in batch.components if c.name == "actions")
+    path = args["raw_root"] / actions_component.export.relative_directory / "actions_part_001.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    # Reverse source order within one type: latest event is the first physical row.
+    raw["customerActions"][0]["dateTimeUtc"] = "2026-01-01T20:00:00Z"
+    raw["customerActions"][2]["dateTimeUtc"] = "2026-01-01T08:00:00Z"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with store.storage_lock(args["raw_root"]):
+        for component in batch.components:
+            store.publish(args["raw_root"], component.name, component.since, component.until,
+                          args["raw_root"] / component.export.relative_directory)
+    args["training_manifest"] = args["raw_root"] / "canonical/training.json"
+    args["cfg"].min_user_interactions_for_eval = 2
+    original, calls = core.train_prepared_data_with_metrics, []
+    def checked(cfg, prepared, device):
+        user, item = prepared.splits.eval_users[0], prepared.splits.eval_items[0]
+        assert prepared.mappings.idx2user[user] == "SECRET_A"
+        assert prepared.mappings.idx2item[item] == "123456"
+        assert prepared.splits.user_pos_train[user] == {prepared.mappings.item2idx["123458"]}
+        calls.append(True)
+        return original(cfg, prepared, device)
+    monkeypatch.setattr(core, "train_prepared_data_with_metrics", checked)
+    if entrypoint == "production":
+        result = production.train_and_publish_production_model(**args)
+        assert result.error_code is None and result.published
+    else:
+        from Application.model import mindbox_shadow_training as shadow
+        monkeypatch.setattr(shadow, "REPORT_ROOT", tmp_path / "shadow_reports")
+        result = shadow.shadow_train_daily_manifest(
+            args["training_manifest"], raw_root=args["raw_root"], catalog_path=args["catalog_path"],
+            cfg=args["cfg"], device=args["device"])
+        assert result.error_code is None and result.training_completed
+        assert not production.MODEL_ROOT.exists()
+    assert calls == [True]
+
+
+def gui_argv(args):
+    config = args["catalog_path"].parent / "gui-config.json"
+    config.write_text(json.dumps(vars(args["cfg"]), ensure_ascii=False), encoding="utf-8")
+    return ["gui", "--manifest", str(args["training_manifest"]), "--raw-root", str(args["raw_root"]),
+            "--catalog", str(args["catalog_path"]), "--config", str(config), "--device", "auto"]
+
+
+def events(output):
+    return [json.loads(line[len(cli.EVENT_PREFIX):]) for line in output.splitlines()
+            if line.startswith(cli.EVENT_PREFIX)]
+
+
+@pytest.mark.parametrize("problem,answer,exit_code", [
+    ("pass", "", 0), ("warn", "YES\n", 0), ("warn", "NO\n", 130),
+    ("warn", "", 130), ("block", "YES\n", 1),
+])
+def test_gui_cli_canonical_quality_and_publication(tmp_path, monkeypatch, capsys, problem, answer, exit_code):
+    args = canonical_source(tmp_path, problem)
+    old = old_model(production.MODEL_ROOT)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
+    if exit_code:
+        monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
+    else:
+        train = core.train_prepared_data_with_metrics
+        def checked(cfg, data, device):
+            assert vars(cfg) == vars(args["cfg"])
+            assert device.type == ("cuda" if torch.cuda.is_available() else "cpu")
+            assert cfg.item_feature_cols == core.TrainConfig().item_feature_cols
+            return train(cfg, data, device)
+        monkeypatch.setattr(core, "train_prepared_data_with_metrics", checked)
+    assert cli.main(gui_argv(args)) == exit_code
+    output = capsys.readouterr()
+    recorded = events(output.out)
+    assert recorded[0]["batch_id"] == store.catalog(args["raw_root"])["revision"]
+    assert recorded[0]["quality"]["level"] == problem.upper()
+    if problem == "warn":
+        issue = recorded[0]["quality"]["issues"][0]
+        assert issue["code"] == "MAPPED_ACTION_WITHOUT_PRODUCT"
+        assert issue["count"] == 1 and issue["rate"] == 0.25
+        assert issue["breakdown"] == {"ProsmotrProdukta": 1}
+    if exit_code:
+        assert len(recorded) == 1
+        assert_old(production.MODEL_ROOT, old)
+    else:
+        result = recorded[-1]
+        assert result["published"] and result["postpublish_validation"] and result["prepublish_disk_validation"]
+        assert production._current(production.MODEL_ROOT)[0] == result["published_generation"]
+        maps, checkpoint = core._load_artifacts(str(production.MODEL_ROOT))
+        model, _, users, items = core._build_model_from_ckpt(checkpoint, torch.device("cpu"))
+        assert (users, items) == (len(maps["idx2user"]), len(maps["idx2item"])) == (2, 3)
+        assert model is not None and production.seen_items_from_checkpoint(checkpoint) is not None
+        assert production.analytics_from_checkpoint(checkpoint) is not None
+        assert (production.MODEL_ROOT / "runs" / OLD / "bprmf.pt").read_bytes() == b"old checkpoint sentinel"
+    assert not any(p.name in ("orders.csv", "views.csv", "favorites.csv") for p in tmp_path.rglob("*.csv"))
+    assert "SECRET" not in output.out + output.err
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_gui_cli_training_failure_preserves_previous_model(tmp_path, monkeypatch, capsys, cancel):
+    args = canonical_source(tmp_path)
+    old = old_model(production.MODEL_ROOT)
+    def fail(*a):
+        raise KeyboardInterrupt() if cancel else RuntimeError("SECRET")
+    monkeypatch.setattr(core, "train_prepared_data_with_metrics", fail)
+    assert cli.main(gui_argv(args)) == (130 if cancel else 1)
+    result = events(capsys.readouterr().out)[-1]
+    assert result["error_code"] == ("CANCELLED" if cancel else "TRAINING_FAILED")
+    assert not result["published"] and result["training_started"]
+    assert_old(production.MODEL_ROOT, old)
+
+
+def test_gui_cli_changed_batch_requires_new_preflight(tmp_path, monkeypatch, capsys):
+    args = canonical_source(tmp_path, "warn")
+    old = old_model(production.MODEL_ROOT)
+    preflight = production.preflight_production_training
+    def changed(*a, **kw):
+        result = preflight(*a, **kw)
+        catalog = store.catalog(args["raw_root"])
+        catalog["revision"] = "b" * 32
+        store.atomic_json(args["raw_root"] / "canonical/catalog.json", catalog)
+        return result
+    monkeypatch.setattr(production, "preflight_production_training", changed)
+    monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("YES\n"))
+    assert cli.main(gui_argv(args)) == 1
+    assert events(capsys.readouterr().out)[-1]["error_code"] == "PREFLIGHT_CHANGED"
+    assert_old(production.MODEL_ROOT, old)
+
+
+@pytest.mark.parametrize("bad_config", ["missing", "malformed", "other_catalog"])
+def test_gui_cli_invalid_config_never_uses_defaults(tmp_path, monkeypatch, bad_config):
+    args = canonical_source(tmp_path)
+    argv = gui_argv(args)
+    path = Path(argv[argv.index("--config") + 1])
+    if bad_config == "missing":
+        path.unlink()
+    elif bad_config == "malformed":
+        path.write_text("{invalid", encoding="utf-8")
+    else:
+        path.write_text(json.dumps({"data_dir": str(tmp_path / "other")}), encoding="utf-8")
+    monkeypatch.setattr(production, "preflight_production_training", forbidden)
+    monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
+    assert cli.main(argv) == 1
+    assert not production.MODEL_ROOT.exists()

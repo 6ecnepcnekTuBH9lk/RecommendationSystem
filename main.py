@@ -53,7 +53,6 @@ class MainWindow(QMainWindow):
         self.label_123 = None
         self.train_log = None
         self.start_train = None
-        self.btn_settings = None
         self.label_69 = None
         self.heading_enter_parameter = None
         self.prefix = None
@@ -215,7 +214,6 @@ class MainWindow(QMainWindow):
     def apply_static_widget_styles(self):
 
         self.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
-        self.btn_settings.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
         self.start_train.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
         self.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
         self.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")

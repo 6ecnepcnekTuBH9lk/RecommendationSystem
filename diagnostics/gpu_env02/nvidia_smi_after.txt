@@ -1,0 +1,2 @@
+name, driver_version, memory.total [MiB]
+NVIDIA GeForce RTX 3050, 581.57, 6144 MiB

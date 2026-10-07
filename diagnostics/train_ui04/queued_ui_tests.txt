@@ -1,0 +1,14 @@
+...............................................................F........ [ 64%]
+.......................................                                  [100%]
+================================== FAILURES ===================================
+____ test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled _____
+tests\tabs\test_training_research_ui.py:720: in test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled
+    assert axis.tickAnchor() == axis.tickInterval() == 1
+E   assert 1.0 == 2.0
+E    +  where 1.0 = <built-in method tickAnchor of QValueAxis object at 0x000002B19DFE9EF0>()
+E    +    where <built-in method tickAnchor of QValueAxis object at 0x000002B19DFE9EF0> = <PyQt6.QtCharts.QValueAxis object at 0x000002B19DFE9EF0>.tickAnchor
+E    +  and   2.0 = <built-in method tickInterval of QValueAxis object at 0x000002B19DFE9EF0>()
+E    +    where <built-in method tickInterval of QValueAxis object at 0x000002B19DFE9EF0> = <PyQt6.QtCharts.QValueAxis object at 0x000002B19DFE9EF0>.tickInterval
+=========================== short test summary info ===========================
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled
+1 failed, 110 passed in 13.36s

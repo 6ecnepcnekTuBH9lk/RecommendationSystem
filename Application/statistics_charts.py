@@ -20,6 +20,50 @@ PRODUCT_LABEL_PADDING = 16
 NEUTRAL = {False: '#8A8F98', True: '#9BA3AD'}
 
 
+def style_chart(chart, secondary=False, section_title=False):
+    """Shared Material palette for native statistics and live training charts."""
+    surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
+    background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
+    foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
+    accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
+    dark = surface.lightness() < 128
+    chart.setBackgroundBrush(background)
+    chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
+    chart.setPlotAreaBackgroundVisible(False)
+    chart.setTitleBrush(foreground)
+    font = QFont(QApplication.font())
+    font.setPointSizeF(10)
+    chart.legend().setFont(font)
+    title_font = QFont(font)
+    if section_title:
+        # Same typography as QLabel.statisticsSection in the shared QSS.
+        title_font.setPointSizeF(12)
+        title_font.setItalic(True)
+    chart.setTitleFont(title_font)
+    chart.legend().setLabelColor(foreground)
+    grid = QColor(foreground)
+    grid.setAlpha(40)
+    for axis in chart.axes():
+        axis.setLabelsBrush(foreground)
+        axis.setTitleBrush(foreground)
+        axis.setLinePen(QPen(Qt.PenStyle.NoPen))
+        axis.setGridLinePen(QPen(grid, 1))
+        axis.setMinorGridLineVisible(False)
+    for i, series in enumerate(chart.series()):
+        color = accent if i == 0 and not secondary else QColor(SECONDARY[dark])
+        if isinstance(series, QLineSeries):
+            series.setPen(QPen(color, 2))
+        elif isinstance(series, QPieSeries):
+            for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
+                piece.setBrush(fill)
+                piece.setPen(QPen(background, 1))
+        else:
+            for bars in series.barSets():
+                bars.setColor(color)
+                bars.setBorderColor(color)
+    return background, foreground, accent
+
+
 def exact_number(value):
     number = Decimal(str(value))
     text = format(number, 'f')
@@ -369,16 +413,8 @@ class StatisticsChart(QChartView):
                         area.top() + (index + .5) * height - bounds.height() / 2)
 
     def apply_theme(self):
-        surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
-        background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
-        foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
-        accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
-        dark = surface.lightness() < 128
         chart = self.chart()
-        chart.setBackgroundBrush(background)
-        chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
-        chart.setPlotAreaBackgroundVisible(False)
-        chart.setTitleBrush(foreground)
+        background, foreground, accent = style_chart(chart, self.data.secondary)
         if self.data.kind == 'horizontal':
             self._update_categories()
         for item in self._product_labels:
@@ -387,30 +423,6 @@ class StatisticsChart(QChartView):
             item.setBrush(foreground)
         for item in self._bar_labels:
             item.setDefaultTextColor(foreground)
-        font = QFont(QApplication.font())
-        font.setPointSizeF(10)
-        chart.setTitleFont(font)
-        chart.legend().setFont(font)
-        chart.legend().setLabelColor(foreground)
-        grid = QColor(foreground)
-        grid.setAlpha(40)
-        for axis in chart.axes():
-            axis.setLabelsBrush(foreground)
-            axis.setLinePen(QPen(Qt.PenStyle.NoPen))
-            axis.setGridLinePen(QPen(grid, 1))
-            axis.setMinorGridLineVisible(False)
-        for i, series in enumerate(chart.series()):
-            color = accent if i == 0 and not self.data.secondary else QColor(SECONDARY[dark])
-            if isinstance(series, QLineSeries):
-                series.setPen(QPen(color, 2))
-            elif isinstance(series, QPieSeries):
-                for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
-                    piece.setBrush(fill)
-                    piece.setPen(QPen(background, 1))
-            else:
-                for bars in series.barSets():
-                    bars.setColor(color)
-                    bars.setBorderColor(color)
         self.tooltip.setStyleSheet(f'QLabel {{background: {background.name()}; color: {foreground.name()}; '
                                   f'border: 1px solid {accent.name()}; border-radius: 5px; padding: 7px;}}')
 

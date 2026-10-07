@@ -1,0 +1,23 @@
+{
+  "provisional_candidate_epochs": 30,
+  "universal_optimum_established": false,
+  "plateau_confirmed_by_epoch_30": false,
+  "conv01b_to_40_50_recommended_for_review": true,
+  "production_or_research_defaults_changed": false,
+  "next_run_executed": false,
+  "summary_lines": [
+    "Среди восьми проверенных checkpoints epoch 30 имеет максимальный заранее выбранный primary NDCG@10: 0.009840156621554253. Provisional candidate — 30 epochs; разумный текущий исследовательский диапазон — 20–30. Никакие production/research defaults автоматически не изменены.",
+    "20 → 30: NDCG@10 0.009305710852445196 → 0.009840156621554253; абсолютная Δ +0.0005344457691090574, relative Δ +5.7432%. Recall@10 вырос с 83/4976 до 94/4976 (+11 попаданий). Дополнительные десять эпох стоили 891.9523 sec training (~14.866 min).",
+    "VIEW NDCG@10 вырос с 0.002329473275495246 до 0.003012075854587713 (~+29.30%); VIEW Recall@10 — с 15/3257 до 22/3257. PURCHASE NDCG@10 вырос с 0.022536741992712026 до 0.02279062182215471 (~+1.13%); PURCHASE Recall@10 — с 68/1718 до 72/1718.",
+    "Loss 20 → 30: 0.030255203787818274 → 0.022009617568988272. Кривая primary metric замедляется, но продолжает расти; plateau к epoch 30 не подтверждён. FAVORITE slice содержит один case и не используется для этих выводов.",
+    "Не все secondary metrics растут: NDCG@5 20 → 30 снизился 0.00764583132568965 → 0.007421049166765873; Recall@5 — с 57/4976 до 56/4976. Provisional выбор 30 соответствует заранее закреплённому NDCG@10, а не универсальному улучшению всех K.",
+    "Рекомендация для отдельного review — CONV-01B с ограниченным исследованием до 40/50 epochs, затем при необходимости подтверждение несколькими seeds. Это описательное наблюдение одного seed, без заявления статистической значимости или universal optimum. Evidence необходимости 200 epochs сейчас нет; достаточность 30 как финального budget также не доказана.",
+    "В этом run финальный model/optimizer checkpoint на диск не сохранялся: artifacts — траектория и aggregates. Продолжение с точным сохранением optimizer/RNG state не подготовлено; следующий continuous run до 40/50 потребует отдельного решения и исполнения, без скрытого автоматического resume.",
+    "Training-only 2715.7420008 sec = 45 min 15.742 sec; average 90.5247 sec/epoch. Это на 6.6548% дольше линейного ориентира GPU-COST-01 (2546.290743 sec для 30 эпох), без резкого изменения порядка стоимости. Scoring total 385.4054933 sec = 6 min 25.405 sec; worker wall 3118.8177392 sec = 51 min 58.818 sec.",
+    "На всех восьми checkpoints after-scoring allocated = 330845696 bytes, reserved = 432013312 bytes (412 MiB). Ни current allocated, ни reserved не растут; наблюдаемого удержания CUDA tensors между repeated validation calls нет. Run peak allocated = 413211136 bytes (394.068848 MiB); peak reserved = 412 MiB.",
+    "Training worker, parent и launcher завершены: processes_after.json содержит 0 tracked processes; дополнительная CIM-проверка experiment/spawn processes пуста. SHA-256 23 canonical/model/settings files полностью совпадает с исходным baseline. 104 prior Application/scripts source files сверены с GPU-COST-01 frozen provenance: единственный изменённый prior source — BPRMF.py; его before-CONV копия точно совпадает с reference hash.",
+    "CONV-01A scope: Application/model/BPRMF.py — optional epoch observer, default None, torch.no_grad и restoration of mode; scripts/run_bpr_convergence.py — guarded single continuous run и validation-only timing/trajectory; tests/evaluation/test_bpr_convergence.py — 18 synthetic observer/runner regression tests; diagnostics/bpr_conv01a/render_report.py — report/plots renderer в отдельном bundled runtime.",
+    "Artifacts сохранены в diagnostics/bpr_conv01a/: frozen_config.json, results.json, trajectory.json/csv, summary.md, analysis.json, environment.json, tests_before_run.json, targeted/evaluation_model/full_pytest logs, run.log, math_unchanged.json, code_before.py.txt, observer.diff.txt, protected_files_before/after.json, processes_after.json, task_changes.json, git_status.txt и loss/ndcg10/recall10/memory SVG/PNG. Все эти artifacts завершены; старые interrupted CPU pilot artifacts не изменены и не удалены.",
+    "Остановились после epoch 30. Test scoring, production publication, другой seed, weight/batch variants, Stage B, commit и push не выполнялись. Следующий experiment ожидает отдельного решения пользователя."
+  ]
+}

@@ -1,0 +1,6 @@
+Application/evaluation/experiments/gui_run.py: +2 -1
+Application/tabs/train_model_tab.py: +191 -94
+tests/evaluation/test_gui_run.py: +4 -1
+tests/tabs/test_training_research_ui.py: +201 -7
+README.md: +17 -4
+5 files, +415 -107

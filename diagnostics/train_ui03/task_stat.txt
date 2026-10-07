@@ -1,0 +1,8 @@
+Application/statistics_charts.py: +40 / -33
+Application/evaluation/experiments/gui_run.py: +45 / -8
+Application/tabs/train_model_tab.py: +108 / -62
+tests/evaluation/test_gui_run.py: +88 / -1
+tests/tabs/test_training_research_ui.py: +174 / -22
+README.md: +21 / -11
+Application/training_charts.py: +94 / -0
+7 files: +570 / -137

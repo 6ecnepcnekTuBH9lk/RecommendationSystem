@@ -218,7 +218,8 @@ def _report(result, config_summary):
 
 
 def train_and_publish_production_model(training_manifest, *, raw_root, catalog_path, cfg, device,
-                                        allow_warn=False, model_dir=None, progress=None):
+                                        allow_warn=False, model_dir=None, progress=None, expected_batch_id=None,
+                                        epoch_observer=None, check_cancel=None, before_publication=None):
     """Train/publish under an OS lock; failures return safe immutable state.
 
     model_dir is an API/test seam. The CLI always selects the fixed project model.
@@ -242,6 +243,8 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
                 result = replace(prepared_result, previous_generation=previous_generation)
                 if progress:
                     progress(result)
+                if expected_batch_id is not None and result.batch_id != expected_batch_id:
+                    raise _Failure("PREFLIGHT_CHANGED")
                 if not result.quality_report.training_allowed:
                     raise _Failure("QUALITY_BLOCK")
                 if result.quality_report.level.value == "WARN" and not allow_warn:
@@ -250,11 +253,18 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
                     raise _Failure("ARTIFACT_FAILED")
                 stage = "TRAINING_FAILED"
                 result = replace(result, training_started=True)
+                if check_cancel:
+                    check_cancel()
+                if progress and epoch_observer is not None:
+                    progress(result)
                 core._set_seed(cfg.seed)
-                model, _, metrics = core.train_prepared_data_with_metrics(cfg, data, device)
+                observer_args = {"epoch_observer": epoch_observer} if epoch_observer is not None else {}
+                model, _, metrics = core.train_prepared_data_with_metrics(cfg, data, device, **observer_args)
                 result = replace(result, training_completed=True, training_metrics=metrics)
 
                 def guard():
+                    if check_cancel:
+                        check_cancel()
                     try:
                         changed = _current(model_dir)[1] != previous
                     except Exception:
@@ -267,7 +277,13 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
                 seen = build_seen_items_index(data)
                 if seen is None or data.analytics is None:
                     raise _Failure("ARTIFACT_FAILED")
+                if before_publication:
+                    before_publication()
+                if check_cancel:
+                    check_cancel()
                 result = replace(result, publication_started=True)
+                if progress and before_publication is not None:
+                    progress(result)
                 generation = core._save_artifacts(cfg, data.mappings, model, seen_items=seen, analytics=data.analytics,
                                      model_dir=str(model_dir), _before_commit=guard, _publication_state=receipt)
                 result = replace(result, published=True, published_generation=generation,

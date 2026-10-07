@@ -1,0 +1,30 @@
+.............................................................FFF........ [ 69%]
+...............................                                          [100%]
+================================== FAILURES ===================================
+__ test_ui04_placeholders_follow_plot_area_including_legend_and_resize[1280] __
+tests\tabs\test_training_research_ui.py:687: in test_ui04_placeholders_follow_plot_area_including_legend_and_resize
+    assert chart.placeholder.geometry() == mapped
+E   assert PyQt6.QtCore.QRect(375, 273, 66, 18) == PyQt6.QtCore.QRect(305, 239, 66, 18)
+E    +  where PyQt6.QtCore.QRect(375, 273, 66, 18) = <built-in method geometry of QLabel object at 0x000001F0F765A170>()
+E    +    where <built-in method geometry of QLabel object at 0x000001F0F765A170> = <PyQt6.QtWidgets.QLabel object at 0x000001F0F765A170>.geometry
+E    +      where <PyQt6.QtWidgets.QLabel object at 0x000001F0F765A170> = <Application.training_charts.TrainingChart object at 0x000001F0F7659DB0>.placeholder
+__ test_ui04_placeholders_follow_plot_area_including_legend_and_resize[1520] __
+tests\tabs\test_training_research_ui.py:687: in test_ui04_placeholders_follow_plot_area_including_legend_and_resize
+    assert chart.placeholder.geometry() == mapped
+E   assert PyQt6.QtCore.QRect(375, 273, 66, 32) == PyQt6.QtCore.QRect(305, 227, 66, 32)
+E    +  where PyQt6.QtCore.QRect(375, 273, 66, 32) = <built-in method geometry of QLabel object at 0x000001F0F7755C70>()
+E    +    where <built-in method geometry of QLabel object at 0x000001F0F7755C70> = <PyQt6.QtWidgets.QLabel object at 0x000001F0F7755C70>.geometry
+E    +      where <PyQt6.QtWidgets.QLabel object at 0x000001F0F7755C70> = <Application.training_charts.TrainingChart object at 0x000001F0F77558B0>.placeholder
+____ test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled _____
+tests\tabs\test_training_research_ui.py:718: in test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled
+    assert axis.tickAnchor() == axis.tickInterval() == 1
+E   assert 1.0 == 25.0
+E    +  where 1.0 = <built-in method tickAnchor of QValueAxis object at 0x000001F0F76C0550>()
+E    +    where <built-in method tickAnchor of QValueAxis object at 0x000001F0F76C0550> = <PyQt6.QtCharts.QValueAxis object at 0x000001F0F76C0550>.tickAnchor
+E    +  and   25.0 = <built-in method tickInterval of QValueAxis object at 0x000001F0F76C0550>()
+E    +    where <built-in method tickInterval of QValueAxis object at 0x000001F0F76C0550> = <PyQt6.QtCharts.QValueAxis object at 0x000001F0F76C0550>.tickInterval
+=========================== short test summary info ===========================
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_placeholders_follow_plot_area_including_legend_and_resize[1280]
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_placeholders_follow_plot_area_including_legend_and_resize[1520]
+FAILED tests/tabs/test_training_research_ui.py::test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled
+3 failed, 100 passed in 13.76s

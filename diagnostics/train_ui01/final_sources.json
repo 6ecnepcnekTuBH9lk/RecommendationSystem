@@ -1,0 +1,17 @@
+{
+  "Application/model/mindbox_production_training.py": "3d9c987685e738c1c54847f27ae1b9e47125e229e427306aaa5b41c6744e6d8f",
+  "Application/tabs/train_model_tab.py": "4dcfd64770e52a3dc0913c67f2b04f4f4e405262543d637f46744bb8e3ba5418",
+  "scripts/mindbox_production_train.py": "67c89547c9c947cb17618e963636abb08930cca60e77ac4c3bd2de2ed2d02460",
+  "tests/model/test_mindbox_production_training.py": "d2dc726824bb2f7aeb1dd0fee37daaddf752f993290c6796796d8533d85a3821",
+  "tests/tabs/test_train_model_completion.py": "59d8806af549c1ed7b89aea44fbe057aac30f47c63d3627a717b5caa69dbdf4d",
+  "tests/tabs/test_train_model_start.py": "d5622b03581f72635fc3b1fe4ca43e637b7c8a4b90d46077440d8148fb172dde",
+  "README.md": "99a956dee17fa3d5c8ace3b644cc412b27796fa7370c3b13d7f10eba1e47a431",
+  "main.py": "b09e42951295dc0bdc4c99a55e9c808a7e29efed9b0a8a15ce8fd9c88fc4f7f9",
+  "Application/tabs/training_workflow.py": "5a0bc1de5d743e9ad0acb3357fcf3a11b2954ba659228838d156ea87b0970187",
+  "Application/evaluation/experiments/gui_history.py": "9d67d71b9e19e253f59c0c57e00fbb6e02965cdd6e8d5121558e3160d92ade9e",
+  "Application/evaluation/experiments/gui_run.py": "3a02c23975c3c640835554603ba5c06f7dcd60e8720c8a1d91e478fdf3c1b3fe",
+  "scripts/run_gui_research.py": "00235f6df8b2340ca1882fad90a9a94fbc1eaaa8842971395a3b8285144383eb",
+  "tests/tabs/test_training_research_ui.py": "402bfbe206eb6faab72b63d3a0ea49f5a00dc4d71e7138a15ef99395cc1cb60d",
+  "tests/evaluation/test_gui_history.py": "53ee8630aabcd51f655955321efe10ab108423543f5c4b3b6782b9ab3aa59d5f",
+  "tests/evaluation/test_gui_run.py": "4cde465ca955cc355bd6faee9e66f2a499a65805c3e7a8580263d35e5385a21a"
+}

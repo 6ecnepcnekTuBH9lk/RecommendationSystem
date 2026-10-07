@@ -1,5 +1,6 @@
 import copy
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 import socket
 
@@ -10,6 +11,7 @@ import torch
 
 from Application.model import BPRMF as legacy
 from Application.model import mindbox_training_preparation as pipeline
+from Application.model.bpr_preparation import DateMode
 from Application.model.training_data import PreparedDataError
 from Application.mindbox.raw_reader import EXPORT_ROOTS, RawExportError
 from Application.mindbox.identity import CustomerIdentityError
@@ -146,8 +148,10 @@ def test_end_to_end_raw_vs_legacy_equal_date_order_and_custom_weights(data, tmp_
     for field in ("train_pairs", "train_weights", "eval_users", "eval_items"):
         np.testing.assert_array_equal(getattr(new.splits, field), getattr(old.splits, field))
     assert new.splits.user_pos_train == old.splits.user_pos_train
-    assert new.mappings.idx2item[new.splits.eval_items[0]] == "001234"
-    assert result.diagnostics.bpr.total_train_weight == pytest.approx(8 * cfg.w_view_item + cfg.w_favorite + 5 * cfg.w_purchase)
+    assert new.splits.eval_users.size == new.splits.eval_items.size == 0
+    assert result.diagnostics.bpr.excluded_seen_eval_users == 1
+    assert result.diagnostics.bpr.train_events_before_aggregation == 12
+    assert result.diagnostics.bpr.total_train_weight == pytest.approx(9 * cfg.w_view_item + cfg.w_favorite + 5 * cfg.w_purchase)
 
 
 def merge(source, target, index=1):
@@ -206,6 +210,8 @@ def test_missing_product_names_do_not_change_preparation(data):
 
 def test_custom_eval_threshold_is_used(data):
     data[0]["actions"] = data[0]["actions"][:3]
+    # Novel final item isolates the event-count threshold from the repeat exclusion rule.
+    data[0]["actions"][-1]["products"][0]["ids"] = {"offline1C": "001235_FULL"}
     result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=4))
     assert result.diagnostics.bpr.eval_events == 1
     assert run(data).diagnostics.bpr.eval_events == 0
@@ -286,7 +292,16 @@ def test_explicit_none_never_selects_latest(data):
 
 
 def test_training_core_integration(data, tmp_path, monkeypatch):
+    # A training user must have an unseen item in the mapped interaction universe.
+    extra = copy.deepcopy(data[0]["actions"][0])
+    extra["ids"]["mindboxId"] = "SECRET_EXTRA_ACTION"
+    extra["customer"]["ids"]["mindboxId"] = "SECRET_C"
+    extra["products"][0]["ids"] = {"offline1C": "001237_FULL"}
+    data[0]["actions"].append(extra)
+    data[2].write_text(data[2].read_text(encoding="utf-8-sig") + "001237\n", encoding="utf-8-sig")
     result = run(data)
+    assert all(len(items) < len(result.prepared_data.mappings.idx2item)
+               for items in result.prepared_data.splits.user_pos_train)
     cfg = legacy.TrainConfig(data_dir=str(tmp_path / "no_csv"), use_item_features=False,
                              epochs=1, embedding_dim=4, n_neg=1, batch_size=4, topk=2)
     monkeypatch.setattr(torch, "set_num_interop_threads", lambda value: None)
@@ -294,6 +309,19 @@ def test_training_core_integration(data, tmp_path, monkeypatch):
     model, splits = legacy.train_prepared_data(cfg, result.prepared_data, torch.device("cpu"))
     assert splits is result.prepared_data.splits
     assert model is not None
+    assert not (tmp_path / "model").exists()
+
+
+def test_training_core_rejects_user_without_negative_candidates(data, tmp_path, monkeypatch):
+    result = run(data)
+    assert any(len(items) == len(result.prepared_data.mappings.idx2item)
+               for items in result.prepared_data.splits.user_pos_train)
+    cfg = legacy.TrainConfig(data_dir=str(tmp_path / "no_csv"), use_item_features=False,
+                             epochs=1, embedding_dim=4, n_neg=1, batch_size=4, topk=2)
+    monkeypatch.setattr(torch, "set_num_interop_threads", lambda value: None)
+    monkeypatch.setattr(legacy.BPRMF, "score", lambda *args: pytest.fail("Invalid BPR comparison must never reach scoring"))
+    with pytest.raises(ValueError, match="No candidate negative items"):
+        legacy.train_prepared_data(cfg, result.prepared_data, torch.device("cpu"))
     assert not (tmp_path / "model").exists()
 
 
@@ -500,3 +528,91 @@ def test_order_fingerprint_key_order_and_decimal_stability():
     assert semantic_fingerprint(left) == semantic_fingerprint(right)
     assert semantic_fingerprint({"x": "1"}) != semantic_fingerprint({"x": 1})
     assert semantic_fingerprint({"x": True}) != semantic_fingerprint({"x": 1})
+
+
+def _set_temporal_events(data, purchase, favorite, view):
+    raw = data[0]
+    raw["actions"] = [raw["actions"][0], raw["actions"][-1]]
+    for action, stamp in zip(raw["actions"], (view, favorite)):
+        action["dateTimeUtc"] = stamp
+        action["creationDateTimeUtc"] = "2026-01-01T23:59:00Z"  # Event time, not ingestion time, controls the split.
+    raw["orders"] = raw["orders"][:1]
+    raw["orders"][0]["firstAction"]["dateTimeUtc"] = purchase
+
+
+@pytest.mark.parametrize("latest,target", [("purchase", "001236"), ("favorite", "001235"), ("view", "001234")])
+def test_canonical_same_day_uses_full_timestamp_and_preserves_mappings_weights(data, monkeypatch, latest, target):
+    hours = {"purchase": 8, "favorite": 12, "view": 12 if latest == "favorite" else 8}
+    hours[latest] = 20
+    stamps = {kind: f"2026-01-01T{hour:02d}:00:00Z" for kind, hour in hours.items()}
+    _set_temporal_events(data, **stamps)
+    before = copy.deepcopy(data[0])
+    original, captured = pipeline.prepare_bpr, []
+    def checked(events, config):
+        events = list(events)
+        assert config.date_mode is DateMode.FULL_TIMESTAMP
+        captured.extend(events)
+        return original(events, config)
+    monkeypatch.setattr(pipeline, "prepare_bpr", checked)
+    result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=3))
+    prepared = result.prepared_data
+    assert prepared.mappings.idx2user == ["SECRET_A"]
+    assert prepared.mappings.idx2item == ["001236", "001235", "001234"]
+    assert prepared.mappings.idx2item[prepared.splits.eval_items[0]] == target
+    weights = {prepared.mappings.idx2item[item]: weight for (_, item), weight
+               in zip(prepared.splits.train_pairs, prepared.splits.train_weights)}
+    assert weights == {item: weight for item, weight in {"001236": 25., "001235": 2., "001234": 0.1}.items()
+                       if item != target}
+    assert prepared.splits.user_pos_train[0] == {prepared.mappings.item2idx[item] for item in weights}
+    assert {event.timestamp for event in captured} == {
+        datetime.fromisoformat(stamp.replace("Z", "+00:00")) for stamp in stamps.values()}
+    assert all(event.timestamp.tzinfo is timezone.utc for event in captured)
+    assert data[0] == before
+
+
+def test_canonical_full_timestamp_keeps_microseconds(data):
+    _set_temporal_events(data, purchase="2026-01-01T10:00:00.123456Z",
+                         favorite="2026-01-01T08:00:00Z", view="2026-01-01T10:00:00.123455Z")
+    prepared = run(data, legacy.TrainConfig(min_user_interactions_for_eval=3)).prepared_data
+    assert prepared.mappings.idx2item[prepared.splits.eval_items[0]] == "001236"
+
+
+def test_canonical_full_timestamp_normalizes_offsets_and_suffixless_utc(data):
+    _set_temporal_events(data, purchase="2026-01-01T21:00:00Z",
+                         favorite="2026-01-01T19:00:00", view="2026-01-01T23:00:00+03:00")
+    prepared = run(data, legacy.TrainConfig(min_user_interactions_for_eval=3)).prepared_data
+    assert prepared.mappings.idx2item[prepared.splits.eval_items[0]] == "001236"
+
+
+def test_canonical_full_timestamp_retains_all_events_when_final_item_repeats(data):
+    _set_temporal_events(data, purchase="2026-01-01T20:00:00Z",
+                         favorite="2026-01-01T12:00:00Z", view="2026-01-01T08:00:00Z")
+    raw = data[0]
+    raw["actions"].append(copy.deepcopy(raw["actions"][0]))
+    raw["actions"][-1]["ids"]["mindboxId"] = "SECRET_REPEAT"
+    raw["actions"][-1]["dateTimeUtc"] = "2026-01-01T09:00:00Z"
+    # The repeated final purchase makes the whole user history training data.
+    raw["orders"].append(copy.deepcopy(raw["orders"][0]))
+    raw["orders"][-1]["ids"]["mindboxId"] = "SECRET_EARLIER_ORDER"
+    raw["orders"][-1]["firstAction"]["dateTimeUtc"] = "2026-01-01T10:00:00Z"
+    result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=5))
+    prepared = result.prepared_data
+    weights = {prepared.mappings.idx2item[item]: weight for (_, item), weight
+               in zip(prepared.splits.train_pairs, prepared.splits.train_weights)}
+    assert weights == {"001236": 50., "001235": 2., "001234": 0.2}
+    assert prepared.splits.eval_users.size == prepared.splits.eval_items.size == 0
+    assert result.diagnostics.bpr.excluded_seen_eval_users == 1
+    assert result.diagnostics.bpr.train_events_before_aggregation == 5
+    assert result.diagnostics.bpr.train_pairs_after_aggregation == 3
+
+
+@pytest.mark.parametrize("source", ["action", "order"])
+@pytest.mark.parametrize("stamp", [None, "invalid-timestamp"])
+@pytest.mark.parametrize("diagnose", [False, True])
+def test_canonical_required_timestamp_errors_remain_fatal(data, source, stamp, diagnose):
+    if source == "action":
+        data[0]["actions"][0]["dateTimeUtc"] = stamp
+    else:
+        data[0]["orders"][0]["firstAction"]["dateTimeUtc"] = stamp
+    with pytest.raises(AdapterError):
+        run(data, diagnose=diagnose)

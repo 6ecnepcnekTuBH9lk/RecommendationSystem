@@ -27,12 +27,12 @@ from difflib import SequenceMatcher
 if __package__:
     from .interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
     from .seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
-    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics
+    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics, single_target_metrics
     from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
     from interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
     from seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
-    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics
+    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics, single_target_metrics
     from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 
 # --- make CPU BLAS usage predictable (often important for UI apps on Windows) ---
@@ -302,6 +302,9 @@ def _train_test_split_last_per_user(events: pd.DataFrame, cfg: TrainConfig, num_
     dated_events = events_sorted[events_sorted["ts"].notna()]
     last = dated_events.groupby("u_idx").tail(1)
     last = last[last["u_idx"].isin(eligible_users)]
+    # Retain all events for users whose final candidate item has appeared before.
+    item_counts = events_sorted.groupby(["u_idx", "i_idx"])["i_idx"].transform("size")
+    last = last[item_counts.loc[last.index].eq(1)]
 
     eval_users = last["u_idx"].astype(int).to_numpy()
     eval_items = last["i_idx"].astype(int).to_numpy()
@@ -332,13 +335,12 @@ def _sample_batch(
         batch_size: int,
         rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select positive pairs uniformly; return their confidence weights for loss."""
 
     if len(train_pairs) <= batch_size:
         return train_pairs[:, 0], train_pairs[:, 1], train_weights.astype(np.float64)
 
-    w = train_weights.astype(np.float64)
-    w = w / (w.sum() + 1e-12)
-    idx = rng.choice(len(train_pairs), size=batch_size, replace=False, p=w)
+    idx = rng.choice(len(train_pairs), size=batch_size, replace=False)
     return train_pairs[idx, 0], train_pairs[idx, 1], train_weights[idx].astype(np.float64)
 
 
@@ -350,25 +352,40 @@ def _sample_negatives(
         n_neg: int = 10,
         max_tries: int = 25,
 ) -> np.ndarray:
+    """Uniform unseen negatives with replacement; fail if a user has no candidates."""
 
     n_neg = max(1, int(n_neg))
     if len(users) == 0:
         return np.zeros((0, n_neg), dtype=np.int64)
 
+    positives = {int(u): list(user_pos_train[int(u)]) for u in users}
+    if any(len(pos) >= num_items for pos in positives.values()):
+        raise ValueError("No candidate negative items for a training user")
     neg = rng.integers(0, num_items, size=(len(users), n_neg), dtype=np.int64)
 
-    # rejection sampling (keep it deterministic given rng)
-    for _ in range(max_tries):
+    # Check the initial draw and every redraw, including the last retry.
+    max_tries = max(0, max_tries)
+    for attempt in range(max_tries + 1):
         bad = np.zeros_like(neg, dtype=bool)
         for bi, u in enumerate(users):
-            pos = user_pos_train[int(u)]
+            pos = positives[int(u)]
             if pos:
-                # np.isin is fast for small n_neg; convert set -> list once per user
-                bad[bi] = np.isin(neg[bi], list(pos))
+                bad[bi] = np.isin(neg[bi], pos)
         if not bad.any():
+            return neg
+        if attempt == max_tries:
             break
         neg[bad] = rng.integers(0, num_items, size=int(bad.sum()), dtype=np.int64)
 
+    # Only unresolved rows need a complement; reuse it for repeated users in this call.
+    candidates = {}
+    for bi, u in enumerate(users):
+        if not bad[bi].any():
+            continue
+        user = int(u)
+        if user not in candidates:
+            candidates[user] = np.setdiff1d(np.arange(num_items, dtype=np.int64), positives[user], assume_unique=True)
+        neg[bi, bad[bi]] = rng.choice(candidates[user], size=int(bad[bi].sum()), replace=True)
     return neg
 
 
@@ -552,6 +569,9 @@ def _eval_bprmf_recall_ndcg(
         k: int,
         device: torch.device,
 ) -> Tuple[float, float]:
+    for user, item in zip(splits.eval_users, splits.eval_items):
+        if int(item) in splits.user_pos_train[int(user)]:
+            raise PreparedDataError("Evaluation targets must be unseen in training")
     if len(splits.eval_users) == 0:
         return 0.0, 0.0
 
@@ -571,34 +591,24 @@ def _eval_bprmf_recall_ndcg(
         u_emb = model.user_emb(u_t)  # [B, d]
         scores = u_emb @ item_emb.t()  # [B, I]
 
-        # filter train positives (so we don't recommend already seen items)
-        # IMPORTANT: if the evaluation target was also seen in train (repeat interaction),
-        # we do NOT mask the target item so it remains rankable.
+        # Every train positive is excluded; valid targets are naturally unseen.
         for bi, uu in enumerate(u):
-            target = int(g[bi])
             pos = splits.user_pos_train[int(uu)]
             if pos:
-                if target in pos:
-                    idx_list = [x for x in pos if x != target]
-                else:
-                    idx_list = list(pos)
-
-                if idx_list:
-                    idx = torch.tensor(idx_list, dtype=torch.long, device=device)
-                    scores[bi, idx] = -1e9
+                idx = torch.tensor(list(pos), dtype=torch.long, device=device)
+                scores[bi, idx] = -torch.inf
 
         topk_idx = torch.topk(scores, k=min(k, num_items), dim=1).indices.cpu().numpy()
 
         for bi in range(len(u)):
             target = int(g[bi])
             row = topk_idx[bi]
-            if target in row:
-                rank = int(np.where(row == target)[0][0]) + 1
-                recalls.append(1.0)
-                ndcgs.append(1.0 / np.log2(rank + 1))
-            else:
-                recalls.append(0.0)
-                ndcgs.append(0.0)
+            # topk can include masked tails when K exceeds the unseen candidate count.
+            row = row[~np.isin(row, list(splits.user_pos_train[int(u[bi])]))]
+            rank = int(np.where(row == target)[0][0]) + 1 if target in row else None
+            recall, ndcg = single_target_metrics(rank)
+            recalls.append(recall)
+            ndcgs.append(ndcg)
 
     return float(np.mean(recalls)), float(np.mean(ndcgs))
 
@@ -617,11 +627,18 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
 
 def train_prepared_data_with_metrics(
     cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
+    *, epoch_observer=None,
 ) -> Tuple[BPRMF, Splits, TrainingRunMetrics]:
-    return _train_prepared_data_impl(cfg, prepared_data, device)
+    """Optional research observer receives (model, immutable epoch metrics).
+
+    The observer must only read model state. It runs without gradients after a
+    completed epoch; it cannot select a checkpoint or control early stopping.
+    """
+    return _train_prepared_data_impl(cfg, prepared_data, device, epoch_observer=epoch_observer)
 
 
-def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device):
+def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
+                              *, epoch_observer=None):
     """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
     validate_prepared_data(prepared_data)
     maps, splits = prepared_data.mappings, prepared_data.splits
@@ -718,7 +735,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     if metric_name not in ("ndcg", "recall"):
         metric_name = "ndcg"
 
-    use_early_stop = bool(getattr(cfg, "early_stop", True))
+    has_internal_eval = len(splits.eval_users) > 0
+    use_early_stop = bool(getattr(cfg, "early_stop", True)) and has_internal_eval
     patience = max(1, int(getattr(cfg, "early_stop_patience", 2)))
     min_delta = float(getattr(cfg, "early_stop_min_delta", 1e-4))
     min_epochs = max(1, int(getattr(cfg, "early_stop_min_epochs", 1)))
@@ -727,6 +745,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     bad_epochs = 0
     history = []
     early_stopped = False
+    if not has_internal_eval:
+        print(f"[{_now()}] Внутренняя оценка отсутствует: ранняя остановка отключена, возвращается последняя эпоха.")
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -767,10 +787,25 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
         recall, ndcg = _eval_bprmf_recall_ndcg(model, splits, num_items, cfg.topk, device)
         history.append(TrainingEpochMetrics(epoch, total_loss / steps, float(recall), float(ndcg)))
 
+        evaluation_label = (f"RECALL@{cfg.topk}={recall:.4f}  NDCG@{cfg.topk}={ndcg:.4f}"
+                            if has_internal_eval else "внутренняя оценка отсутствует")
         print(
             f"[{_now()}] Итерация {epoch} из {cfg.epochs}: "
-            f"loss={total_loss / steps:.4f}  RECALL@{cfg.topk}={recall:.4f}  NDCG@{cfg.topk}={ndcg:.4f}"
+            f"loss={total_loss / steps:.4f}  {evaluation_label}"
         )
+
+        if epoch_observer is not None:
+            was_training = model.training
+            try:
+                with torch.no_grad():
+                    epoch_observer(model, history[-1])
+            finally:
+                model.train(was_training)
+
+        # Empty-evaluation zero placeholders in history are not monitored metrics.
+        # Preserve the existing -1 best-observation sentinel and the full budget.
+        if not has_internal_eval:
+            continue
 
         cur_metric = ndcg if metric_name == "ndcg" else recall
         improved = cur_metric > best["metric"] + min_delta
@@ -778,7 +813,9 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
         if improved:
             best["metric"] = float(cur_metric)
             best["RECALL"], best["NDCG"], best["epoch"] = float(recall), float(ndcg), epoch
-            best["state"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            if use_early_stop:
+                # CPU .cpu() can alias model storage; best checkpoints must not.
+                best["state"] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             bad_epochs = 0
         else:
             if use_early_stop and epoch >= min_epochs:
@@ -791,13 +828,14 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
                     )
                     break
 
-    if best["state"] is not None:
+    if use_early_stop and best["state"] is not None:
         model.load_state_dict(best["state"])
 
-    print(
-        f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
-        f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
-    )
+    if has_internal_eval:
+        print(
+            f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
+            f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
+        )
     metrics = TrainingRunMetrics(len(history), best["epoch"], best["RECALL"], best["NDCG"],
                                  metric_name, early_stopped, tuple(history))
     return model, splits, metrics

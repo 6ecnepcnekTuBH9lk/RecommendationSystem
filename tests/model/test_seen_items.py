@@ -14,7 +14,7 @@ from Application.model.seen_items import SeenItemsIndex, SeenItemsError, build_s
 
 @pytest.fixture
 def events():
-    # u1: eval-only c; u2: held-out a repeats a train positive; u3 ineligible.
+    # u1: novel eval-only c; u2: repeated final a keeps all events in train; u3 below threshold.
     rows = [("u1", "a", "VIEW"), ("u1", "a", "VIEW"), ("u1", "a", "FAVORITE"),
             ("u1", "a", "PURCHASE"), ("u1", "c", "VIEW"),
             ("u2", "a", "VIEW"), ("u2", "b", "VIEW"), ("u2", "a", "PURCHASE"),
@@ -39,6 +39,7 @@ def test_all_pre_holdout_pairs_and_immutable_deterministic_layout(events, prepar
     np.testing.assert_array_equal(index.indices, [0, 1, 0, 2, 2])
     assert maps.item2idx["c"] not in prepared.splits.user_pos_train[maps.user2idx["u1"]]
     assert maps.item2idx["a"] in prepared.splits.user_pos_train[maps.user2idx["u2"]]
+    assert prepared.splits.eval_users.tolist() == [maps.user2idx["u1"]]
     assert "u1" not in repr(index)
     with pytest.raises(FrozenInstanceError):
         index.num_users = 0

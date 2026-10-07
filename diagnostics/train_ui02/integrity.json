@@ -1,0 +1,41 @@
+{
+  "changed_for_train_ui02": [
+    "Application/evaluation/experiments/gui_run.py",
+    "Application/tabs/train_model_tab.py",
+    "tests/evaluation/test_gui_run.py",
+    "tests/tabs/test_training_research_ui.py",
+    "README.md"
+  ],
+  "protected_count": 23,
+  "protected_unchanged": true,
+  "checks": {
+    "input_data\\city_coordinates.csv": true,
+    "input_data\\nomenclature.csv": true,
+    "input_data\\site_categories.csv": true,
+    "input_data\\MindboxRaw\\canonical\\.writer.lock": true,
+    "input_data\\MindboxRaw\\canonical\\catalog.json": true,
+    "input_data\\MindboxRaw\\canonical\\customers.sqlite": true,
+    "input_data\\MindboxRaw\\canonical\\identity.json": true,
+    "input_data\\MindboxRaw\\canonical\\store_catalog.json": true,
+    "input_data\\MindboxRaw\\canonical\\training.json": true,
+    "input_data\\MindboxRaw\\canonical\\jobs\\9d6b8b0901b14d50b82191a90d73c93e\\state.json": true,
+    "input_data\\MindboxRaw\\canonical\\jobs\\f6a5d8f4aa8e4cb19c5d7db96c991c8d\\state.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\1fcfecf011c340f0a1c3323cdf7c96fc\\actions\\actions_part_001.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\1fcfecf011c340f0a1c3323cdf7c96fc\\actions\\actions_part_002.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\1fcfecf011c340f0a1c3323cdf7c96fc\\actions\\actions_part_003.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\1fcfecf011c340f0a1c3323cdf7c96fc\\actions\\actions_part_004.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\1fcfecf011c340f0a1c3323cdf7c96fc\\orders\\orders_part_001.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\51b8bc6b58f94b62bb817fb14445caa7\\customer_merges\\customer_merges_part_001.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\655436e9e39c444291abc33d36e67343\\actions\\actions_part_001.json": true,
+    "input_data\\MindboxRaw\\canonical\\objects\\aed99398d10a4edba6f3d71d7627794a\\orders\\orders_part_001.json": true,
+    "user_settings\\analysis_filter.json": true,
+    "user_settings\\dataset_statistics.json": true,
+    "user_settings\\store_city_mapping.json": true,
+    "user_settings\\train_config.json": true
+  },
+  "bpr_math_unchanged": true,
+  "history_schema_unchanged": true,
+  "legacy_helpers_unchanged": true,
+  "icon_unchanged": true,
+  "production_current_exists": false
+}

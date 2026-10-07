@@ -1,0 +1,2 @@
+pip 26.2.1 from C:\Users\Ermolenko.i\PycharmProjects\РекомендательнаяСистема\.venv312\Lib\site-packages\pip (python 3.12)
+

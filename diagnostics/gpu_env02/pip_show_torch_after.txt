@@ -1,0 +1,10 @@
+Name: torch
+Version: 2.5.1+cu124
+Summary: Tensors and Dynamic neural networks in Python with strong GPU acceleration
+Home-page: https://pytorch.org/
+Author: PyTorch Team
+Author-email: packages@pytorch.org
+License: BSD-3-Clause
+Location: C:\Users\Ermolenko.i\PycharmProjects\РекомендательнаяСистема\.venv312\Lib\site-packages
+Requires: filelock, fsspec, jinja2, networkx, setuptools, sympy, typing-extensions
+Required-by: 

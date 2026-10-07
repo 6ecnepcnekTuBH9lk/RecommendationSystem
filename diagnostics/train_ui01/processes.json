@@ -1,0 +1,12 @@
+{
+  "project_training_processes": 0,
+  "project_workers": [],
+  "unrelated_generic_workers": [
+    {
+      "ProcessId": 5692,
+      "ParentProcessId": 22856,
+      "Kind": "uvicorn worker; unrelated to project training"
+    }
+  ],
+  "existing_processes_not_terminated": true
+}

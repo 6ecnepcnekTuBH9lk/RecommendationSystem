@@ -98,7 +98,8 @@ def _prepare_training_data_from_mindbox_sources(
         weights=BprWeightConfig(view_weight=train_config.w_view_item, favorite_weight=train_config.w_favorite,
                                 purchase_weight=train_config.w_purchase),
         min_user_interactions_for_eval=train_config.min_user_interactions_for_eval,
-        date_mode=DateMode.LEGACY_DATE,
+        # Canonical records retain exact UTC event times; legacy CSV keeps its own date mode.
+        date_mode=DateMode.FULL_TIMESTAMP,
     )
     products = ProductResolver(load_catalog(Path(catalog_path)))
     merge_count = 0
