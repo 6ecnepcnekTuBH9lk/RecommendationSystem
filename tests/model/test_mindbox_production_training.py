@@ -154,6 +154,35 @@ def test_preflight_readonly(tmp_path, monkeypatch, problem):
     assert not production.REPORT_ROOT.exists()
 
 
+@pytest.mark.parametrize('unknown,invalid,unsupported,attempts,level', [
+    (20, 0, 0, 1206884, 'WARN'), (1, 0, 0, 10, 'BLOCK'),
+    (0, 1, 0, 1206884, 'BLOCK'), (0, 0, 1, 1206884, 'BLOCK'),
+])
+def test_preflight_resolution_policy_and_warn_ack_before_any_trainer(tmp_path, monkeypatch, unknown, invalid, unsupported, attempts, level):
+    from dataclasses import replace
+    args = source(tmp_path)
+    batch = daily.load_chunked_training_batch(args['training_manifest'], raw_root=args['raw_root'], require_complete=True)
+    prepared = daily.prepare_training_data_from_chunked_batch(batch, raw_root=args['raw_root'],
+        catalog_path=args['catalog_path'], train_config=args['cfg'], diagnose=True)
+    d = prepared.diagnostics
+    counts = replace(d.resolution.total, interactions_total=attempts, resolved=attempts-unknown-invalid-unsupported,
+                     unresolved=unknown+invalid+unsupported, unknown_candidate=unknown,
+                     invalid_id=invalid, unsupported_namespace=unsupported)
+    prepared = replace(prepared, diagnostics=replace(d, resolution=replace(d.resolution, total=counts)))
+    monkeypatch.setattr(production, 'prepare_training_data_from_chunked_batch', lambda *a, **k: prepared)
+    monkeypatch.setattr(core, 'train_prepared_data_with_metrics', forbidden)
+    monkeypatch.setattr(core, '_save_artifacts', forbidden)
+    result = production.preflight_production_training(**args)
+    assert result.quality_report.level.value == level
+    assert result.error_code == (None if level == 'WARN' else 'QUALITY_BLOCK')
+    assert not result.training_started and not result.publication_started
+    if level == 'WARN':
+        refused = production.train_and_publish_production_model(**args, allow_warn=False)
+        assert refused.error_code == 'WARN_NOT_ACKNOWLEDGED'
+        assert not refused.training_started and not refused.publication_started
+    assert not (production.MODEL_ROOT / 'current.json').exists()
+
+
 @pytest.mark.parametrize("problem,allow_warn", [("pass", False), ("warn", True)])
 @pytest.mark.parametrize("existing", [False, True])
 def test_real_train_publish_reload_and_safe_result(tmp_path, problem, allow_warn, existing, capsys):

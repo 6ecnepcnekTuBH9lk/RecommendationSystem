@@ -68,7 +68,10 @@ def shadow_train_daily_manifest(manifest, *, raw_root, catalog_path, cfg, device
         unresolved_products=d.resolution.total.unresolved, unsupported_products=d.resolution.total.unsupported_namespace,
         bpr_events=d.bpr.events_total, unmapped_actions=d.unmapped_actions,
         malformed_action_system_names=d.malformed_action_system_names,
-        orders_duplicate_conflicting=d.orders_duplicate_conflicting)
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting,
+        product_resolution_attempts=d.resolution.total.interactions_total,
+        unknown_candidate_products=d.resolution.total.unknown_candidate,
+        invalid_product_ids=d.resolution.total.invalid_id)
     result = run_shadow_training(cfg, prepared.prepared_data, diagnostics, device,
                                  complete=prepared.complete, on_quality=on_quality)
     quality = result.quality_report

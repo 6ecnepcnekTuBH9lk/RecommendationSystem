@@ -540,7 +540,9 @@ resolver. Обычный repr каталога, resolution и resolved interacti
 Diagnostics — immutable snapshot на обработанные вызовы resolve_interaction:
 total и разрезы by_type (VIEW/FAVORITE/PURCHASE), by_namespace
 (offline1C/kanzlerKz/безопасная группа unsupported). Каждый содержит
-interactions_total, resolved, unresolved, unsupported_namespace, resolution_rate_percent.
+interactions_total, resolved, unresolved, unsupported_namespace, unknown_candidate,
+invalid_id, resolution_rate_percent. Два status counters добавлены без изменения
+aggregate unresolved и алгоритма resolution.
 Unsupported входит в unresolved: total = resolved + unresolved. При нуле событий
 rate = 0%. Неизвестные имена namespaces не выводятся.
 
@@ -1002,11 +1004,25 @@ prepared input равны None (не выдаются за валидные из
 и не превращаются в WARN: gate вызывается только после возврата preparation result.
 
 PASS — policy не нашла issues; WARN — валидные данные с recoverable потерями, training
-allowed; BLOCK — training запрещён. Unresolved products >0 и unsupported products >0
-дают отдельные BLOCK issues, даже если diagnostic preparation исключила их и вернула
-валидный набор. Unsupported также входит в unresolved по resolver contract, поэтому
-оба issue могут описывать частично одни и те же события; их counts не суммируются.
+allowed; BLOCK — training запрещён. TRAIN-QUALITY-01 разделяет catalog misses
+UNKNOWN_CANDIDATE и identity failures. Для catalog-only misses default WARN budget:
+count <= 100 И rate <= 0.0001 (0.01%); обе границы включены. Превышение любой —
+BLOCK/UNRESOLVED_PRODUCT. Denominator — ProductResolutionDiagnostics.total.interactions_total,
+то есть resolved + unresolved product-bearing attempts, без productless Actions.
+TrainingQualityConfig содержит typed unknown_candidate_max_rate/max_count.
+INVALID_ID, unsupported namespace, conflicting order snapshots и invalid prepared
+data остаются BLOCK. Legacy unresolved counters без status/denominator details
+также BLOCK. Generic unresolved остаётся backward-compatible aggregate; counts
+issues не суммируются. ProductResolver prefix-6/namespace/short-ID contract не менялся.
 Unmapped actions — только informational metric, не issue.
+
+Production WARN по-прежнему требует explicit acknowledgement (`allow_warn` /
+GUI Yes), BLOCK не запускает trainer. Detailed product-only local audit:
+`python scripts/diagnose_unresolved_products.py --output diagnostics/train_quality01/unresolved_products.json`.
+Команда выполняет только preparation/preflight, не training/API/publication.
+Расширенный SKU list хранится исключительно в явно выбранном local artifact;
+GUI/production reports содержат только counts/rates. INVALID/arbitrary/contact-shaped
+identifiers в local audit redacted; customer/profile/raw payload fields не копируются.
 
 Default mapped_action_malformed_warn_rate=0.0: любое malformed mapped action даёт
 WARN/MAPPED_ACTION_WITHOUT_PRODUCT; BLOCK percentage не существует. Настраиваемый

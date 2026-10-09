@@ -315,14 +315,15 @@ def test_preflight_pass_block_diagnostics_without_dialog(monkeypatch, level):
     window = _window_with_training_values()
     errors = _patch_training_ui(monkeypatch)
     dialog = Mock(side_effect=AssertionError("Only WARN asks for confirmation"))
-    monkeypatch.setattr(train_model_tab.QMessageBox, "question", dialog)
+    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", dialog)
     train_model_tab.start_training_process(window)
     event = _preflight_event(level)
     _send_event(window, event)
     assert window._train_preflight_result == event
     assert window.train_proc.written == []
     assert bool(errors) == (level == "BLOCK")
-    assert any("malformed_rate" in message and "ProsmotrProdukta" in message for message in window.train_log.messages)
+    assert any('действий без товара' in message for message in window.train_log.messages)
+    assert not any('malformed_rate' in message or 'ProsmotrProdukta' in message for message in window.train_log.messages)
     dialog.assert_not_called()
 
 
@@ -330,21 +331,20 @@ def test_preflight_pass_block_diagnostics_without_dialog(monkeypatch, level):
 def test_warn_requires_explicit_confirmation(monkeypatch, accepted):
     window = _window_with_training_values()
     _patch_training_ui(monkeypatch)
-    yes, no = train_model_tab.QMessageBox.StandardButton.Yes, train_model_tab.QMessageBox.StandardButton.No
-    dialog = Mock(return_value=yes if accepted else no)
-    monkeypatch.setattr(train_model_tab.QMessageBox, "question", dialog)
+    dialog = Mock(return_value=accepted)
+    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", dialog)
     train_model_tab.start_training_process(window)
     _send_event(window, _preflight_event("WARN"))
     assert window.train_proc.written == [b"YES\n" if accepted else b"NO\n"]
-    assert dialog.call_args.args[-1] == no
-    assert "MAPPED_ACTION_WITHOUT_PRODUCT" in dialog.call_args.args[2]
+    assert 'действий без товара' in dialog.call_args.args[1]
+    assert 'MAPPED_ACTION_WITHOUT_PRODUCT' not in dialog.call_args.args[1]
     assert window._training_active
 
 
 def test_output_handles_split_json_and_utf8(monkeypatch):
     window = _window_with_training_values()
     _patch_training_ui(monkeypatch)
-    monkeypatch.setattr(train_model_tab.QMessageBox, "question", lambda *args: train_model_tab.QMessageBox.StandardButton.No)
+    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", lambda *args: False)
     train_model_tab.start_training_process(window)
     from scripts.mindbox_production_train import EVENT_PREFIX
     event = _preflight_event("WARN")
@@ -415,8 +415,8 @@ def test_process_exit_while_warn_dialog_open_never_sends_confirmation(monkeypatc
     _patch_training_ui(monkeypatch)
     def process_died(*args):
         window.train_proc.finished.emit(1, _FakeProcess.ExitStatus.CrashExit)
-        return train_model_tab.QMessageBox.StandardButton.Yes
-    monkeypatch.setattr(train_model_tab.QMessageBox, "question", process_died)
+        return True
+    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", process_died)
     train_model_tab.start_training_process(window)
     _send_event(window, _preflight_event("WARN"))
     assert window.train_proc.written == []
@@ -480,8 +480,7 @@ def test_real_qprocess_canonical_training(tmp_path, monkeypatch, level, accept):
     monkeypatch.setattr(train_model_tab, "schedule_status_reset", lambda *args: None)
     monkeypatch.setattr(train_model_tab, "set_status_error", lambda w, message: errors.append(message))
     monkeypatch.setattr(train_model_tab, "set_status_ok", lambda w, message: successes.append(message))
-    monkeypatch.setattr(train_model_tab.QMessageBox, "question", lambda *args:
-                        train_model_tab.QMessageBox.StandardButton.Yes if accept else train_model_tab.QMessageBox.StandardButton.No)
+    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", lambda *args: accept)
     window = QWidget()
     for name, value in vars(_window_with_training_values()).items():
         setattr(window, name, value)

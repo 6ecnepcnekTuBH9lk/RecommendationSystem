@@ -114,3 +114,64 @@ def test_invalid_diagnostics_rejected(prepared):
     with pytest.raises(ValueError):
         TrainingQualityDiagnostics(actions_view=2, malformed_mapped_actions=1,
                                   malformed_action_system_names={"ProsmotrProdukta": 2})
+
+
+@pytest.mark.parametrize('count,attempts,level', [
+    (0, 0, QualityLevel.PASS), (0, 10000, QualityLevel.PASS),
+    (20, 1206884, QualityLevel.WARN), (1, 10000, QualityLevel.WARN),
+    (1, 9999, QualityLevel.BLOCK), (5, 10, QualityLevel.BLOCK),
+    (100, 10000000, QualityLevel.WARN), (101, 10000000, QualityLevel.BLOCK),
+])
+def test_catalog_miss_rate_and_absolute_guard(prepared, count, attempts, level):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        unresolved_products=count, unknown_candidate_products=count, invalid_product_ids=0,
+        product_resolution_attempts=attempts, actions_view=3000000, unmapped_actions=5000000))
+    assert report.level is level and report.training_allowed == (level is not QualityLevel.BLOCK)
+    assert report.metrics['product_resolution_attempts'] == attempts
+    assert report.metrics['unresolved_product_rate'] == (count / attempts if attempts else 0)
+    if count:
+        assert report.issues[0].code == 'UNRESOLVED_PRODUCT' and report.issues[0].rate == count / attempts
+    assert 'SECRET' not in repr(report)
+
+
+@pytest.mark.parametrize('invalid,unsupported,code', [(1, 0, 'INVALID_PRODUCT_ID'), (0, 1, 'UNSUPPORTED_PRODUCT_NAMESPACE')])
+def test_identity_contract_failures_block_even_microscopic_rate(prepared, invalid, unsupported, code):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        unresolved_products=invalid + unsupported, unsupported_products=unsupported,
+        unknown_candidate_products=0, invalid_product_ids=invalid, product_resolution_attempts=10000000))
+    assert report.level is QualityLevel.BLOCK and not report.training_allowed
+    assert any(issue.code == code and issue.level is QualityLevel.BLOCK for issue in report.issues)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('unknown_candidate_max_rate', -1), ('unknown_candidate_max_rate', 1.01),
+    ('unknown_candidate_max_rate', float('nan')), ('unknown_candidate_max_rate', float('inf')),
+    ('unknown_candidate_max_rate', True), ('unknown_candidate_max_rate', '0.0001'),
+    ('unknown_candidate_max_count', True), ('unknown_candidate_max_count', -1),
+    ('unknown_candidate_max_count', 1.5), ('unknown_candidate_max_count', '100'),
+])
+def test_catalog_policy_config_is_typed_and_finite(field, value):
+    with pytest.raises(ValueError):
+        TrainingQualityConfig(**{field: value})
+
+
+@pytest.mark.parametrize('values', [
+    {'product_resolution_attempts': 10},
+    {'product_resolution_attempts': True, 'unknown_candidate_products': 0, 'invalid_product_ids': 0},
+    {'product_resolution_attempts': 1, 'unknown_candidate_products': 2, 'invalid_product_ids': 0, 'unresolved_products': 2},
+    {'product_resolution_attempts': 10, 'unknown_candidate_products': 1, 'invalid_product_ids': 0},
+])
+def test_inconsistent_detailed_resolution_counters_rejected(values):
+    with pytest.raises(ValueError):
+        TrainingQualityDiagnostics(**values)
+
+
+def test_catalog_loss_does_not_dilute_or_block_productless_action_warning(prepared):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        actions_view=2732459, malformed_mapped_actions=2732459,
+        unresolved_products=20, unknown_candidate_products=20, invalid_product_ids=0,
+        product_resolution_attempts=1206884))
+    assert report.level is QualityLevel.WARN and report.training_allowed
+    assert report.metrics['malformed_rate'] == 1
+    assert report.metrics['unresolved_product_rate'] == 20 / 1206884
+    assert {issue.code for issue in report.issues} == {'MAPPED_ACTION_WITHOUT_PRODUCT', 'UNRESOLVED_PRODUCT'}

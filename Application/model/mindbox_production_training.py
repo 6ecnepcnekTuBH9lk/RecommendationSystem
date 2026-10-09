@@ -118,7 +118,10 @@ def _prepare(manifest, raw_root, catalog, cfg):
         unresolved_products=d.resolution.total.unresolved, unsupported_products=d.resolution.total.unsupported_namespace,
         bpr_events=d.bpr.events_total, unmapped_actions=d.unmapped_actions,
         malformed_action_system_names=d.malformed_action_system_names,
-        orders_duplicate_conflicting=d.orders_duplicate_conflicting))
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting,
+        product_resolution_attempts=d.resolution.total.interactions_total,
+        unknown_candidate_products=d.resolution.total.unknown_candidate,
+        invalid_product_ids=d.resolution.total.invalid_id))
     result = ProductionTrainingResult(batch_id=batch.batch_id, quality_report=quality,
         dataset={**dict(quality.metrics), "complete": prepared.complete, "orders_raw": d.orders_raw,
                  "orders_unique": d.orders_unique, "orders_duplicate_identical": d.orders_duplicate_identical}, interaction_window={

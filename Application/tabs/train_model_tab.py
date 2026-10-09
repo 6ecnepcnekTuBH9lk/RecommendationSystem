@@ -10,7 +10,7 @@ import pandas as pd
 import shutil
 from functools import partial
 from PyQt6.QtCore import Qt, QSize, QProcess, QTimer, QObject, QEvent, QLocale
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
                              QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QFormLayout,
                              QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QFrame, QSizePolicy)
@@ -305,12 +305,51 @@ def _set_training_phase(aboba, stage):
 
 
 def _confirm_production(aboba, values):
-    text = ('Будет выполнено обучение рабочей модели. При успехе новое поколение модели будет опубликовано.\n\n'
-            f'Покупка: {values["w_purchase"]:g}\nИзбранное: {values["w_favorite"]:g}\nПросмотр: {values["w_view_item"]:g}\n'
-            f'Количество эпох: {values["epochs"]}\n\nПродолжить?')
-    return QMessageBox.question(aboba, 'Обучение рабочей модели', text,
-                               QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                               QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+    text = (
+        'Будет выполнено обучение рабочей модели. В случае успеха '
+        'опубликуется новое поколение модели.\n\n'
+        f'Покупка: {values["w_purchase"]:g}\n'
+        f'Избранное: {values["w_favorite"]:g}\n'
+        f'Просмотр: {values["w_view_item"]:g}\n'
+        f'Количество эпох: {values["epochs"]}\n\n'
+        'Продолжить?'
+    )
+
+    box = QMessageBox(aboba)
+    box.setWindowTitle('Обучение рабочей модели')
+
+    # Иконка окна
+    box.setWindowIcon(QIcon(str(ICONS_DIR / 'app_icon.png')))
+
+    # Иконка внутри диалога вместо синего вопросительного знака
+    pixmap = QPixmap(str(ICONS_DIR / 'question.png'))
+    box.setIconPixmap(
+        pixmap.scaled(
+            48,
+            48,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    )
+
+    box.setText(text)
+
+    yes_button = box.addButton(
+        'Да',
+        QMessageBox.ButtonRole.AcceptRole,
+    )
+    no_button = box.addButton(
+        'Нет',
+        QMessageBox.ButtonRole.RejectRole,
+    )
+
+    # Безопасное действие по умолчанию
+    box.setDefaultButton(no_button)
+    box.setEscapeButton(no_button)
+
+    box.exec()
+
+    return box.clickedButton() is yes_button
 
 
 def start_training_process(aboba):
@@ -343,7 +382,7 @@ def start_training_process(aboba):
     aboba._run_started_clock = time.monotonic()
     aboba._progress_event = {}
     aboba.train_log.clear()
-    aboba.train_log.append('Новый эксперимент' if research else 'Новое обучение рабочей модели')
+    aboba.train_log.append('Новый эксперимент' if research else 'Запуск обучения рабочей модели')
     aboba._counts_logged = {}
     aboba.train_log.append('Проверка данных...\nДанные готовы.')
     cached = getattr(aboba, '_training_data_by_mode', {}).get(research, {})
@@ -564,9 +603,62 @@ def _on_train_output(aboba):
         _handle_train_line(aboba, line.decode('utf-8', errors='replace').rstrip('\r'))
 
 
+def _quality_issue_text(issue):
+    code = issue.get('code')
+    count = format(issue.get('count', 0), ',').replace(',', ' ')
+    if code == 'MAPPED_ACTION_WITHOUT_PRODUCT':
+        return f'{count} действий без товара исключены из обучения.'
+    if code == 'UNRESOLVED_PRODUCT':
+        rate = issue.get('rate')
+        percent = f' ({rate:.6%})'.replace('.', ',') if type(rate) in (int, float) else ''
+        outcome = ('Эти взаимодействия исключены из обучения.' if issue.get('level') == 'WARN'
+                   else 'Превышен допустимый объём потерь или требуется проверка идентификаторов.')
+        return (f'Для {count} событий{percent} не удалось сопоставить товар со справочником номенклатуры. '
+                + outcome)
+    if code == 'INVALID_PRODUCT_ID':
+        return f'Некорректные идентификаторы товаров: {count}. Обучение заблокировано.'
+    if code == 'UNSUPPORTED_PRODUCT_NAMESPACE':
+        return f'Неподдерживаемые источники идентификаторов товаров: {count}. Обучение заблокировано.'
+    if code == 'CONFLICTING_ORDER_SNAPSHOTS':
+        return f'Обнаружены противоречивые данные заказов: {count}. Обучение заблокировано.'
+    if code == 'INVALID_PREPARED_DATA':
+        return 'Подготовленные данные не подходят для обучения. Обучение заблокировано.'
+    return f'При проверке данных обнаружена проблема: {count} событий. Подробности доступны в диагностическом отчёте.'
+
+
+def _quality_presentation(quality):
+    """GUI-only summary; the technical report remains intact in the process event."""
+    quality = quality or {}
+    status = 'Проверка данных: ' + {'PASS': 'успешно', 'WARN': 'предупреждение',
+                                  'BLOCK': 'заблокировано'}.get(quality.get('level'), 'ошибка')
+    lines = ['• ' + _quality_issue_text(issue) for issue in quality.get('issues', [])]
+    text = ('Проверка данных выявила предупреждения.\n\n' + '\n'.join(lines)
+            + '\n\nОбучение можно продолжить.\nПодробная диагностика доступна в журнале.'
+              '\n\nПродолжить обучение?')
+    return status, lines, text
+
+
+def _confirm_quality_warning(aboba, text):
+    box = QMessageBox(aboba)
+    box.setWindowTitle('Предупреждение перед обучением')
+    box.setWindowIcon(QIcon(str(ICONS_DIR / 'app_icon.png')))
+    box.setIconPixmap(QPixmap(str(ICONS_DIR / 'question.png')).scaled(
+        48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+    box.setText(text)
+    yes_button = box.addButton('Да', QMessageBox.ButtonRole.AcceptRole)
+    no_button = box.addButton('Нет', QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(no_button)
+    box.setEscapeButton(no_button)
+    box.exec()
+    return box.clickedButton() is yes_button
+
+
 def _handle_train_line(aboba, line):
     from scripts.mindbox_production_train import EVENT_PREFIX
     if not line.startswith(EVENT_PREFIX):
+        if line == 'Обучение BPR-MF и безопасная публикация модели...':
+            # The lifecycle events below describe training and publication separately.
+            return
         # CLI emits only safe aggregate/plain diagnostics; no exception traceback.
         if any(key in line.lower() for key in ('validation cases', 'validation_cases', 'eval events', 'eval_events')):
             return
@@ -626,8 +718,10 @@ def _handle_train_line(aboba, line):
             if stage in {'training', 'epoch'}:
                 _save_history(aboba, aboba._research_record)
         aboba.train_log.append((f'Эпоха {event["epoch"]} из {event["epochs"]}. Ошибка: ' + f'{event["loss"]:.6f}'.replace('.', ',')) if stage == 'epoch' else
-                               {'loading': 'Загрузка данных…', 'preparation': 'Подготовка данных…', 'training': 'Обучение начато.',
-                                'validation': 'Оценка модели…', 'publication': 'Публикация модели…', 'timing': 'Завершение запуска…'}[stage])
+                               {'loading': 'Загрузка данных…', 'preparation': 'Подготовка данных…',
+                                'training': 'Обучение начато.' if getattr(aboba, '_run_is_research', False) else 'Запуск обучения BPR-MF...',
+                                'validation': 'Оценка модели…', 'publication': 'Публикация новой версии модели…',
+                                'timing': 'Завершение запуска…'}[stage])
         return
     if stage == 'research_finished':
         aboba._train_research_result = event['result']
@@ -644,30 +738,18 @@ def _handle_train_line(aboba, line):
     aboba._train_preflight_result = event
     _receive_data_counts(aboba, event, log='available')
     quality = event.get('quality')
-    aboba.train_log.append('Проверка данных: ' + {'PASS': 'Допущено', 'WARN': 'Предупреждение', 'BLOCK': 'Заблокировано'}.get(
-        (quality or {}).get('level'), 'Ошибка'))
-    if quality:
-        # Quality diagnostics remain available without evaluation-case counters.
-        metrics = {key: value for key, value in quality.get('metrics', {}).items()
-                   if key not in {'cases', 'validation_cases', 'eval_events'}}
-        details = ['Показатели проверки: ' + json.dumps(metrics, ensure_ascii=False)]
-        for issue in quality.get('issues', []):
-            details.append(f'{issue["message"]} ({issue["code"]}): {issue["count"]}; '
-                           + json.dumps(issue.get('breakdown', {}), ensure_ascii=False))
-        aboba.train_log.append('\n'.join(details))
+    status, lines, warning_text = _quality_presentation(quality)
+    aboba.train_log.append('\n'.join([status, *lines]))
     if event.get('error_code') or not quality or not quality['training_allowed']:
         aboba._preflight_block = _block_key(aboba)
         aboba._preflight_block_reason = 'Проверка данных заблокировала обучение; обновите данные или параметры'
         set_status_error(aboba, 'Проверка данных заблокировала обучение')
     elif quality['level'] == 'WARN':
         process = aboba.train_proc
-        reasons = '\n'.join(f'{issue["message"]} ({issue["code"]}): {issue["count"]}' for issue in quality['issues'])
-        answer = QMessageBox.question(aboba, 'Предупреждения перед обучением',
-                                      f'Проверка данных: предупреждение\n{reasons}\n\nПодробная диагностика доступна в журнале. Продолжить обучение?',
-                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        accepted = _confirm_quality_warning(aboba, warning_text)
         if aboba.train_proc is not process or not getattr(aboba, '_training_active', False):
             return
-        process.write(b'YES\n' if answer == QMessageBox.StandardButton.Yes and not aboba._cancel_requested else b'NO\n')
+        process.write(b'YES\n' if accepted and not aboba._cancel_requested else b'NO\n')
     else:
         _set_training_phase(aboba, 'preflight')
 

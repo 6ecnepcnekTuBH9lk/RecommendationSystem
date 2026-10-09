@@ -186,6 +186,17 @@ def test_diagnostics_include_failures_and_are_immutable_snapshots(resolver, inte
         stats.by_namespace["new"] = stats.total
 
 
+def test_resolution_status_counts_preserve_aggregate_and_contract(resolver, interaction):
+    keys = (ProductKey('offline1C', '001234-size'), ProductKey('offline1C', '999999'),
+            ProductKey('offline1C', ' 001234'), ProductKey('PRIVATE_NAMESPACE', '001234'))
+    for key in keys:
+        resolver.resolve_interaction(replace(interaction, product=key), strict=False)
+    counts = resolver.diagnostics.total
+    assert (counts.interactions_total, counts.resolved, counts.unresolved) == (4, 1, 3)
+    assert (counts.unknown_candidate, counts.invalid_id, counts.unsupported_namespace) == (1, 1, 1)
+    assert 'PRIVATE_NAMESPACE' not in repr(resolver.diagnostics)
+
+
 @pytest.fixture
 def cli_data(monkeypatch, interaction):
     import socket

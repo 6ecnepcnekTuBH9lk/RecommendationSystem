@@ -214,20 +214,80 @@ def test_production_confirmation_and_weights_preserve_hidden_settings(ui, monkey
     original = {'early_stop': True, 'use_item_features': True, 'embedding_dim': 64, 'feature_scale': .3}
     path.write_text(json.dumps(original), encoding='utf-8')
     dialogs = []
-    def confirm(*args):
-        dialogs.append(args)
-        return tab.QMessageBox.StandardButton.No if len(dialogs) == 1 else tab.QMessageBox.StandardButton.Yes
-    monkeypatch.setattr(tab.QMessageBox, 'question', confirm)
+    def confirm(box):
+        dialogs.append(box.text())
+        label = 'Нет' if len(dialogs) == 1 else 'Да'
+        box._test_clicked = next(button for button in box.buttons() if button.text() == label)
+        return 0
+    monkeypatch.setattr(tab.QMessageBox, 'exec', confirm)
+    monkeypatch.setattr(tab.QMessageBox, 'clickedButton', lambda box: box._test_clicked)
     tab.start_training_process(w)
     assert not Process.instances
     tab.start_training_process(w)
-    assert '50' in dialogs[0][2] and 'поколение' in dialogs[0][2] and '10' in dialogs[0][2]
+    assert '50' in dialogs[0] and 'поколение' in dialogs[0] and '10' in dialogs[0]
     cfg = json.loads(Path(w._train_config_path).read_text())
     assert cfg == {**original, **workflow.input_values(w), 'data_dir': str(tab.INPUT_DATA_DIR)}
     assert json.loads(path.read_text()) == original
     assert w.train_proc.arguments()[3].endswith('mindbox_production_train.py')
     finish(w, 1)
     assert not w._experiment_store.read()
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+def test_catalog_miss_warn_has_localized_rate_and_requires_existing_ack(ui, monkeypatch, accepted):
+    w, _ = ui
+    w.training_mode.setCurrentIndex(1)
+    monkeypatch.setattr(tab, '_confirm_production', lambda *a: True)
+    dialogs = []
+    def confirm(box):
+        dialogs.append(box.text())
+        next(button for button in box.buttons() if button.text() == ('Да' if accepted else 'Нет')).click()
+    monkeypatch.setattr(tab.QMessageBox, 'exec', confirm)
+    tab.start_training_process(w)
+    before = list(w.train_proc.written)
+    event(w, {'stage': 'preflight', 'error_code': None, 'quality': {
+        'level': 'WARN', 'training_allowed': True, 'metrics': {'unresolved_products': 20, 'malformed_mapped_actions': 2732459},
+        'issues': [{'code': 'MAPPED_ACTION_WITHOUT_PRODUCT', 'message': 'Mapped actions without products were excluded',
+                    'level': 'WARN', 'count': 2732459, 'breakdown': {'ProsmotrProduktaVApiMethod': 2702582}},
+                   {'code': 'UNRESOLVED_PRODUCT', 'message': 'Catalog candidates not found',
+                    'level': 'WARN', 'count': 20, 'rate': 20/1206884, 'breakdown': {}}]}})
+    text = w.train_log.toPlainText()
+    assert 'Проверка данных: предупреждение' in text
+    assert 'Для 20 событий (0,001657%) не удалось сопоставить товар со справочником номенклатуры.' in text
+    assert 'Эти взаимодействия исключены из обучения.' in text
+    assert '2 732 459 действий без товара' in text
+    assert not any(value in text for value in ('Показатели проверки:', 'MAPPED_ACTION_WITHOUT_PRODUCT',
+                                             'UNRESOLVED_PRODUCT', '{', '}', 'ProsmotrProduktaVApiMethod'))
+    assert '2 732 459' in dialogs[0] and 'UNRESOLVED_PRODUCT' not in dialogs[0]
+    assert '0,001657%' in dialogs[0]
+    assert w.train_proc.written == before + ([b'YES\n'] if accepted else [b'NO\n'])
+    finish(w, 1)
+
+
+@pytest.mark.parametrize('code', ['INVALID_PRODUCT_ID', 'UNSUPPORTED_PRODUCT_NAMESPACE'])
+def test_identity_failure_issue_text_remains_strict(code):
+    text = tab._quality_issue_text({'code': code, 'level': 'BLOCK', 'count': 1})
+    assert 'Обучение заблокировано' in text
+
+
+def test_production_log_uses_separate_training_and_publication_lifecycle_messages(ui, monkeypatch):
+    w, _ = ui
+    w.training_mode.setCurrentIndex(1)
+    monkeypatch.setattr(tab, '_confirm_production', lambda *args: True)
+    monkeypatch.setattr(tab, '_confirm_quality_warning', lambda *args: pytest.fail('PASS asks no warning'))
+    tab.start_training_process(w)
+    assert w.train_log.toPlainText().startswith('Запуск обучения рабочей модели')
+    event(w, {'stage': 'preflight', 'quality': {'level': 'PASS', 'training_allowed': True, 'issues': [], 'metrics': {}}})
+    before = w.train_log.toPlainText()
+    tab._handle_train_line(w, 'Обучение BPR-MF и безопасная публикация модели...')
+    assert w.train_log.toPlainText() == before
+    assert 'Проверка данных: успешно' in before
+    event(w, {'stage': 'training', 'device': 'cpu'})
+    text = w.train_log.toPlainText()
+    assert 'Запуск обучения BPR-MF...' in text and 'Публикация новой версии' not in text
+    event(w, {'stage': 'publication', 'device': 'cpu'})
+    assert 'Публикация новой версии модели…' in w.train_log.toPlainText()
+    finish(w, 1)
 
 
 @pytest.mark.parametrize('failed_start', [True, False])

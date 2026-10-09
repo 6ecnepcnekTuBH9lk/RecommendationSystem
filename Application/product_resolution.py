@@ -105,6 +105,8 @@ class ResolutionCounts:
     resolved: int = 0
     unresolved: int = 0
     unsupported_namespace: int = 0
+    unknown_candidate: int = 0
+    invalid_id: int = 0
 
     @property
     def resolution_rate_percent(self) -> float:
@@ -161,6 +163,8 @@ class ProductResolver:
             counts["interactions_total"] += 1
             counts["resolved" if resolved else "unresolved"] += 1
             counts["unsupported_namespace"] += int(result.status is ResolutionStatus.UNSUPPORTED_NAMESPACE)
+            if result.status in (ResolutionStatus.UNKNOWN_CANDIDATE, ResolutionStatus.INVALID_ID):
+                counts[result.status.value] += 1
         self._source_keys.add(interaction.product)
         if not resolved:
             if strict:

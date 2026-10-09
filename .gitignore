@@ -36,4 +36,6 @@ input_data/
 user_settings/
 # Generated training datasets and model exports
 filtered_data/
-model/
+/model/
+# Preserve ignores for local model source snapshots
+/diagnostics/*/before_sources/**/model/
