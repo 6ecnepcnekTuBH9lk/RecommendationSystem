@@ -629,7 +629,8 @@ class DatasetStatisticsTab(QWidget):
         self._update_description()
         self.status.setText("\n".join([_calculation_message(result),
                             *(WARNING_LABELS.get(warning, warning) for warning in result["warnings"]
-                              if warning != "Позиции заказов с нецелым количеством исключены из статистики.")]))
+                              if warning not in {"Позиции заказов с нецелым количеством исключены из статистики.",
+                                                 "Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку."})]))
         actions, orders, products, customers, technical = self._pages()
         coverage = []
         for source in result["coverage"]:

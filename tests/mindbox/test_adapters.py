@@ -209,6 +209,51 @@ def test_order_missing_line_id_uses_stable_fallback(order, resolver):
     assert line.line_id == "2001:missing-line:0"
 
 
+@pytest.mark.parametrize('state', ['missing', 'null', 'zero', 'present'])
+def test_historical_order_base_price_is_optional_without_losing_purchase(order, resolver, state):
+    from Application.interactions import InteractionBuilder
+    line = order['lines'][0]
+    line['status']['ids']['externalId'] = 'CP'
+    original, = adapt_order(order, resolver)
+    if state == 'missing':
+        del line['basePricePerItem']
+    else:
+        line['basePricePerItem'] = {'null': None, 'zero': 0, 'present': 10.1}[state]
+    actual, = adapt_order(order, resolver)
+    assert actual.base_price_per_item == {'missing': None, 'null': None, 'zero': Decimal(0), 'present': Decimal('10.1')}[state]
+    assert InteractionBuilder().from_order_line(actual) == InteractionBuilder().from_order_line(original)
+    assert actual.quantity == original.quantity and actual.price_of_line == original.price_of_line
+
+
+@pytest.mark.parametrize('value', ['1.0', 'bad', True, False, float('nan'), float('inf')])
+def test_present_historical_base_price_remains_strict(order, resolver, value):
+    order['lines'][0]['basePricePerItem'] = value
+    with pytest.raises(AdapterError, match='basePricePerItem') as error:
+        adapt_order(order, resolver)
+    assert error.value.line_index == 1
+
+
+@pytest.mark.parametrize('field', ['quantity', 'priceOfLine', 'status'])
+def test_missing_base_price_does_not_relax_other_required_order_fields(order, resolver, field):
+    del order['lines'][0]['basePricePerItem']
+    del order['lines'][0][field]
+    with pytest.raises(AdapterError):
+        adapt_order(order, resolver)
+
+
+def test_historical_base_price_does_not_normalize_distinct_order_snapshots(order):
+    from Application.mindbox.order_dedup import OrderSnapshots, OrderSnapshotConflict
+    del order['lines'][0]['basePricePerItem']
+    snapshots = OrderSnapshots()
+    assert snapshots.accept(order)
+    assert not snapshots.accept(copy.deepcopy(order))
+    null = copy.deepcopy(order)
+    null['lines'][0]['basePricePerItem'] = None
+    with pytest.raises(OrderSnapshotConflict):
+        snapshots.accept(null)
+    assert (snapshots.raw, snapshots.identical, snapshots.conflicting) == (3, 1, 1)
+
+
 def test_missing_line_ids_do_not_depend_on_duplicate_line_numbers(
     order,
     resolver,

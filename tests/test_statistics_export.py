@@ -21,6 +21,22 @@ def find(sheet, label):
     return next(row for row in sheet.iter_rows() if row[0].value == label)
 
 
+def test_order_conflict_warning_remains_in_xlsx_snapshot(sample_result, tmp_path):
+    from Application.statistics_presentation import WARNING_LABELS
+    warning = 'Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.'
+    sample_result['warnings'] = (warning,)
+    original = deepcopy(sample_result)
+    path = tmp_path / 'conflict.xlsx'
+    export.export_statistics(sample_result, path)
+    book = load_workbook(path)
+    try:
+        assert find(book['Сводка'], WARNING_LABELS[warning])
+        assert find(book['Техническая информация'], WARNING_LABELS[warning])
+        assert sample_result == original
+    finally:
+        book.close()
+
+
 def test_workbook_snapshot_metadata_types_and_sections(sample_result, tmp_path):
     result = sample_result
     result['analysis_filter'] = AnalysisFilter('2025-01-02', '2025-12-30', ('Рубашки', None), None).to_dict()

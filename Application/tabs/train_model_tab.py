@@ -155,8 +155,9 @@ def create_train_model_widgets_tab(aboba):
     separator.setFrameShape(QFrame.Shape.NoFrame)
     root.addWidget(separator)
     history = QVBoxLayout()
-    history.setSpacing(COMPACT_SPACING)
-    history.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+    history_gap = BLOCK_SPACING
+    history.setSpacing(history_gap)
+    history.setContentsMargins(PAGE_MARGIN, history_gap, PAGE_MARGIN, PAGE_MARGIN)
     root.addLayout(history, 2)
     heading(history, 'История экспериментов')
     aboba.history_notice = QLabel()

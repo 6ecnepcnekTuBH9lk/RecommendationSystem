@@ -409,7 +409,7 @@ def test_ui02_layout_fields_and_centered_presentation(ui):
     assert not any('benchmark' in label.text() or label.text() == 'Результат' for label in widget.findChildren(QLabel))
     assert w.training_progress_text.alignment() == Qt.AlignmentFlag.AlignCenter
     history_layout = next(layout for layout in layouts if layout.indexOf(w.experiment_history) >= 0)
-    assert history_layout.spacing() <= 4 and w.history_notice.isHidden()
+    assert history_layout.spacing() == tab.BLOCK_SPACING and w.history_notice.isHidden()
     table = w.experiment_history
     assert [table.horizontalHeaderItem(i).text() for i in range(12)] == [
         'Дата', 'Просмотр', 'Избранное', 'Покупка', 'Эпохи', 'NDCG@10', 'Recall@10',
@@ -711,6 +711,33 @@ def test_ui03_history_fills_viewport_and_ordinary_resize_is_retained(ui):
     table.setColumnWidth(0, table.viewport().width() + 150)
     QApplication.instance().processEvents()
     assert table.horizontalScrollBar().maximum() > 0
+
+
+@pytest.mark.parametrize('width', [1280, 1520])
+@pytest.mark.parametrize('notice', [False, True])
+def test_history_visible_boundaries_have_equal_twelve_pixel_gaps(ui, width, notice):
+    from PyQt6.QtCore import QPoint
+    w, widget = ui
+    w.resize(width, 980)
+    w.tabs.resize(width, 980)
+    history = widget.layout().itemAt(2).layout()
+    title = history.itemAt(0).widget()
+    assert title.text() == 'История экспериментов'
+    assert history.spacing() == history.contentsMargins().top() == 12
+    if notice:
+        w.history_notice.setText('Synthetic history notice')
+        w.history_notice.show()
+    w.show()
+    app = QApplication.instance()
+    app.processEvents()
+    line = widget.layout().itemAt(1).widget()
+    top_gap = title.mapTo(widget, QPoint()).y() - line.mapTo(widget, QPoint(0, line.height())).y()
+    following = w.history_notice if notice else w.experiment_history
+    bottom_gap = following.mapTo(widget, QPoint()).y() - title.mapTo(widget, QPoint(0, title.height())).y()
+    assert top_gap == bottom_gap == 12
+    if notice:
+        assert w.experiment_history.mapTo(widget, QPoint()).y() - w.history_notice.mapTo(widget, QPoint(0, w.history_notice.height())).y() == 12
+    assert abs(title.geometry().center().x() - w.experiment_history.geometry().center().x()) <= 1
 
 
 def test_ui03_chart_theme_and_malformed_points_do_not_change_trajectory(ui):

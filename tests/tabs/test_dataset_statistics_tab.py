@@ -374,6 +374,20 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert sample_result["resolution_rate"] == 100.
 
 
+def test_conflicting_order_warning_is_hidden_only_from_top_status(window, sample_result):
+    _, tab = window
+    warning = 'Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.'
+    sample_result['warnings'] = (warning,)
+    sample_result['diagnostics'] = (*sample_result['diagnostics'], ('orders_duplicate_conflicting', 7))
+    original = deepcopy(sample_result)
+    tab.render(sample_result)
+    assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
+    assert sample_result == original and tab.displayed_result['warnings'] == (warning,)
+    tables = tab.sections.widget(4).findChildren(QTableWidget)
+    assert any(table.item(row, 0).text() == ui.DIAGNOSTIC_LABELS['orders_duplicate_conflicting']
+               and table.item(row, 1).text() == '7' for table in tables for row in range(table.rowCount()))
+
+
 def test_saved_result_loads_automatically_without_process(app, sample_result, monkeypatch):
     cache.save_result(ui.CACHE_PATH, sample_result)
     monkeypatch.setattr(ui.DatasetStatisticsTab, "start", lambda *args: pytest.fail("Must not recalculate"))
@@ -863,7 +877,7 @@ def test_table_content_height_and_scroll_after_resize_and_theme_change(app, coun
         app.processEvents()
 
 
-def test_orders_cards_rates_full_stores_and_bright_scrollbars(window, sample_result):
+def test_orders_cards_rates_full_stores_and_shared_scrollbars(window, sample_result):
     from PyQt6.QtCore import QEvent
     from PyQt6.QtGui import QColor
     from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
@@ -925,7 +939,7 @@ def test_orders_cards_rates_full_stores_and_bright_scrollbars(window, sample_res
             ratio = pixmap.devicePixelRatio()
             x, y = round(rect.center().x() * ratio), round(rect.center().y() * ratio)
             assert 0 <= x < image.width() and 0 <= y < image.height()
-            assert image.pixelColor(x, y) == QColor(os.environ["QTMATERIAL_PRIMARYCOLOR"])
+            assert image.pixelColor(x, y) == QColor(os.environ['QTMATERIAL_PRIMARYCOLOR'])
     assert sample_result == original
     sample_result["purchase_basket_distribution"] = tuple((label, 0, 0.) for label, _, _ in original["purchase_basket_distribution"])
     tab.render(sample_result)

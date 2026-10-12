@@ -119,7 +119,8 @@ def test_panel_and_section_metrics_and_form_spacing(spacing_window):
     forms = w.tabs.widget(3).findChildren(QFormLayout)
     assert len(forms) == 1 and forms[0].horizontalSpacing() == forms[0].verticalSpacing() == metrics.CONTROL_SPACING
     history = w.tabs.widget(3).layout().itemAt(2).layout()
-    assert history.contentsMargins() == page and history.spacing() == metrics.COMPACT_SPACING
+    assert history.contentsMargins() == QMargins(metrics.PAGE_MARGIN, metrics.BLOCK_SPACING, metrics.PAGE_MARGIN, metrics.PAGE_MARGIN)
+    assert history.spacing() == metrics.BLOCK_SPACING
     assert w.dataset_statistics_tab.layout().contentsMargins() == page
     assert w.dataset_statistics_tab.layout().spacing() == metrics.BLOCK_SPACING
 

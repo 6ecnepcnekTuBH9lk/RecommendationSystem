@@ -210,12 +210,39 @@ QDateEdit {{
     selection-color: {QTMATERIAL_SECONDARYTEXTCOLOR};
 }}
 
-/* Match the Material hover accent within statistics only. */
-QWidget#datasetStatisticsTab QScrollBar::handle:vertical,
-QWidget#datasetStatisticsTab QScrollBar::handle:horizontal,
-QWidget#datasetStatisticsTab QScrollBar::handle:vertical:hover,
-QWidget#datasetStatisticsTab QScrollBar::handle:horizontal:hover {{
+/* Shared scrollbars: full-width hit target, pill handles, theme-derived accent. */
+QScrollBar:vertical, QScrollBar:horizontal {{
+    background: {QTMATERIAL_SECONDARYDARKCOLOR};
+    border: none;
+    border-radius: 5px;
+    margin: 0px;
+}}
+QScrollBar:vertical {{ width: 11px; }}
+QScrollBar:horizontal {{ height: 11px; }}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
     background: {QTMATERIAL_PRIMARYCOLOR};
+    border: 1px solid rgba({APP_TEXT_RGB}, 55);
+    border-radius: 5px;
+}}
+QScrollBar::handle:vertical {{ min-height: 36px; }}
+QScrollBar::handle:horizontal {{ min-width: 36px; }}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+    background: {QTMATERIAL_PRIMARYLIGHTCOLOR};
+}}
+QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {{
+    background: rgba({APP_PRIMARY_RGB}, 190);
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: transparent;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    border: none;
+    background: transparent;
 }}
 
 QToolButton#analysisMultiSelect {{
@@ -230,8 +257,4 @@ QToolButton#analysisMultiSelect::menu-indicator {{
     subcontrol-origin: padding;
     subcontrol-position: center right;
     right: 8px;
-}}
-QWidget#analysisFilterTab QScrollBar::handle:vertical,
-QWidget#analysisFilterTab QScrollBar::handle:horizontal {{
-    background: {QTMATERIAL_PRIMARYCOLOR};
 }}

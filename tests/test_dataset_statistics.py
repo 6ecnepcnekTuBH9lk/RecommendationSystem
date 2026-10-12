@@ -90,6 +90,26 @@ def calculate(dataset, **kwargs):
     return calculate_statistics(raw_root=root, catalog_path=catalog, **kwargs)
 
 
+@pytest.mark.parametrize('base_price', ['missing', 'null'])
+def test_historical_base_price_does_not_change_purchase_or_financial_statistics(dataset, base_price):
+    root, _, data = dataset
+    before = calculate(dataset)
+    entry = next(iter(data['orders'].values()))
+    path = root / entry['directory'] / 'orders_part_001.json'
+    raw = json.loads(path.read_text())
+    for order in raw['orders']:
+        for line in order['lines']:
+            if base_price == 'missing':
+                del line['basePricePerItem']
+            else:
+                line['basePricePerItem'] = None
+    path.write_text(json.dumps(raw))
+    after = calculate(dataset)
+    for name in ('orders', 'order_lines', 'purchase_interactions', 'purchase_quantity', 'order_financials',
+                 'delivery_financials', 'store_statistics', 'order_monthly_dynamics'):
+        assert getattr(after, name) == getattr(before, name)
+
+
 def test_counts_classification_identity_resolution_and_no_legacy(dataset):
     root, _, _ = dataset
     for filename in ("orders.csv", "views.csv", "favorites.csv"):

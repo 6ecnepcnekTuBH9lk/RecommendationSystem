@@ -133,3 +133,44 @@ python scripts/mindbox_manual_import.py customers --customers Customers.json
 --merge-since больше не требуется и не принимается. Оба режима поддерживают --raw-root.
 CLI не загружает credentials и не обращается к API. После успеха interactions печатает
 Manifest: <raw-root>/canonical/training.json для существующего GUI protocol.
+
+## Исторические заказы и безопасная диагностика ошибок
+
+`OrderLineRecord.base_price_per_item` имеет тип `Decimal | None`: отсутствующее
+`basePricePerItem` и JSON null сохраняются как None. Присутствующее значение
+по-прежнему обязано быть конечным JSON number; strings/booleans отклоняются.
+quantity, priceOfLine и status остаются обязательными. Подстановка цены и
+изменение PURCHASE/денежных итогов не выполняются: статистика использует priceOfLine.
+Order deduplication сравнивает исходные JSON snapshots; отсутствие поля и null
+не нормализуются в один snapshot.
+
+Ручной импорт Actions/Orders/Customers использует тот же strict streaming reader.
+ManualImportError может содержать ManualImportDiagnostic: source, phase,
+file_index/file_total, record_index, line_index, field_path, error_category.
+Номера файлов соответствуют natural order normalize_sources, а не номеру части
+после публикации. Записи считаются заново в каждом файле. File/record/line counters
+для пользователя начинаются с 1; при ошибке чтения показывается число полностью
+прочитанных записей (0 допустим). Путь `lines[1].quantity` имеет JSON index 0-based,
+поэтому соответствует «Позиция заказа: 2», независимо от business line.number.
+
+Error stdout protocol сохраняет `Error: { ... }` и прежние поля; дополнительный
+manual_import object содержит только schema names и counters. GUI восстанавливает
+русский текст из закрытых категорий, не доверяет supplied safe_message и не
+показывает raw exceptions/ijson excerpts/paths/customer or product IDs. Для
+неизвестных ошибок используется безопасная внутренняя категория. API transport
+и CustomerMerges workflows не получают новую import semantics.
+
+Ошибка остаётся fail-fast: staging не публикуется, повреждённые записи не
+пропускаются. Iterators закрываются до удаления временных файлов, включая Windows.
+Предыдущая пара Actions/Orders и текущая Customers SQLite-база сохраняются.
+
+Read-only schema audit, без копирования raw, импорта, API, CustomerMerges и training:
+
+~~~text
+python scripts/check_historical_orders.py Orders2022.json Orders2023.json Orders2024.json Orders2025.json --output diagnostics/mindbox_orders01/historical_orders.json
+~~~
+
+Диагностика обходит каждый файл один раз и проверяет окончание JSON. Сохраняются
+только counters, ограниченные safe error samples и категории. Schema audit с
+независимым identity resolver не является успешным production import: совместимость
+с canonical CustomerMerges и publication в этой команде не проверяются.

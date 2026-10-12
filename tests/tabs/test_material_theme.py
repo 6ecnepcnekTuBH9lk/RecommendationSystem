@@ -9,10 +9,11 @@ import importlib
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import Qt, QDir
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QDir, QPoint, QPointF, QEvent
+from PyQt6.QtGui import QFont, QWheelEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QTableWidgetItem, QLabel, QPushButton, QSizePolicy, QGridLayout, QHBoxLayout
+from PyQt6.QtWidgets import (QApplication, QTableWidgetItem, QLabel, QPushButton, QSizePolicy, QGridLayout,
+                            QHBoxLayout, QWidget, QVBoxLayout, QTableWidget, QStyle, QStyleOptionSlider)
 
 from Application.theme.apply_theme import apply_app_theme
 
@@ -43,6 +44,93 @@ def test_material_light_dark_light(app, caplog):
     assert app.styleSheet() == light
     assert Path(os.environ["QTMATERIAL_THEME"]).name == "light_custom.xml"
     assert "must be imported after" not in caplog.text
+
+
+def scrollbar_rect(bar):
+    option = QStyleOptionSlider()
+    option.initFrom(bar)
+    option.orientation = bar.orientation()
+    option.minimum, option.maximum = bar.minimum(), bar.maximum()
+    option.sliderPosition, option.sliderValue = bar.sliderPosition(), bar.value()
+    option.singleStep, option.pageStep = bar.singleStep(), bar.pageStep()
+    if bar.orientation() == Qt.Orientation.Horizontal:
+        option.state |= QStyle.StateFlag.State_Horizontal
+    return bar.style().subControlRect(QStyle.ComplexControl.CC_ScrollBar, option,
+                                     QStyle.SubControl.SC_ScrollBarSlider, bar)
+
+
+@pytest.mark.parametrize('dark', [False, True])
+@pytest.mark.parametrize('name', ['plain', 'datasetStatisticsTab', 'analysisFilterTab'])
+@pytest.mark.parametrize('rows', [1, 400])
+def test_shared_scrollbars_geometry_wheel_drag_and_hover_pressed(app, dark, name, rows):
+    apply_app_theme(app, dark)
+    root = QWidget()
+    root.setObjectName(name)
+    layout = QVBoxLayout(root)
+    table = QTableWidget(rows, 8)
+    layout.addWidget(table)
+    for col in range(8):
+        table.setColumnWidth(col, 170)
+    root.resize(600, 320)
+    root.show()
+    app.processEvents()
+    try:
+        for width in (600, 760):
+            root.resize(width, 320)
+            app.processEvents()
+            for bar in (table.verticalScrollBar(), table.horizontalScrollBar()):
+                if not bar.isVisible():
+                    continue
+                vertical = bar.orientation() == Qt.Orientation.Vertical
+                assert (bar.width() if vertical else bar.height()) == 11
+                rect = scrollbar_rect(bar)
+                assert (rect.height() if vertical else rect.width()) >= 36
+                assert table.rect().contains(bar.mapTo(table, rect.center()))
+                assert not table.viewport().geometry().intersects(bar.geometry().translated(bar.parentWidget().pos()))
+        for bar in (table.verticalScrollBar(), table.horizontalScrollBar()):
+            if not bar.isVisible():
+                continue
+            bar.setValue(bar.minimum())
+            point = scrollbar_rect(bar).center()
+            delta = QPoint(0, -120) if bar.orientation() == Qt.Orientation.Vertical else QPoint(-120, 0)
+            wheel = QWheelEvent(QPointF(point), QPointF(bar.mapToGlobal(point)), QPoint(), delta,
+                                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+            app.sendEvent(bar, wheel)
+            assert bar.value() > bar.minimum()
+            bar.setValue(bar.minimum())
+            app.sendEvent(bar, QEvent(QEvent.Type.Leave))
+            point = scrollbar_rect(bar).center()
+            def color():
+                pixmap = bar.grab()
+                ratio = pixmap.devicePixelRatio()
+                return pixmap.toImage().pixelColor(round(point.x() * ratio), round(point.y() * ratio))
+            idle = color()
+            QTest.mouseMove(bar, point)
+            app.processEvents()
+            hovered = color()
+            assert hovered != idle
+            QTest.mousePress(bar, Qt.MouseButton.LeftButton, pos=point)
+            assert bar.isSliderDown()
+            pressed = color()
+            assert pressed != idle and pressed != hovered
+            target = point + (QPoint(0, 65) if bar.orientation() == Qt.Orientation.Vertical else QPoint(65, 0))
+            QTest.mouseMove(bar, target)
+            QTest.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=target)
+            assert not bar.isSliderDown() and bar.value() > bar.minimum()
+    finally:
+        root.close()
+        root.deleteLater()
+        app.processEvents()
+
+
+def test_custom_scrollbar_style_is_global_and_has_rounded_handle_states(app):
+    from Application.theme.apply_theme import CUSTOM_QSS
+    text = CUSTOM_QSS.read_text()
+    assert 'width: 11px' in text and 'height: 11px' in text
+    assert 'border-radius: 5px' in text and 'min-height: 36px' in text and 'min-width: 36px' in text
+    assert 'background: {QTMATERIAL_PRIMARYCOLOR}' in text and 'background: {QTMATERIAL_PRIMARYLIGHTCOLOR}' in text
+    assert 'QScrollBar::handle:vertical:hover' in text and 'QScrollBar::handle:horizontal:pressed' in text
+    assert 'QWidget#datasetStatisticsTab QScrollBar' not in text and 'QWidget#analysisFilterTab QScrollBar' not in text
 
 
 @pytest.mark.usefixtures("window_settings")

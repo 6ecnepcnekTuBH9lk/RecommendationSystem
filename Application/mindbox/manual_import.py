@@ -14,8 +14,9 @@ from .adapters.customer_contacts import adapt_customer_contact_candidate
 from .customer_profile_snapshot import CustomerProfileSnapshot
 from .daily_training_batch import load_chunked_training_batch
 from .identity import CustomerIdResolver
-from .raw_reader import iter_export, part_files, _unique_object
-from .manual_sources import ManualImportError, normalize_sources
+from .raw_reader import iter_export, part_files, _unique_object, RawExportError
+from .manual_sources import ManualImportError
+from .manual_diagnostics import ManualImportContext, normalize_manual_sources
 from .selection import DEFAULT_SELECTION, MindboxSelectionConfig
 from .training_batch import TrainingBatchWindow, TrainingBatchError
 
@@ -68,12 +69,17 @@ def _resolver(source, root, cancelled=None):
 
 def _copy_validate(source, staging, name, *, cancelled=None, progress=None, resolver=None, validate=None):
     """Copy bytes in bounded chunks, validate one record at a time before commit."""
-    sources = normalize_sources(source)
+    sources = normalize_manual_sources(source, name)
     directory = staging / name
     directory.mkdir()
+    diagnostics = ManualImportContext(name, len(sources))
+    phase = 'copy'
     try:
         for number, path in enumerate(sources, 1):
+            diagnostics.file_index = number
             check_cancel(cancelled)
+            if path.name.endswith(('.tmp', '.download')):
+                raise RawExportError('Incomplete export part', category='incomplete_export')
             if progress:
                 progress(
                     f"Копирование {name}: файл {number} из {len(sources)}"
@@ -91,14 +97,18 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
         check_cancel(cancelled)
         if progress:
             progress(f"Проверка {name} ...")
+        phase = 'read'
         if validate is not None:
-            validate(directory)
+            validate(directory, diagnostics=diagnostics)
             return len(sources)
         count = 0
-        for raw in iter_export(name, input_dir=directory):
+        for raw in diagnostics.records(part_files(directory, name)):
             check_cancel(cancelled)
             if resolver is not None:
-                adapt_customer_contact_candidate(raw, resolver)
+                try:
+                    adapt_customer_contact_candidate(raw, resolver)
+                except Exception as exc:
+                    diagnostics.fail(exc)
             count += 1
             if (
                     progress
@@ -115,8 +125,10 @@ def _copy_validate(source, staging, name, *, cancelled=None, progress=None, reso
         return len(sources)
     except InterruptedError:
         raise
-    except Exception:
-        raise ManualImportError(f"Не удалось импортировать {name}: проверьте JSON envelope и структуру записей.") from None
+    except ManualImportError:
+        raise
+    except Exception as exc:
+        diagnostics.fail(exc, phase)
 
 
 def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_SELECTION,
@@ -131,7 +143,7 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
     root = Path(raw_root).resolve()
     if not isinstance(selection, MindboxSelectionConfig) or not isinstance(window, TrainingBatchWindow):
         raise ManualImportError("Требуются корректные период и правила отбора.")
-    actions, orders = normalize_sources(actions), normalize_sources(orders)
+    actions, orders = normalize_manual_sources(actions, 'actions'), normalize_manual_sources(orders, 'orders')
     since, until = window.interaction_since, window.interaction_until
     with store.storage_lock(root):
         check_cancel(cancelled)
@@ -162,9 +174,9 @@ def import_interactions(actions, orders, *, raw_root, window, selection=DEFAULT_
             collector = StoreSourceCollector()
             for name, path in (("actions", actions), ("orders", orders)):
                 counts[name] = _copy_validate(path, staging, name, cancelled=cancelled, progress=progress,
-                               validate=lambda directory: store.validate_interactions(
+                               validate=lambda directory, diagnostics: store.validate_interactions(
                                    name, directory, resolver, selection, cancelled=cancelled, progress=progress,
-                                   store_collector=collector if name == "orders" else None))
+                                   store_collector=collector if name == "orders" else None, diagnostics=diagnostics))
             check_cancel(cancelled)
             store.require_manual_merges(data, since, until)
             old = data["manual_interactions"]

@@ -174,7 +174,8 @@ def test_old_api_versions_keep_defaults_and_selection(saved, version):
 
 
 
-def test_manual_transport_uses_normal_preparation_and_dedup(saved):
+@pytest.mark.parametrize('base_price', ['present', 'missing', 'null'])
+def test_manual_transport_uses_normal_preparation_and_dedup(saved, base_price):
     from Application.model.BPRMF import TrainConfig
     root, source, _ = saved
     action = {"ids": {"mindboxId": 10}, "customer": {"ids": {"mindboxId": 1}},
@@ -187,6 +188,10 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
              "firstAction": {"dateTimeUtc": "2026-01-01T12:00:00Z", "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
              "lines": [{"id": 1, "number": 1, "quantity": 2, "basePricePerItem": 1, "priceOfLine": 2,
                         "status": {"ids": {"externalId": "CP"}}, "product": {"ids": {"offline1C": "654321_variant"}}}]}
+    if base_price == 'missing':
+        del order['lines'][0]['basePricePerItem']
+    elif base_price == 'null':
+        order['lines'][0]['basePricePerItem'] = None
     orders = write(root, "orders", [order, order])
     selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
     manifest = manual.import_interactions(actions, orders, raw_root=root, window=source.window, selection=selection)
@@ -200,6 +205,49 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
     assert result.diagnostics.orders_duplicate_identical == 1
     assert result.diagnostics.unmapped_actions == 1
     assert result.prepared_data.mappings.idx2user == ["2"]
+
+
+def test_order_schema_failure_keeps_previous_canonical_pair_and_source_bytes(saved):
+    root, batch, _ = saved
+    manual.import_interactions(write(root, 'actions'), write(root, 'orders'), raw_root=root, window=batch.window)
+    before = (root / 'canonical/catalog.json').read_bytes()
+    bad = write(root, 'orders', [{'ids': {'mindboxId': 'PRIVATE_ORDER'},
+                               'customer': {'ids': {'mindboxId': 'PRIVATE_CUSTOMER'}}}])
+    source = bad.read_bytes()
+    with pytest.raises(manual.ManualImportError) as error:
+        manual.import_interactions(write(root, 'actions'), bad, raw_root=root, window=batch.window)
+    assert error.value.diagnostic.source == 'orders' and error.value.diagnostic.record_index == 1
+    assert 'firstAction.dateTimeUtc' in str(error.value) and 'PRIVATE' not in str(error.value)
+    assert (root / 'canonical/catalog.json').read_bytes() == before
+    assert bad.read_bytes() == source
+    assert not list((root / 'canonical').glob('.manual-interactions-*'))
+
+
+@pytest.mark.parametrize('unknown', [False, True])
+def test_customer_second_file_diagnostic_and_atomic_database_preservation(saved, monkeypatch, unknown):
+    from Application.mindbox import canonical_customers as customers
+    root, _, _ = saved
+    first = root / 'customers1.json'
+    first.write_text(json.dumps({'customers': [{'ids': {'mindboxId': 1}, 'email': 'private@example.test'}]}))
+    customers.import_full(root, first)
+    before = customers.database(root).read_bytes()
+    second = root / 'customers2.json'
+    second.write_text(json.dumps({'customers': [{'ids': {'mindboxId': 'PRIVATE_CUSTOMER'}, 'email': True}]}))
+    if unknown:
+        original = customers._upsert
+        def upsert(connection, raw, resolver):
+            if raw['ids']['mindboxId'] == 'PRIVATE_CUSTOMER':
+                raise RuntimeError('PRIVATE_EMAIL_API_KEY')
+            return original(connection, raw, resolver)
+        monkeypatch.setattr(customers, '_upsert', upsert)
+    with pytest.raises(manual.ManualImportError) as error:
+        customers.import_full(root, (second, first))
+    detail = error.value.diagnostic
+    assert (detail.source, detail.file_index, detail.file_total, detail.record_index) == ('customers', 2, 2, 1)
+    assert detail.field_path == (None if unknown else 'email')
+    assert 'PRIVATE' not in str(error.value)
+    assert customers.database(root).read_bytes() == before
+    assert not list((root / 'canonical').glob('.customers-*'))
 
 
 def utc(value):
@@ -381,6 +429,7 @@ def test_interrupt_immediately_after_catalog_switch_keeps_published_raw(tmp_path
 
 def test_manual_validation_consumes_records_once_incrementally(tmp_path, monkeypatch):
     from Application.mindbox.adapters import actions as action_adapter
+    from Application.mindbox import manual_diagnostics
     publish_merges(tmp_path)
     processed = 0
     calls = []
@@ -389,14 +438,15 @@ def test_manual_validation_consumes_records_once_incrementally(tmp_path, monkeyp
         nonlocal processed
         processed += 1
         return original(raw)
-    def records(name, **kwargs):
+    def records(path, name):
+        name = 'actions' if name == 'customerActions' else name
         calls.append(name)
         if name == "actions":
             for index in range(1000):
                 assert processed == index
                 yield {"actionTemplate": {"ids": {"systemName": "Unmapped"}}}
     monkeypatch.setattr(action_adapter, "adapt_action_system_name", adapt)
-    monkeypatch.setattr(store, "iter_export", records)
+    monkeypatch.setattr(manual_diagnostics, "iter_json_records", records)
     import_pair(tmp_path)
     assert processed == 1000 and calls == ["actions", "orders"]
 

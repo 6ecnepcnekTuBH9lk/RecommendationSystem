@@ -56,7 +56,7 @@ class OrderLineRecord:
     product: ProductKey
     product_name: str | None
     quantity: Decimal
-    base_price_per_item: Decimal
+    base_price_per_item: Decimal | None
     price_of_line: Decimal
     line_status: str
     retail_order_id: str | None = None
