@@ -9,10 +9,11 @@ from PyQt6.QtNetwork import QNetworkAccessManager
 from PyQt6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLineEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from Application.customer_card_data import (
-    CustomerCardResult, CustomerCardService, DisplayField, IDENTITY_MESSAGES, SectionContent, ViewState,
+    CustomerCardResult, CustomerCardService, DisplayField, IDENTITY_MESSAGES, SectionContent, ViewState, contact_search_failure,
 )
 from Application.paths import ICONS_DIR
 from Application.customer_profile_service import CustomerProfileResult, ProfileStatus
+from Application.customer_contact_search import ContactSearchResult, ContactSearchStatus, ContactType
 from Application.customer_profile_presentation import PROFILE_FIELDS, profile_content
 from Application.photo.photo_processing import _invalidate_photo_targets, _set_photo_label
 from Application.settings.set_status import schedule_status_reset, set_status_error, set_status_ok, set_status_processing
@@ -74,8 +75,15 @@ class CustomerResultsTab(QWidget):
         self.search_row = QHBoxLayout()
         self.search_row.setContentsMargins(0, 0, 0, 0)
         self.search_row.setSpacing(CONTROL_SPACING)
-        from PyQt6.QtWidgets import QLabel
-        self.search_row.addWidget(QLabel("MindboxID"))
+        self.search_type = QComboBox()
+        self.search_type.setAccessibleName("Тип поиска покупателя")
+        self.search_type.setMinimumWidth(0)
+        self.search_type.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.search_type.setMinimumContentsLength(12)
+        for title, kind in (("MindboxID", None), ("Телефон", ContactType.PHONE),
+                            ("Email", ContactType.EMAIL), ("Дисконтная карта", ContactType.DISCOUNT_CARD)):
+            self.search_type.addItem(title, kind)
+        self.search_row.addWidget(self.search_type)
         self.customer_input = QLineEdit()
         self.customer_input.setMinimumWidth(0)
         self.customer_input.setPlaceholderText("Введите MindboxID покупателя")
@@ -92,8 +100,8 @@ class CustomerResultsTab(QWidget):
         for button in (self.search_button, self.cancel_button, self.export_button):
             self.search_row.addWidget(button)
         box.addLayout(self.search_row)
-        box.addWidget(text_label("Поиск по карте, почте и телефону пока недоступен.",
-                                 style="statisticsInfo"))
+        self.search_hint = text_label("MindboxID без пробелов по краям.", style="statisticsInfo")
+        box.addWidget(self.search_hint)
         self.search_status = text_label("Введите MindboxID, чтобы посмотреть оригинальные рекомендации BPR-MF.")
         box.addWidget(self.search_status)
         self.progress = QProgressBar()
@@ -102,6 +110,27 @@ class CustomerResultsTab(QWidget):
         self.progress.hide()
         box.addWidget(self.progress)
         self.page_layout.addWidget(self.search_card)
+        self.search_type.currentIndexChanged.connect(self._search_type_changed)
+
+    def _search_type_changed(self):
+        if self._closing:
+            return
+        self._request_id += 1
+        if self._active is not None:
+            self._active.cancelled.set()
+        self._pending = None
+        self._clear_result()
+        kind = self.search_type.currentData()
+        placeholder, hint = {
+            None: ("Введите MindboxID покупателя", "MindboxID без пробелов по краям."),
+            ContactType.PHONE: ("Введите телефон: +7…", "Международный формат +… или 00…; также полный 7… (11 цифр). Номера с 8… и десятизначные не поддерживаются."),
+            ContactType.EMAIL: ("Введите email покупателя", "Полный email. Регистр не учитывается; точки и +suffix сохраняются."),
+            ContactType.DISCOUNT_CARD: ("Введите номер дисконтной карты", "Точный номер карты, включая ведущие нули."),
+        }[kind]
+        self.customer_input.setPlaceholderText(placeholder)
+        self.search_hint.setText(hint)
+        self.identity_status.setText("Покупатель не выбран.")
+        self._display_state(ViewState.INITIAL, "Введите значение для выбранного типа поиска.")
 
     def _build_profile(self):
         self.profile = StateSection("Профиль покупателя", SectionContent(
@@ -240,13 +269,14 @@ class CustomerResultsTab(QWidget):
         self._pending = None
         self._clear_result()
         value = self.customer_input.text()
-        if not value or value != value.strip():
+        kind = self.search_type.currentData()
+        if kind is None and (not value or value != value.strip()):
             message = "Введите MindboxID." if not value else "Введите MindboxID без пробелов по краям."
             self.identity_status.setText(message)
             self._render_profile(CustomerProfileResult(ProfileStatus.INVALID_ID))
             self._display_state(ViewState.ERROR, message)
             return
-        request = CustomerCardRequest(self._request_id, value)
+        request = CustomerCardRequest(self._request_id, value, contact_type=kind)
         self.identity_status.setText("Проверяем доступность рекомендаций для покупателя…")
         self.profile.set_content(SectionContent(ViewState.LOADING, "Загрузка профиля покупателя…"))
         self.profile_title.setText("Загрузка профиля…")
@@ -276,6 +306,16 @@ class CustomerResultsTab(QWidget):
         if self._closing or request_id != self._request_id:
             return
         try:
+            if isinstance(profile, CustomerCardResult):
+                delivery = self.service.validate_result(profile)
+                if delivery.profile is None:
+                    self.profile.set_content(SectionContent(delivery.state, delivery.message))
+                    self.profile_fields.set_cards([])
+                    self.profile_title.setText("Покупатель не выбран")
+                    self.canonical_id.setText("Canonical MindboxID ещё не определён")
+                    self.model_id.setText("ID в модели BPR-MF ещё не определён")
+                    return
+                profile = delivery.profile
             profile = self.service.validate_profile(profile)
         except Exception:
             profile = CustomerProfileResult(ProfileStatus.STALE)
@@ -307,14 +347,19 @@ class CustomerResultsTab(QWidget):
         try:
             result = self.service.validate_result(result)
         except Exception:
-            result = replace(result, state=ViewState.STALE, products=(), profile=CustomerProfileResult(ProfileStatus.STALE),
-                             message="Источники изменились до показа данных. Повторите поиск.")
+            if result.contact_search is not None:
+                result = contact_search_failure(ContactSearchResult(ContactSearchStatus.SOURCE_INCONSISTENT))
+            else:
+                result = replace(result, state=ViewState.STALE, products=(), profile=CustomerProfileResult(ProfileStatus.STALE),
+                                 message="Источники изменились до показа данных. Повторите поиск.")
         self.apply_result(result)
         self.result_applied.emit(request_id)
 
     def apply_result(self, result: CustomerCardResult):
         """Presentation only; worker has checked snapshot freshness before emission."""
-        if result.state in (ViewState.READY, ViewState.EMPTY) and (
+        if result.contact_search is not None and result.contact_search.status is not ContactSearchStatus.MATCHED:
+            result = contact_search_failure(result.contact_search)
+        elif result.state in (ViewState.READY, ViewState.EMPTY) and (
                 result.identity is None or not result.identity.is_matched
                 or result.model_generation != result.identity.model_generation):
             result = replace(result, state=ViewState.STALE, products=(), message="Источники рекомендаций изменились. Повторите поиск.")
@@ -331,6 +376,10 @@ class CustomerResultsTab(QWidget):
             self.identity_status.setText(result.message)
         if result.profile is not None:
             self._render_profile(result.profile)
+        elif result.contact_search is not None and result.contact_search.status is not ContactSearchStatus.MATCHED:
+            self.profile.set_content(SectionContent(result.state, result.message))
+            self.profile_fields.set_cards([])
+            self.profile_title.setText("Покупатель не выбран")
         self._display_state(result.state, result.message)
         if result.state is ViewState.READY:
             cards = [ProductCard(product) for product in result.products]

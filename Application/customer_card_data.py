@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from Application import customer_contact_search as contact_backend
 from Application.customer_profile_service import CustomerProfileResult, CustomerProfileService, ProfileStatus
 
 from Application.model.customer_identity_bridge import (
@@ -74,6 +75,50 @@ class CustomerCardResult:
     model_generation: str | None = None
     products: tuple[ProductContent, ...] = ()
     profile: CustomerProfileResult | None = None
+    contact_search: contact_backend.ContactSearchResult | None = None
+
+
+def contact_search_failure(result):
+    """No profile/model identity is confirmed by a failed contact lookup."""
+    status = contact_backend.ContactSearchStatus
+    messages = {
+        status.AMBIGUOUS: (ViewState.UNAVAILABLE,
+                          f"Найдено несколько покупателей ({result.candidate_count}). Уточните поиск или используйте MindboxID."),
+        status.NOT_FOUND: (ViewState.EMPTY, "Покупатели с указанным контактом не найдены."),
+        status.INVALID_INPUT: (ViewState.ERROR, "Некорректный формат. Проверьте значение и подсказку для выбранного типа поиска."),
+        status.INDEX_NOT_READY: (ViewState.UNAVAILABLE, "Поисковый индекс отсутствует или устарел. Необходимо построить или обновить индекс контактов."),
+        status.SOURCE_UNAVAILABLE: (ViewState.UNAVAILABLE, "Источник поиска покупателей недоступен. Повторите поиск позднее."),
+        status.SOURCE_INCONSISTENT: (ViewState.ERROR, "Источники поиска покупателей несогласованы. Карточка недоступна."),
+    }
+    state, message = messages[result.status]
+    return CustomerCardResult(state, message, contact_search=result)
+
+
+def validate_contact_match(result, *, raw_root):
+    """Reuse backend freshness gates at handoff, without a contact query or scan.
+
+    The backend currently exposes search + source_version, but no public
+    is_current(). Reuse its own metadata readers, keeping that compatibility
+    boundary here. Contact lookups themselves execute only in the Qt worker.
+    """
+    status = contact_backend.ContactSearchStatus
+    try:
+        root = Path(raw_root).resolve()
+        with contact_backend._reader_lock(root):
+            sources = contact_backend._sources(root)
+            if result.source_version != sources.version:
+                return contact_backend.ContactSearchResult(status.INDEX_NOT_READY)
+            path = contact_backend.CustomerContactSearchService().index_path(raw_root=root)
+            if not path.exists():
+                return contact_backend.ContactSearchResult(status.INDEX_NOT_READY)
+            with contact_backend._read_database(path) as connection:
+                contact_backend._metadata(connection, sources)
+        return result
+    except contact_backend._IndexNotReady:
+        return contact_backend.ContactSearchResult(status.INDEX_NOT_READY)
+    except Exception as exc:
+        return contact_backend.ContactSearchResult(status.SOURCE_UNAVAILABLE if contact_backend._unavailable(exc)
+                                                 else status.SOURCE_INCONSISTENT)
 
 
 IDENTITY_MESSAGES = {
@@ -133,6 +178,19 @@ class CustomerCardService:
 
     def validate_result(self, result: CustomerCardResult) -> CustomerCardResult:
         """Validate each source independently; an error never erases the other block."""
+        match = result.contact_search
+        if match is not None:
+            if match.status is not contact_backend.ContactSearchStatus.MATCHED:
+                return contact_search_failure(match)
+            match = validate_contact_match(match, raw_root=self.raw_root)
+            if match.status is not contact_backend.ContactSearchStatus.MATCHED:
+                return contact_search_failure(match)
+            # A merge/source race must not replace the contact-selected customer.
+            confirmed = [result.identity.canonical_customer_id] if result.identity is not None else []
+            if result.profile is not None:
+                confirmed.append(result.profile.canonical_customer_id)
+            if any(value is not None and value != match.canonical_customer_id for value in confirmed):
+                return contact_search_failure(contact_backend.ContactSearchResult(contact_backend.ContactSearchStatus.INDEX_NOT_READY))
         if result.state in (ViewState.READY, ViewState.EMPTY):
             try:
                 current = self.is_current(result)
