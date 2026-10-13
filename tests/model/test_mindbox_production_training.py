@@ -487,6 +487,46 @@ def canonical_source(tmp_path, problem="pass"):
     return args
 
 
+def test_production_conflicting_canonical_repeat_warns_readonly_without_invented_complete(tmp_path,monkeypatch):
+    import copy
+    args=canonical_source(tmp_path)
+    batch=daily.load_chunked_training_batch(args['training_manifest'],raw_root=args['raw_root'],require_complete=True)
+    component=next(c for c in batch.components if c.name=='orders')
+    path=args['raw_root']/component.export.relative_directory/'orders_part_001.json'
+    rows=[{'ids':{'mindboxId':'SYNTHETIC_ORDER'},'customer':{'ids':{'mindboxId':'SECRET_A'}},
+           'firstAction':{'dateTimeUtc':batch.window.interaction_since.isoformat(),
+                          'channel':{'ids':{'externalId':'test'},'name':'test'}},
+           'lines':[{'id':'SYNTHETIC_LINE','number':1,'quantity':1,'priceOfLine':10,
+                     'product':{'ids':{'offline1C':'123456_SIZE'}},'status':{'ids':{'externalId':'F'}}}]}]
+    repeat=copy.deepcopy(rows[0])
+    repeat['lines'][0]['quantity']+=1
+    path.write_text(json.dumps({'orders':[*rows,repeat]}),encoding='utf-8')
+    before={p:(p.read_bytes(),p.stat().st_mtime_ns) for p in args['raw_root'].rglob('*') if p.is_file()}
+    monkeypatch.setattr(store,'storage_lock',lambda *_:pytest.fail('Preflight must not touch writer lock'))
+    monkeypatch.setattr(core,'train_prepared_data_with_metrics',forbidden)
+    monkeypatch.setattr(core,'_save_artifacts',forbidden)
+    result=production.preflight_production_training(**args)
+    assert result.error_code is None and result.quality_report.level.value=='WARN'
+    assert result.dataset['complete'] is False and result.dataset['transport_complete'] is True
+    assert result.dataset['order_snapshot_policy']=='first_in_period_source_order'
+    assert result.quality_report.metrics['first_snapshot_policy_verified'] is True
+    assert result.quality_report.metrics['orders_duplicate_conflicting']==1
+    assert before=={p:(p.read_bytes(),p.stat().st_mtime_ns) for p in args['raw_root'].rglob('*') if p.is_file()}
+
+
+def test_readonly_preparation_rejects_catalog_drift(tmp_path,monkeypatch):
+    args=canonical_source(tmp_path)
+    from Application.model import mindbox_training_preparation as preparation
+    original=preparation._prepare_training_data_from_mindbox_sources
+    def changed(**kwargs):
+        result=original(**kwargs)
+        args['catalog_path'].write_text(args['catalog_path'].read_text('utf-8-sig')+'123459|a\n',encoding='utf-8')
+        return result
+    monkeypatch.setattr(preparation,'_prepare_training_data_from_mindbox_sources',changed)
+    result=production.preflight_production_training(**args)
+    assert result.error_code=='PREPARATION_FAILED' and not result.training_started
+
+
 @pytest.mark.parametrize("entrypoint", ["production", "shadow"])
 def test_canonical_training_entrypoints_use_exact_event_time(tmp_path, monkeypatch, entrypoint):
     args = source(tmp_path)

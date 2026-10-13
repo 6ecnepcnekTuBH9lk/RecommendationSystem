@@ -30,7 +30,7 @@ def test_warning_formatter_has_russian_summary_without_technical_fields_and_pres
     assert '2 732 459 действий без товара исключены из обучения.' in lines[0]
     assert 'Для 20 событий (0,001657%) не удалось сопоставить товар со справочником номенклатуры.' in lines[1]
     assert 'Эти взаимодействия исключены из обучения.' in lines[1]
-    assert 'Продолжить обучение?' in text and 'Обучение можно продолжить.' in text
+    assert 'Продолжить обучение?' not in text and 'Предупреждения приняты автоматически' in text
     for technical in ('MAPPED_ACTION_WITHOUT_PRODUCT', 'UNKNOWN_CANDIDATE', 'UNRESOLVED_PRODUCT',
                       'mapped_actions', 'malformed_mapped_actions', 'ProsmotrProduktaVApiMethod',
                       'Показатели проверки:', '{', '}', '0.01%', '100 events', 'Catalog candidates'):
@@ -55,17 +55,16 @@ def test_block_issue_messages_never_show_technical_english_or_recovery_permissio
 
 @pytest.mark.parametrize('dark', [False, True])
 @pytest.mark.parametrize('action', ['yes', 'no', 'escape', 'close', 'reject'])
-def test_warning_dialog_icons_russian_buttons_default_escape_and_rejection(monkeypatch, dark, action):
+def test_initial_production_dialog_icons_buttons_default_escape_and_rejection(monkeypatch, dark, action):
     app = QApplication.instance() or QApplication([])
     apply_app_theme(app, dark)
     parent = QWidget()
-    text = tab._quality_presentation(warning_report())[2]
     original_exec = QMessageBox.exec
     errors = []
 
     def execute(box):
-        assert box.windowTitle() == 'Предупреждение перед обучением'
-        assert box.text() == text
+        assert box.windowTitle() == 'Обучение рабочей модели'
+        assert all(v in box.text() for v in ('Покупка: 10', 'Избранное: 2', 'Просмотр: 0.5', 'Количество эпох: 100'))
         assert not box.iconPixmap().isNull() and not box.windowIcon().isNull()
         assert box.windowIcon().pixmap(24, 24).toImage() == QIcon(str(tab.ICONS_DIR / 'app_icon.png')).pixmap(24, 24).toImage()
         expected = QPixmap(str(tab.ICONS_DIR / 'question.png')).scaled(
@@ -96,7 +95,7 @@ def test_warning_dialog_icons_russian_buttons_default_escape_and_rejection(monke
 
     monkeypatch.setattr(QMessageBox, 'exec', execute)
     try:
-        assert tab._confirm_quality_warning(parent, text) is (action == 'yes')
+        assert tab._confirm_production(parent, {'w_purchase':10., 'w_favorite':2., 'w_view_item':.5, 'epochs':100}) is (action == 'yes')
         assert not errors
     finally:
         parent.close()

@@ -405,7 +405,8 @@ def test_single_vs_daily_preparation_parity(data, malformed):
         np.testing.assert_array_equal(getattr(chunked.prepared_data.splits, field),
                                       getattr(single.prepared_data.splits, field))
     assert chunked.prepared_data.splits.user_pos_train == single.prepared_data.splits.user_pos_train
-    assert chunked.diagnostics == single.diagnostics
+    assert chunked.diagnostics.order_snapshot_policy == 'first_in_period_source_order'
+    assert replace(chunked.diagnostics, order_snapshot_policy=single.diagnostics.order_snapshot_policy) == single.diagnostics
     assert chunked.complete == single.complete == (not malformed)
     assert chunked.diagnostics.orders == 2
     if malformed:
@@ -528,6 +529,47 @@ def test_order_fingerprint_key_order_and_decimal_stability():
     assert semantic_fingerprint(left) == semantic_fingerprint(right)
     assert semantic_fingerprint({"x": "1"}) != semantic_fingerprint({"x": 1})
     assert semantic_fingerprint({"x": True}) != semantic_fingerprint({"x": 1})
+
+
+@pytest.mark.parametrize('malformed_repeat', [False, True])
+def test_in_period_first_snapshot_across_sources_matches_research_and_quality(data, malformed_repeat):
+    from Application.mindbox.training_batch import TrainingBatchWindow
+    from Application.model.training_quality import TrainingQualityDiagnostics, evaluate_training_quality, QualityLevel
+    raw, dirs, catalog = data
+    baseline = run(data)
+    first = copy.deepcopy(raw['orders'][0])
+    outside = copy.deepcopy(first)
+    outside['firstAction']['dateTimeUtc'] = '2025-12-31T23:59:59Z'
+    outside['lines'][0]['quantity'] = 8
+    raw['orders'].insert(0, outside)
+    write_export(dirs['orders'], 'orders', raw['orders'])
+    repeat = copy.deepcopy(first)
+    repeat['lines'][0]['quantity'] = 9
+    if malformed_repeat:
+        del repeat['lines'][0]['quantity']
+    api = catalog.parent/'orders'/'20260102_000000'
+    after = copy.deepcopy(first)
+    after['firstAction']['dateTimeUtc'] = '2026-01-03T00:00:00Z'
+    write_export(api, 'orders', [repeat, after])
+    start, end = datetime(2026,1,1,tzinfo=timezone.utc), datetime(2026,1,3,tzinfo=timezone.utc)
+    kwargs = dict(actions_export_dirs=(dirs['actions'],), orders_export_dirs=(dirs['orders'],api),
+        customer_merges_export_dir=dirs['customer_merges'], catalog_path=catalog,
+        train_config=legacy.TrainConfig(), diagnose=True, interaction_window=TrainingBatchWindow(start,end,start))
+    if malformed_repeat:
+        with pytest.raises(AdapterError):
+            pipeline._prepare_training_data_from_mindbox_sources(**kwargs)
+        return
+    result = pipeline._prepare_training_data_from_mindbox_sources(**kwargs)
+    d=result.diagnostics
+    assert d.order_snapshot_policy=='first_in_period_source_order'
+    assert (d.orders_before_start,d.orders_at_or_after_end,d.orders_duplicate_conflicting)==(1,1,1)
+    assert d.purchase_interactions==baseline.diagnostics.purchase_interactions
+    assert result.prepared_data.splits.train_weights.tolist()==baseline.prepared_data.splits.train_weights.tolist()
+    assert not result.complete
+    report=evaluate_training_quality(result.prepared_data,TrainingQualityDiagnostics(
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting,
+        first_snapshot_policy_verified=d.order_snapshot_policy=='first_in_period_source_order'))
+    assert report.level is QualityLevel.WARN and report.training_allowed
 
 
 def _set_temporal_events(data, purchase, favorite, view):

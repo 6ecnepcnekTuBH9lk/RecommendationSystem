@@ -20,19 +20,27 @@ class Process(QProcess):
         super().__init__(parent)
         self.written = []
         self.killed = False
+        self._state = self.ProcessState.NotRunning
+        self.finished.connect(lambda *_: setattr(self, '_state', self.ProcessState.NotRunning))
         self.instances.append(self)
 
     def start(self):
+        self._state = self.ProcessState.Running
         self.started.emit()
+
+    def state(self):
+        return self._state
 
     def processId(self):
         return os.getpid()
 
     def write(self, data):
         self.written.append(data)
+        return len(data)
 
     def kill(self):
         self.killed = True
+        self._state = self.ProcessState.NotRunning
         self.finished.emit(9, self.ExitStatus.CrashExit)
 
 
@@ -62,6 +70,7 @@ def event(window, payload):
 
 
 def finish(window, code=0):
+    window.train_proc._state = QProcess.ProcessState.NotRunning
     window.train_proc.finished.emit(code, QProcess.ExitStatus.NormalExit)
 
 
@@ -233,16 +242,11 @@ def test_production_confirmation_and_weights_preserve_hidden_settings(ui, monkey
     assert not w._experiment_store.read()
 
 
-@pytest.mark.parametrize('accepted', [False, True])
-def test_catalog_miss_warn_has_localized_rate_and_requires_existing_ack(ui, monkeypatch, accepted):
+def test_catalog_miss_warn_logs_and_automatically_acknowledges_once(ui, monkeypatch):
     w, _ = ui
     w.training_mode.setCurrentIndex(1)
     monkeypatch.setattr(tab, '_confirm_production', lambda *a: True)
-    dialogs = []
-    def confirm(box):
-        dialogs.append(box.text())
-        next(button for button in box.buttons() if button.text() == ('Да' if accepted else 'Нет')).click()
-    monkeypatch.setattr(tab.QMessageBox, 'exec', confirm)
+    monkeypatch.setattr(tab.QMessageBox, 'exec', lambda *_: pytest.fail('Second modal confirmation'))
     tab.start_training_process(w)
     before = list(w.train_proc.written)
     event(w, {'stage': 'preflight', 'error_code': None, 'quality': {
@@ -258,10 +262,107 @@ def test_catalog_miss_warn_has_localized_rate_and_requires_existing_ack(ui, monk
     assert '2 732 459 действий без товара' in text
     assert not any(value in text for value in ('Показатели проверки:', 'MAPPED_ACTION_WITHOUT_PRODUCT',
                                              'UNRESOLVED_PRODUCT', '{', '}', 'ProsmotrProduktaVApiMethod'))
-    assert '2 732 459' in dialogs[0] and 'UNRESOLVED_PRODUCT' not in dialogs[0]
-    assert '0,001657%' in dialogs[0]
-    assert w.train_proc.written == before + ([b'YES\n'] if accepted else [b'NO\n'])
+    assert 'Предупреждения приняты автоматически' in text
+    assert w.train_proc.written == before + [b'YES\n']
     finish(w, 1)
+
+
+def warning_payload():
+    return {'stage': 'preflight', 'error_code': None, 'quality': {
+        'level': 'WARN', 'training_allowed': True, 'metrics': {'orders_duplicate_conflicting': 2},
+        'issues': [{'code': 'CONFLICTING_ORDER_SNAPSHOTS', 'level': 'WARN', 'count': 2}]}}
+
+
+@pytest.mark.parametrize('condition', ['cancelled', 'finished', 'unconfirmed', 'duplicate', 'research'])
+def test_warn_ack_requires_current_confirmed_active_production_run(ui, monkeypatch, condition):
+    w, _ = ui
+    w.training_mode.setCurrentIndex(0 if condition == 'research' else 1)
+    monkeypatch.setattr(tab, '_confirm_production', lambda *_: True)
+    monkeypatch.setattr(QTimer, 'singleShot', lambda *_: None)
+    tab.start_training_process(w)
+    monkeypatch.setattr(tab.QMessageBox, 'exec', lambda *_: pytest.fail('Warning dialog'))
+    if condition == 'cancelled':
+        tab.cancel_training(w)
+    elif condition == 'finished':
+        w.train_proc._state = QProcess.ProcessState.NotRunning
+    elif condition == 'unconfirmed':
+        w._production_confirmed = False
+    elif condition == 'research':
+        assert w._run_is_research
+    else:
+        event(w, warning_payload())
+    before = list(w.train_proc.written)
+    event(w, warning_payload())
+    assert w.train_proc.written == before
+    finish(w, 130 if condition == 'cancelled' else 1)
+
+
+@pytest.mark.parametrize('quality', [None, [], {}, {'level': 'WARN'},
+    {'level': 'WARN', 'training_allowed': 1, 'issues': [], 'metrics': {}},
+    {'level': 'WARN', 'training_allowed': True, 'issues': [], 'metrics': {}},
+    {'level': 'WARN', 'training_allowed': True, 'issues': [{'code': 'X', 'level': 'BLOCK', 'count': 1}], 'metrics': {}},
+    {'level': 'WARN', 'training_allowed': True, 'issues': [{'code': 'X', 'level': 'WARN', 'count': 'PRIVATE'}], 'metrics': {}},
+    {'level': 'WARN', 'training_allowed': True, 'issues': [{'code': 'X', 'level': 'WARN', 'count': 1, 'rate': float('nan')}], 'metrics': {}},
+])
+def test_corrupt_quality_cannot_allow_or_leave_cli_waiting(ui, monkeypatch, quality):
+    w, _ = ui
+    w.training_mode.setCurrentIndex(1)
+    monkeypatch.setattr(tab, '_confirm_production', lambda *_: True)
+    monkeypatch.setattr(QTimer, 'singleShot', lambda *_: None)
+    tab.start_training_process(w)
+    event(w, {'stage': 'preflight', 'quality': quality})
+    assert b'YES\n' not in w.train_proc.written
+    assert b'NO\n' in w.train_proc.written and w._cancel_requested
+    assert 'PRIVATE' not in w.train_log.toPlainText()
+    event(w, warning_payload())
+    assert b'YES\n' not in w.train_proc.written
+    finish(w, 1)
+
+
+@pytest.mark.parametrize('problem', ['block', 'error', 'bad_json'])
+def test_block_or_bad_transport_never_acknowledges(ui, monkeypatch, problem):
+    w, _ = ui
+    w.training_mode.setCurrentIndex(1)
+    monkeypatch.setattr(tab, '_confirm_production', lambda *_: True)
+    monkeypatch.setattr(QTimer, 'singleShot', lambda *_: None)
+    tab.start_training_process(w)
+    payload = warning_payload()
+    if problem == 'bad_json':
+        tab._handle_train_line(w, 'TRAINING_EVENT {broken')
+    else:
+        if problem == 'block':
+            payload['quality'].update(level='BLOCK', training_allowed=False)
+            payload['quality']['issues'][0]['level'] = 'BLOCK'
+        else:
+            payload['error_code'] = 'PREPARATION_FAILED'
+        event(w, payload)
+    assert b'YES\n' not in w.train_proc.written
+    finish(w, 1)
+
+
+@pytest.mark.parametrize('result', [-1, 2, 'exception'])
+def test_failed_warn_stdin_write_cancels_without_success(ui, monkeypatch, result):
+    w, _ = ui
+    w.training_mode.setCurrentIndex(1)
+    monkeypatch.setattr(tab, '_confirm_production', lambda *_: True)
+    monkeypatch.setattr(QTimer, 'singleShot', lambda *_: None)
+    tab.start_training_process(w)
+    write = w.train_proc.write
+    def failed(data):
+        if data == b'YES\n':
+            if result == 'exception':
+                raise OSError('PRIVATE')
+            return result
+        return write(data)
+    monkeypatch.setattr(w.train_proc, 'write', failed)
+    event(w, warning_payload())
+    assert w._cancel_requested and b'NO\n' in w.train_proc.written
+    assert 'Предупреждения приняты автоматически' not in w.train_log.toPlainText()
+    assert 'Не удалось подтвердить продолжение' in w.train_log.toPlainText()
+    assert 'PRIVATE' not in w.train_log.toPlainText()
+    event(w, {'stage': 'publication_ready'})
+    assert b'PUBLISH\n' not in w.train_proc.written
+    finish(w, 130)
 
 
 @pytest.mark.parametrize('code', ['INVALID_PRODUCT_ID', 'UNSUPPORTED_PRODUCT_NAMESPACE'])
@@ -274,7 +375,7 @@ def test_production_log_uses_separate_training_and_publication_lifecycle_message
     w, _ = ui
     w.training_mode.setCurrentIndex(1)
     monkeypatch.setattr(tab, '_confirm_production', lambda *args: True)
-    monkeypatch.setattr(tab, '_confirm_quality_warning', lambda *args: pytest.fail('PASS asks no warning'))
+    monkeypatch.setattr(tab.QMessageBox, 'exec', lambda *_: pytest.fail('PASS asks no warning'))
     tab.start_training_process(w)
     assert w.train_log.toPlainText().startswith('Запуск обучения рабочей модели')
     event(w, {'stage': 'preflight', 'quality': {'level': 'PASS', 'training_allowed': True, 'issues': [], 'metrics': {}}})

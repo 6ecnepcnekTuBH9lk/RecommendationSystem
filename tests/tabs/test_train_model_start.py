@@ -81,6 +81,7 @@ class _FakeProcess:
         self.readyReadStandardOutput = _Signal()
         self.finished = _Signal()
         self.errorOccurred = _Signal()
+        self.finished.connect(lambda *_: setattr(self, 'started', False))
         self.output = b""
         self.written = []
         self.__class__.instances.append(self)
@@ -101,7 +102,7 @@ class _FakeProcess:
         self.started = True
 
     def state(self):
-        return self.ProcessState.NotRunning
+        return self.ProcessState.Running if self.started else self.ProcessState.NotRunning
 
     def readAllStandardOutput(self):
         data, self.output = self.output, b""
@@ -109,6 +110,7 @@ class _FakeProcess:
 
     def write(self, data):
         self.written.append(data)
+        return len(data)
 
     def deleteLater(self):
         self.deleted = True
@@ -299,8 +301,8 @@ def _preflight_event(level):
         "stage": "preflight", "batch_id": "a" * 32, "error_code": "QUALITY_BLOCK" if level == "BLOCK" else None,
         "dataset": {"users": 2, "items": 3}, "interaction_window": {"since": "2026-01-01", "until": "2026-01-02"},
         "quality": {"level": level, "training_allowed": level != "BLOCK", "metrics": {"malformed_rate": 0.2},
-                    "issues": [{"message": "Исключены действия без товара", "code": "MAPPED_ACTION_WITHOUT_PRODUCT",
-                                "count": 1, "rate": 0.2, "breakdown": {"ProsmotrProdukta": 1}}]},
+                    "issues": [] if level == 'PASS' else [{"message": "Исключены действия без товара", "code": "MAPPED_ACTION_WITHOUT_PRODUCT",
+                                "level": level, "count": 1, "rate": 0.2, "breakdown": {"ProsmotrProdukta": 1}}]},
     }
 
 
@@ -314,37 +316,36 @@ def _send_event(window, event):
 def test_preflight_pass_block_diagnostics_without_dialog(monkeypatch, level):
     window = _window_with_training_values()
     errors = _patch_training_ui(monkeypatch)
-    dialog = Mock(side_effect=AssertionError("Only WARN asks for confirmation"))
-    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", dialog)
+    dialog = Mock(side_effect=AssertionError("No additional confirmation"))
+    monkeypatch.setattr(train_model_tab.QMessageBox, "exec", dialog)
     train_model_tab.start_training_process(window)
     event = _preflight_event(level)
     _send_event(window, event)
     assert window._train_preflight_result == event
     assert window.train_proc.written == []
     assert bool(errors) == (level == "BLOCK")
-    assert any('действий без товара' in message for message in window.train_log.messages)
+    assert any('действий без товара' in message for message in window.train_log.messages) == (level == 'BLOCK')
     assert not any('malformed_rate' in message or 'ProsmotrProdukta' in message for message in window.train_log.messages)
     dialog.assert_not_called()
 
 
-@pytest.mark.parametrize("accepted", [True, False])
-def test_warn_requires_explicit_confirmation(monkeypatch, accepted):
+def test_warn_automatically_continues_confirmed_launch(monkeypatch):
     window = _window_with_training_values()
     _patch_training_ui(monkeypatch)
-    dialog = Mock(return_value=accepted)
-    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", dialog)
+    dialog = Mock(side_effect=AssertionError('Additional modal'))
+    monkeypatch.setattr(train_model_tab.QMessageBox, "exec", dialog)
     train_model_tab.start_training_process(window)
     _send_event(window, _preflight_event("WARN"))
-    assert window.train_proc.written == [b"YES\n" if accepted else b"NO\n"]
-    assert 'действий без товара' in dialog.call_args.args[1]
-    assert 'MAPPED_ACTION_WITHOUT_PRODUCT' not in dialog.call_args.args[1]
+    assert window.train_proc.written == [b"YES\n"]
+    dialog.assert_not_called()
+    assert any('Предупреждения приняты автоматически' in message for message in window.train_log.messages)
     assert window._training_active
 
 
 def test_output_handles_split_json_and_utf8(monkeypatch):
     window = _window_with_training_values()
     _patch_training_ui(monkeypatch)
-    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", lambda *args: False)
+    monkeypatch.setattr(train_model_tab.QMessageBox, "exec", lambda *args: pytest.fail('Additional modal'))
     train_model_tab.start_training_process(window)
     from scripts.mindbox_production_train import EVENT_PREFIX
     event = _preflight_event("WARN")
@@ -354,7 +355,7 @@ def test_output_handles_split_json_and_utf8(monkeypatch):
         window.train_proc.output = bytes([byte])
         window.train_proc.readyReadStandardOutput.emit()
     assert window._train_preflight_result == event
-    assert window.train_proc.written == [b"NO\n"]
+    assert window.train_proc.written == [b"YES\n"]
     assert window._train_output_buffer == b""
 
 
@@ -413,19 +414,17 @@ def test_warn_declined_reports_cancellation(monkeypatch):
 def test_process_exit_while_warn_dialog_open_never_sends_confirmation(monkeypatch):
     window = _window_with_training_values()
     _patch_training_ui(monkeypatch)
-    def process_died(*args):
-        window.train_proc.finished.emit(1, _FakeProcess.ExitStatus.CrashExit)
-        return True
-    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", process_died)
     train_model_tab.start_training_process(window)
+    window.train_proc.started = False
+    window.train_proc.finished.emit(1, _FakeProcess.ExitStatus.CrashExit)
     _send_event(window, _preflight_event("WARN"))
     assert window.train_proc.written == []
     assert window.start_train.enabled and not window._training_active
 
 
-@pytest.mark.parametrize("level,accept", [("PASS", True), ("WARN", True), ("WARN", False), ("BLOCK", True)])
-def test_real_qprocess_canonical_training(tmp_path, monkeypatch, level, accept):
-    """Real Qt signals/stdin and real training, with all writes in the test directory."""
+@pytest.mark.parametrize("level,cancel", [("PASS", False), ("WARN", False), ("WARN", True), ("BLOCK", False)])
+def test_real_qprocess_canonical_handshake_with_mock_trainer(tmp_path, monkeypatch, level, cancel):
+    """Real Qt signals/stdin; mock trainer, all artifact writes confined to tmp_path."""
     from datetime import datetime, timedelta, timezone
     from PyQt6.QtCore import QEventLoop, QTimer
     from PyQt6.QtWidgets import QApplication, QWidget
@@ -471,6 +470,16 @@ def test_real_qprocess_canonical_training(tmp_path, monkeypatch, level, accept):
         "from Application.model import BPRMF as core\n"
         "def forbidden(*args, **kwargs):\n    raise AssertionError('GUI must not use CSV preparation')\n"
         "core.prepare_training_data_from_csv = forbidden\n"
+        "import torch\nfrom Application.model.training_metrics import TrainingRunMetrics, TrainingEpochMetrics\n"
+        "def fake_train(cfg, data, device, *, epoch_observer=None):\n"
+        "    features, matrix = core._build_item_feature_matrix(cfg.data_dir, data.mappings, cfg)\n"
+        "    model = core.BPRMF(len(data.mappings.idx2user), len(data.mappings.idx2item), cfg.embedding_dim,\n"
+        "        num_item_feats=len(features), item_feat_mat=torch.tensor(matrix, dtype=torch.long, device=device),\n"
+        "        feature_dropout=cfg.feature_dropout, feature_scale=cfg.feature_scale, feature_norm=cfg.feature_norm).to(device)\n"
+        "    epoch = TrainingEpochMetrics(1, .1, 0., 0.)\n"
+        "    if epoch_observer: epoch_observer(model, epoch)\n"
+        "    return model, data.splits, TrainingRunMetrics(1, 1, 0., 0., 'ndcg', False, (epoch,))\n"
+        "core.train_prepared_data_with_metrics = fake_train\n"
         f"production.MODEL_ROOT = Path({str(model_root)!r})\n"
         f"production.REPORT_ROOT = Path({str(tmp_path / 'reports')!r})\n"
         "from scripts.mindbox_production_train import main\nraise SystemExit(main())\n", encoding="utf-8")
@@ -480,7 +489,12 @@ def test_real_qprocess_canonical_training(tmp_path, monkeypatch, level, accept):
     monkeypatch.setattr(train_model_tab, "schedule_status_reset", lambda *args: None)
     monkeypatch.setattr(train_model_tab, "set_status_error", lambda w, message: errors.append(message))
     monkeypatch.setattr(train_model_tab, "set_status_ok", lambda w, message: successes.append(message))
-    monkeypatch.setattr(train_model_tab, "_confirm_quality_warning", lambda *args: accept)
+    handler = train_model_tab._handle_train_line
+    def handle(window,line):
+        if cancel and line.startswith('TRAINING_EVENT ') and json.loads(line[len('TRAINING_EVENT '):]).get('stage')=='preflight':
+            train_model_tab.cancel_training(window)
+        return handler(window,line)
+    monkeypatch.setattr(train_model_tab, '_handle_train_line', handle)
     window = QWidget()
     for name, value in vars(_window_with_training_values()).items():
         setattr(window, name, value)
@@ -508,11 +522,11 @@ def test_real_qprocess_canonical_training(tmp_path, monkeypatch, level, accept):
         assert not window._training_active, window.train_log.messages
         assert ticks and window.start_train.enabled == (level != 'BLOCK')
         assert window._train_preflight_result["quality"]["level"] == level
-        if level == "BLOCK" or not accept:
+        if level == "BLOCK" or cancel:
             assert (model_root / "current.json").read_bytes() == old_current
             assert window._train_publication_result is None
             assert bool(errors) == (level == "BLOCK")
-            if not accept:
+            if cancel:
                 assert successes == ["Обучение отменено"]
         else:
             assert successes == ["Обучение завершено"] and not errors

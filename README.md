@@ -141,7 +141,13 @@ canonical storage → preflight → preparation → trainer → publication.
 TrainConfig loader, отсутствующие значения берутся из TrainConfig defaults.
 Существующие early stopping и item-feature settings сохраняются.
 Перед стартом требуется подтверждение weights/epochs и новой generation;
-WARN отдельно требует согласия, PASS разрешает обучение, BLOCK запрещает.
+После этого PASS и допустимый WARN продолжаются автоматически; WARN сохраняется
+в журнале, дополнительного модального окна нет. BLOCK запрещает обучение.
+GUI отправляет существующий stdin ACK только активному подтверждённому Production
+run, не после Cancel; publication handshake остаётся отдельным. Standalone CLI
+по-прежнему требует `YES`/`--allow-warn`. UNKNOWN допускается при <=0.1% **и**
+<=10 000 occurrences; INVALID_ID/namespaces/invalid prepared input остаются BLOCK.
+Конфликты — WARN только при подтверждённом first-in-period snapshot contract.
 Analysis filters и legacy interaction CSV в этот маршрут не входят.
 Publication lock, staging, disk validation, атомарное переключение
 `model/current.json`, readback и rollback сохранены. Production не использует

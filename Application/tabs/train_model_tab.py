@@ -2,6 +2,7 @@ from Application.paths import ICONS_DIR, INPUT_DATA_DIR, USER_SETTINGS_DIR, PROJ
 import os
 import sys
 import json
+import math
 import time
 import tempfile
 import uuid
@@ -272,6 +273,8 @@ def _receive_data_counts(aboba, event, state='ready', log=None):
     if not hasattr(aboba, '_training_ready'):
         return
     source = event.get('dataset', event)
+    if not isinstance(source, dict):
+        return
     names = {'interactions': ('training_events', 'bpr_events'), 'users': ('training_users', 'users'),
              'items': ('training_items', 'items'), 'pairs': ('training_pairs', 'train_pairs')}
     counts = {}
@@ -360,6 +363,7 @@ def start_training_process(aboba):
         return
     aboba._training_active = False
     aboba._train_config_path = None
+    aboba._production_confirmed = False
     if not refresh_training_state(aboba):
         set_status_error(aboba, 'Запуск недоступен: проверьте данные и параметры')
         return
@@ -374,6 +378,8 @@ def start_training_process(aboba):
         return
     aboba._training_active = True
     aboba._run_is_research = research
+    aboba._production_confirmed = not research
+    aboba._train_preflight_handled = False
     aboba._cancel_requested = False
     aboba._publishing = False
     aboba._train_publication_result = None
@@ -461,7 +467,11 @@ def cancel_training(aboba):
         set_status_error(aboba, 'Не удалось отправить отмену; повторите попытку')
         return
     aboba._cancel_requested = True
-    aboba.train_proc.write(b'NO\n')
+    try:
+        aboba.train_proc.write(b'NO\n')
+    except (RuntimeError, OSError):
+        # The cancel file and existing kill timer still stop a broken stdin pipe.
+        aboba.train_log.append('Не удалось отправить команду отмены; ожидаем остановки процесса.')
     refresh_training_state(aboba, metadata=False)
     _set_training_phase(aboba, 'epoch')
     aboba.train_log.append('Отмена запрошена. Ожидаем завершения процесса…')
@@ -621,6 +631,9 @@ def _quality_issue_text(issue):
     if code == 'UNSUPPORTED_PRODUCT_NAMESPACE':
         return f'Неподдерживаемые источники идентификаторов товаров: {count}. Обучение заблокировано.'
     if code == 'CONFLICTING_ORDER_SNAPSHOTS':
+        if issue.get('level') == 'WARN':
+            return (f'Обнаружены конфликтующие снимки заказов: {count}. '
+                    'Использован первый допустимый снимок; повторный учёт покупок исключён.')
         return f'Обнаружены противоречивые данные заказов: {count}. Обучение заблокировано.'
     if code == 'INVALID_PREPARED_DATA':
         return 'Подготовленные данные не подходят для обучения. Обучение заблокировано.'
@@ -629,29 +642,36 @@ def _quality_issue_text(issue):
 
 def _quality_presentation(quality):
     """GUI-only summary; the technical report remains intact in the process event."""
-    quality = quality or {}
+    quality = quality if isinstance(quality, dict) else {}
     status = 'Проверка данных: ' + {'PASS': 'успешно', 'WARN': 'предупреждение',
                                   'BLOCK': 'заблокировано'}.get(quality.get('level'), 'ошибка')
     lines = ['• ' + _quality_issue_text(issue) for issue in quality.get('issues', [])]
     text = ('Проверка данных выявила предупреждения.\n\n' + '\n'.join(lines)
-            + '\n\nОбучение можно продолжить.\nПодробная диагностика доступна в журнале.'
-              '\n\nПродолжить обучение?')
+            + '\n\nПредупреждения приняты автоматически в рамках подтверждённого запуска рабочей модели.')
     return status, lines, text
 
 
-def _confirm_quality_warning(aboba, text):
-    box = QMessageBox(aboba)
-    box.setWindowTitle('Предупреждение перед обучением')
-    box.setWindowIcon(QIcon(str(ICONS_DIR / 'app_icon.png')))
-    box.setIconPixmap(QPixmap(str(ICONS_DIR / 'question.png')).scaled(
-        48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-    box.setText(text)
-    yes_button = box.addButton('Да', QMessageBox.ButtonRole.AcceptRole)
-    no_button = box.addButton('Нет', QMessageBox.ButtonRole.RejectRole)
-    box.setDefaultButton(no_button)
-    box.setEscapeButton(no_button)
-    box.exec()
-    return box.clickedButton() is yes_button
+def _valid_preflight_quality(quality):
+    if (not isinstance(quality, dict) or quality.get('level') not in {'PASS', 'WARN', 'BLOCK'}
+            or type(quality.get('training_allowed')) is not bool
+            or quality['training_allowed'] != (quality['level'] != 'BLOCK')
+            or not isinstance(quality.get('metrics'), dict) or not isinstance(quality.get('issues'), list)):
+        return False
+    issues = quality['issues']
+    if any(not isinstance(issue, dict) or issue.get('level') not in {'WARN', 'BLOCK'}
+           or not isinstance(issue.get('code'), str) or not issue['code']
+           or type(issue.get('count')) is not int or issue['count'] < 0 for issue in issues):
+        return False
+    if any(issue.get('rate') is not None and (
+            type(issue['rate']) not in (int, float) or not math.isfinite(issue['rate'])
+            or not 0 <= issue['rate'] <= 1) for issue in issues):
+        return False
+    if any(value is not None and (type(value) not in (bool, int, float)
+            or not math.isfinite(value) or value < 0) for value in quality['metrics'].values()):
+        return False
+    return (not issues if quality['level'] == 'PASS' else
+            bool(issues) and all(issue['level'] == 'WARN' for issue in issues) if quality['level'] == 'WARN' else
+            any(issue['level'] == 'BLOCK' for issue in issues))
 
 
 def _handle_train_line(aboba, line):
@@ -674,6 +694,10 @@ def _handle_train_line(aboba, line):
         stage = event['stage']
     except (ValueError, KeyError, TypeError):
         aboba.train_log.append('Не удалось прочитать диагностику процесса обучения.')
+        if (getattr(aboba, '_production_confirmed', False) and getattr(aboba, '_training_active', False)
+                and not getattr(aboba, '_train_preflight_handled', False)):
+            aboba._train_preflight_handled = True
+            cancel_training(aboba)
         return
     if stage == 'publication_ready':
         if getattr(aboba, '_cancel_requested', False):
@@ -736,21 +760,43 @@ def _handle_train_line(aboba, line):
         return
     if stage != 'preflight':
         return
+    if getattr(aboba, '_train_preflight_handled', False):
+        return
+    aboba._train_preflight_handled = True
     aboba._train_preflight_result = event
     _receive_data_counts(aboba, event, log='available')
     quality = event.get('quality')
+    valid = _valid_preflight_quality(quality)
+    if not valid:
+        quality = None
     status, lines, warning_text = _quality_presentation(quality)
     aboba.train_log.append('\n'.join([status, *lines]))
-    if event.get('error_code') or not quality or not quality['training_allowed']:
+    if event.get('error_code') is not None or not valid or not quality['training_allowed']:
         aboba._preflight_block = _block_key(aboba)
         aboba._preflight_block_reason = 'Проверка данных заблокировала обучение; обновите данные или параметры'
         set_status_error(aboba, 'Проверка данных заблокировала обучение')
+        if not valid and getattr(aboba, '_training_active', False):
+            cancel_training(aboba)
     elif quality['level'] == 'WARN':
-        process = aboba.train_proc
-        accepted = _confirm_quality_warning(aboba, warning_text)
-        if aboba.train_proc is not process or not getattr(aboba, '_training_active', False):
+        process = getattr(aboba, 'train_proc', None)
+        if (process is None or not getattr(aboba, '_training_active', False)
+                or not getattr(aboba, '_production_confirmed', False)
+                or getattr(aboba, '_run_is_research', False) or getattr(aboba, '_cancel_requested', False)
+                or event.get('cancelled') or process.state() != QProcess.ProcessState.Running):
             return
-        process.write(b'YES\n' if accepted and not aboba._cancel_requested else b'NO\n')
+        try:
+            if process.write(b'YES\n') != len(b'YES\n'):
+                raise OSError('Quality acknowledgement could not be queued')
+        except (RuntimeError, OSError):
+            aboba.train_log.append('Не удалось подтвердить продолжение обучения; процесс будет остановлен.')
+            cancel_training(aboba)
+            try:
+                process.closeWriteChannel()
+            except RuntimeError:
+                pass
+            set_status_error(aboba, 'Не удалось подтвердить продолжение обучения')
+            return
+        aboba.train_log.append('Предупреждения приняты автоматически в рамках подтверждённого запуска рабочей модели.')
     else:
         _set_training_phase(aboba, 'preflight')
 

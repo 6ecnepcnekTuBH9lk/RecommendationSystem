@@ -106,12 +106,12 @@ def _current(model_dir):
     return data["generation"], content
 
 
-def _prepare(manifest, raw_root, catalog, cfg):
+def _prepare(manifest, raw_root, catalog, cfg, *, read_only=False):
     if catalog.name != "nomenclature.csv" or catalog.parent != Path(cfg.data_dir).resolve():
         raise _Failure("PREPARATION_FAILED")
     batch = load_chunked_training_batch(manifest, raw_root=raw_root, require_complete=True)
     prepared = prepare_training_data_from_chunked_batch(batch, raw_root=raw_root, catalog_path=catalog,
-                                                       train_config=cfg, diagnose=True)
+                                                       train_config=cfg, diagnose=True, read_only=read_only)
     d = prepared.diagnostics
     quality = evaluate_training_quality(prepared.prepared_data, TrainingQualityDiagnostics(
         actions_view=d.actions_view, actions_favorite=d.actions_favorite, malformed_mapped_actions=d.malformed_actions,
@@ -121,10 +121,15 @@ def _prepare(manifest, raw_root, catalog, cfg):
         orders_duplicate_conflicting=d.orders_duplicate_conflicting,
         product_resolution_attempts=d.resolution.total.interactions_total,
         unknown_candidate_products=d.resolution.total.unknown_candidate,
-        invalid_product_ids=d.resolution.total.invalid_id))
+        invalid_product_ids=d.resolution.total.invalid_id,
+        first_snapshot_policy_verified=d.order_snapshot_policy == "first_in_period_source_order"))
     result = ProductionTrainingResult(batch_id=batch.batch_id, quality_report=quality,
         dataset={**dict(quality.metrics), "complete": prepared.complete, "orders_raw": d.orders_raw,
-                 "orders_unique": d.orders_unique, "orders_duplicate_identical": d.orders_duplicate_identical}, interaction_window={
+                 "orders_unique": d.orders_unique, "orders_duplicate_identical": d.orders_duplicate_identical,
+                 "transport_complete": batch.transport_complete, "order_snapshot_policy": d.order_snapshot_policy,
+                 "orders_in_period": d.orders_in_period,
+                 "excluded_outside_period": {key: getattr(d, key) for key in (
+                     "actions_before_start", "actions_at_or_after_end", "orders_before_start", "orders_at_or_after_end")}}, interaction_window={
             "since": batch.window.interaction_since.isoformat(), "until": batch.window.interaction_until.isoformat()})
     return prepared.prepared_data, result
 
@@ -133,7 +138,8 @@ def preflight_production_training(training_manifest, *, raw_root, catalog_path, 
     """Read-only preparation/quality; no lock, model writes, report or training."""
     try:
         with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
-            _, result = _prepare(Path(training_manifest).resolve(), Path(raw_root).resolve(), Path(catalog_path).resolve(), cfg)
+            _, result = _prepare(Path(training_manifest).resolve(), Path(raw_root).resolve(), Path(catalog_path).resolve(), cfg,
+                                 read_only=True)
         if progress:
             progress(result)
         return replace(result, error_code=None if result.quality_report.training_allowed else "QUALITY_BLOCK")

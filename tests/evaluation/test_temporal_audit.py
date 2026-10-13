@@ -1,4 +1,5 @@
 from dataclasses import replace
+from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -185,3 +186,222 @@ def test_cli_errors_do_not_expose_raw_exception_values(tmp_path, monkeypatch, ca
     monkeypatch.setattr(cli, "load_canonical_events", fail)
     assert cli.main(["--output-dir", str(tmp_path / "report")]) == 1
     assert "PRIVATE_CUSTOMER" not in capsys.readouterr().err
+
+
+def replace_records(canonical, name, records):
+    directory = canonical[2][name]
+    atomic_json(directory / f"{name}_part_001.json", {EXPORT_ROOTS[name]: records})
+
+
+def first_order(canonical):
+    path = canonical[2]["orders"] / "orders_part_001.json"
+    return deepcopy(json.loads(path.read_text(encoding="utf-8"))["orders"][0])
+
+
+@pytest.mark.parametrize("sequence, identical, conflicting", [
+    ((0,), 0, 0), ((0, 0, 0), 2, 0), ((0, 1), 0, 1),
+    ((0, 1, 0), 1, 1), ((0, 1, 2), 0, 2), ((2, 1, 0), 0, 2),
+])
+def test_research_first_snapshot_no_combining_and_preserved_diagnostics(canonical, sequence, identical, conflicting):
+    from Application.interactions import InteractionType
+    variants = [first_order(canonical) for _ in range(3)]
+    for index, raw in enumerate(variants):
+        raw["lines"][0]["quantity"] = index + 1
+    replace_records(canonical, "orders", [variants[i] for i in sequence])
+    events, source = audit.load_canonical_events(*canonical[:2], read_only=True)
+    purchases = [e for e in events if e.interaction.interaction_type is InteractionType.PURCHASE]
+    assert len(purchases) == 1
+    assert purchases[0].interaction.quantity == sequence[0] + 1
+    d = source["ingestion"]
+    assert d["orders_selected"] == 1
+    assert d["orders_duplicate_identical"] == identical
+    assert d["orders_duplicate_conflicting"] == conflicting
+    repeated, repeated_source = audit.load_canonical_events(*canonical[:2], read_only=True)
+    assert repeated == events
+    assert repeated_source == source
+    # Statistics and production diagnose share the exact same deduplicator.
+    from Application.mindbox.order_dedup import OrderSnapshots
+    snapshots = OrderSnapshots()
+    assert [i for i in sequence if snapshots.accept(variants[i], diagnose=True)] == [sequence[0]]
+    assert (snapshots.identical, snapshots.conflicting) == (identical, conflicting)
+
+
+def test_first_snapshot_uses_numeric_part_order_not_timestamp(canonical):
+    root, catalog, directories = canonical
+    early = first_order(canonical)
+    later = deepcopy(early)
+    early["firstAction"]["dateTimeUtc"] = "2026-02-01T00:00:00Z"
+    later["firstAction"]["dateTimeUtc"] = "2026-04-01T00:00:00Z"
+    later["lines"][0]["quantity"] = 7
+    replace_records(canonical, "orders", [later])
+    atomic_json(directories["orders"] / "orders_part_002.json", {"orders": [early]})
+    metadata = json.loads((root / "canonical/catalog.json").read_text(encoding="utf-8"))
+    metadata["manual_interactions"]["orders"]["parts"] = 2
+    atomic_json(root / "canonical/catalog.json", metadata)
+    events, source = audit.load_canonical_events(root, catalog, read_only=True)
+    purchase = next(e for e in events if e.interaction.quantity is not None)
+    assert purchase.interaction.quantity == 7
+    assert purchase.interaction.event_datetime_utc.month == 4
+    assert source["ingestion"]["orders_duplicate_conflicting"] == 1
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_malformed_first_or_conflicting_order_still_raises(canonical, duplicate):
+    from Application.mindbox.adapters._common import AdapterError
+    valid = first_order(canonical)
+    malformed = deepcopy(valid)
+    del malformed["lines"][0]["quantity"]
+    replace_records(canonical, "orders", [valid, malformed] if duplicate else [malformed])
+    with pytest.raises(AdapterError):
+        audit.load_canonical_events(*canonical[:2], read_only=True)
+
+
+@pytest.mark.parametrize("stamp, included", [
+    ("2021-12-31T23:59:59Z", False), ("2022-01-01T00:00:00Z", True),
+    ("2023-06-15T12:00:00Z", True), ("2025-12-31T23:59:59Z", True),
+    ("2026-01-01T00:00:00Z", False), ("2022-01-01T03:00:00+03:00", True),
+    ("2026-01-01T02:59:59+03:00", True), ("2026-01-01T03:00:00+03:00", False),
+])
+@pytest.mark.parametrize("name", ["actions", "orders"])
+def test_dynamic_dataset_bounds_use_actual_interaction_timestamp(canonical, stamp, included, name):
+    root, catalog, directories = canonical
+    metadata = json.loads((root / "canonical/catalog.json").read_text(encoding="utf-8"))
+    for entry in [metadata["manual_interactions"], metadata["manual_interactions"]["actions"],
+                  metadata["manual_interactions"]["orders"], metadata["customer_merges"]]:
+        entry.update(since="2022-01-01T00:00:00+00:00", until="2026-01-01T00:00:00+00:00")
+    atomic_json(root / "canonical/catalog.json", metadata)
+    replace_records(canonical, "actions", [])
+    replace_records(canonical, "orders", [])
+    if name == "actions":
+        raw = {"ids": {"mindboxId": 1}, "customer": {"ids": {"mindboxId": 400}},
+               "dateTimeUtc": stamp, "creationDateTimeUtc": "2019-01-01T00:00:00Z",
+               "actionTemplate": {"ids": {"systemName": "ProsmotrProdukta"}},
+               "products": [{"ids": {"offline1C": "000002size"}}]}
+    else:
+        # Use a valid synthetic order; auxiliary snapshot/creation dates must not filter PURCHASE.
+        raw = {"ids": {"mindboxId": 42}, "customer": {"ids": {"mindboxId": 400}},
+               "firstAction": {"dateTimeUtc": stamp, "channel": {"ids": {"externalId": "test"}, "name": "test"}},
+               "creationDateTimeUtc": "2019-01-01T00:00:00Z", "dateTimeUtc": "2027-01-01T00:00:00Z",
+               "lines": [{"id": "line", "number": 1, "quantity": 1, "priceOfLine": 10,
+                          "product": {"ids": {"offline1C": "000002size"}}, "status": {"ids": {"externalId": "CP"}}}]}
+    replace_records(canonical, name, [raw])
+    events, source = audit.load_canonical_events(root, catalog, read_only=True)
+    assert len(events) == int(included)
+    if events:
+        assert events[0].interaction.event_datetime_utc == datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+    excluded = source["ingestion"]["excluded_outside_period"][name]
+    assert sum(excluded.values()) == int(not included)
+
+
+def test_filter_precedes_dedup_and_handles_one_year_dataset(canonical):
+    root, catalog, _ = canonical
+    metadata = json.loads((root / "canonical/catalog.json").read_text(encoding="utf-8"))
+    for entry in [metadata["manual_interactions"], metadata["manual_interactions"]["actions"],
+                  metadata["manual_interactions"]["orders"], metadata["customer_merges"]]:
+        entry.update(since="2025-01-01T00:00:00+00:00", until="2026-01-01T00:00:00+00:00")
+    atomic_json(root / "canonical/catalog.json", metadata)
+    orders = [first_order(canonical) for _ in range(3)]
+    for raw, stamp, quantity in zip(orders, ["2024-12-31T23:59:59Z", "2025-07-01T00:00:00Z", "2026-01-01T00:00:00Z"], [9, 2, 8]):
+        raw["firstAction"]["dateTimeUtc"] = stamp
+        raw["lines"][0]["quantity"] = quantity
+    replace_records(canonical, "actions", [])
+    replace_records(canonical, "orders", orders)
+    events, source = audit.load_canonical_events(root, catalog, read_only=True)
+    assert len(events) == 1
+    assert events[0].interaction.quantity == 2
+    assert source["ingestion"]["orders_raw"] == 3
+    assert source["ingestion"]["orders_in_period"] == 1
+    assert source["ingestion"]["excluded_outside_period"]["orders"] == {"before_start": 1, "at_or_after_end": 1}
+
+
+@pytest.mark.parametrize("sequence", [(0, 1, 2), (2, 1, 0)])
+def test_conflicts_never_move_future_purchase_into_past(canonical, sequence):
+    from Application.evaluation.temporal import TemporalConfig, build_temporal_protocol
+    orders = [first_order(canonical) for _ in range(3)]
+    for raw, stamp in zip(orders, ["2026-01-15T00:00:00Z", "2026-02-15T00:00:00Z", "2026-03-15T00:00:00Z"]):
+        raw["firstAction"]["dateTimeUtc"] = stamp
+    replace_records(canonical, "orders", [orders[i] for i in sequence])
+    events, source = audit.load_canonical_events(*canonical[:2], read_only=True)
+    config = TemporalConfig(datetime(2026, 2, 1, tzinfo=timezone.utc), datetime(2026, 3, 1, tzinfo=timezone.utc),
+                            datetime(2026, 4, 1, tzinfo=timezone.utc), min_history_events=1)
+    protocol = build_temporal_protocol(events, config)
+    selected = next(e for e in events if e.interaction.quantity is not None)
+    assert selected.interaction.event_datetime_utc.month == sequence[0] + 1
+    for snap in [protocol.validation, protocol.test]:
+        assert all(e.interaction.event_datetime_utc < snap.cutoff for e in snap.history)
+        assert all(snap.cutoff <= c.target_timestamp < snap.future_end for c in snap.cases)
+        assert (selected in snap.history) == (selected.interaction.event_datetime_utc < snap.cutoff)
+    assert source["ingestion"]["orders_duplicate_conflicting"] == 2
+
+
+def test_unlocked_read_only_preflight_never_touches_coordination_file(canonical, monkeypatch):
+    root, catalog, _ = canonical
+    lock = root / "canonical/.writer.lock"
+    lock.write_bytes(b"untouched")
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+    monkeypatch.setattr(audit, "storage_lock", lambda *_: pytest.fail("Read-only preflight acquired writer lock"))
+    audit.load_canonical_events(root, catalog, read_only=True)
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+
+
+def test_read_only_input_drift_is_rejected(canonical):
+    root, catalog, _ = canonical
+    def changed(_):
+        catalog.write_text(catalog.read_text(encoding="utf-8") + "000003\n", encoding="utf-8")
+    with pytest.raises(audit.TemporalAuditError, match="changed"):
+        audit.load_canonical_events(root, catalog, progress=changed, read_only=True)
+
+
+def test_preflight_counts_exact_existing_bpr_aggregation_without_arrays(event, config):
+    from Application.evaluation.bpr import prepare_bpr_snapshot
+    from Application.evaluation.temporal import build_temporal_protocol
+    from Application.model.bpr_preparation import BprWeightConfig
+    from scripts.preflight_research import prepare_report
+    events = [event("PRIVATE_USER", "A", 1), event("PRIVATE_USER", "A", 2),
+              event("PRIVATE_OTHER", "B", 1), event("PRIVATE_OTHER", "B", 2),
+              event("PRIVATE_USER", "B", 12), event("PRIVATE_USER", "B", 22)]
+    expected = build_temporal_protocol(events, config)
+    result = prepare_report(events, source(), config, lambda _: None)
+    prepared = prepare_bpr_snapshot(expected.validation, BprWeightConfig(view_weight=0.5))
+    assert result["train"]["positive_training_pairs"] == len(prepared.training.splits.train_pairs) == 2
+    assert result["future_windows"]["validation"]["interactions"] == 1
+    assert not result["bpr_arrays_materialized"]
+    assert events == []
+    assert not any(result["snapshots"]["validation"]["invariants"].values())
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_preflight_rejects_outside_events_and_handles_empty_stream(event, config):
+    from scripts.preflight_research import prepare_report
+    with pytest.raises(ValueError, match="outside"):
+        prepare_report([event("u", "A", -1)], source(), config, lambda _: None)
+    result = prepare_report([], source(), config, lambda _: None)
+    assert result["history"]["events"] == 0
+    assert result["train"]["positive_training_pairs"] == 0
+
+
+def test_preflight_cli_cannot_train_publish_or_change_working_inputs(canonical, tmp_path, monkeypatch):
+    from Application.evaluation.temporal import TemporalConfig
+    from Application.model import BPRMF as core, mindbox_production_training as production
+    from scripts import preflight_research as preflight
+    root, catalog, _ = canonical
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Preflight cannot train or publish")
+    monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
+    monkeypatch.setattr(core, "_save_artifacts", forbidden)
+    monkeypatch.setattr(production, "train_and_publish_production_model", forbidden)
+    monkeypatch.setattr(preflight, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(preflight, "benchmark_config", lambda: TemporalConfig(
+        datetime(2026, 4, 1, tzinfo=timezone.utc), datetime(2026, 5, 1, tzinfo=timezone.utc),
+        datetime(2026, 6, 1, tzinfo=timezone.utc), min_history_events=1))
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+    output = tmp_path / "diagnostics/preflight"
+    assert preflight.main(["--raw-root", str(root), "--catalog", str(catalog), "--output-dir", str(output)]) == 0
+    result = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+    assert result["protected_files_unchanged"]
+    assert not result["model_training"] and not result["model_scoring"] and not result["model_publication"]
+    assert result["train"]["positive_training_pairs"] == 2
+    assert result["production_policy_projection"]["status"] == "NOT VERIFIED"
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+    with pytest.raises(SystemExit):
+        preflight.main(["--output-dir", str(tmp_path / "model")])

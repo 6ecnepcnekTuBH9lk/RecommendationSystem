@@ -1,6 +1,7 @@
 """Read-only canonical temporal dataset audit; no model imports or training."""
 
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ import numpy as np
 
 from Application.interactions import InteractionBuilder, InteractionBuildError, InteractionType, classify_action_system_name
 from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
+from Application.mindbox.adapters._common import timestamp
 from Application.mindbox.canonical_storage import catalog, current_batch, effective_entries, storage_lock
 from Application.mindbox.identity import CustomerIdResolver
 from Application.mindbox.order_dedup import OrderSnapshots
@@ -21,16 +23,17 @@ class TemporalAuditError(ValueError):
     """Safe audit failure, without raw records or personal identifiers."""
 
 
-def load_canonical_events(raw_root, catalog_path, progress=None):
+def load_canonical_events(raw_root, catalog_path, progress=None, *, read_only=False):
     """Same source selection, action classification and order policy as production.
 
     Retain resolved domain events instead of reducing them to BPR weighted pairs.
-    Diagnose malformed mapped actions/unresolved products; fail on conflicting orders.
-    The existing storage lock only touches its coordination file, never source data.
+    Use first in-period order snapshots, retaining duplicate/conflict diagnostics.
+    Filter the interaction timestamp by the selected batch's [since, until) window.
+    read_only avoids even coordination-file writes; input drift still fails closed.
     """
     root = Path(raw_root).resolve()
     events = []
-    with storage_lock(root):
+    with nullcontext() if read_only else storage_lock(root):
         metadata = catalog(root)
         batch = current_batch(root)
         source_files = [p for c in batch.components
@@ -49,6 +52,18 @@ def load_canonical_events(raw_root, catalog_path, progress=None):
         builder = InteractionBuilder(batch.selection.interaction_rules())
         products = ProductResolver(load_catalog(Path(catalog_path)))
         orders = OrderSnapshots()
+        raw_counts = Counter()
+        excluded = {name: Counter() for name in ("actions", "orders")}
+        since, until = batch.window.interaction_since, batch.window.interaction_until
+
+        def in_window(stamp, name):
+            if stamp < since:
+                excluded[name]["before_start"] += 1
+                return False
+            if stamp >= until:
+                excluded[name]["at_or_after_end"] += 1
+                return False
+            return True
 
         def resolved(interaction):
             value = products.resolve_interaction(interaction, strict=False)
@@ -62,28 +77,34 @@ def load_canonical_events(raw_root, catalog_path, progress=None):
                     continue
                 for raw in iter_export(name, input_dir=root / component.export.relative_directory):
                     raw_count += 1
+                    raw_counts[name] += 1
                     if name == "actions":
                         system = adapt_action_system_name(raw)
                         if classify_action_system_name(system, builder.rules) is None:
                             builder.record_unmapped_action(system)
                         else:
                             action = adapt_action(raw, customers, product_namespaces=batch.selection.action_product_namespaces)
-                            try:
-                                interactions = builder.from_action(action)
-                            except InteractionBuildError:
-                                interactions = ()
+                            interactions = ()
+                            if in_window(action.event_datetime_utc, name):
+                                try:
+                                    interactions = builder.from_action(action)
+                                except InteractionBuildError:
+                                    interactions = ()
                             for interaction in interactions:
                                 resolved(interaction)
-                    elif orders.accept(raw):
-                        for line in adapt_order(raw, customers, product_namespaces=batch.selection.order_product_namespaces):
-                            interaction = builder.from_order_line(line)
-                            if interaction is not None:
-                                resolved(interaction)
+                    elif in_window(timestamp(raw, "firstAction.dateTimeUtc"), name):
+                        # Validate even discarded changed snapshots; do not hide bad records.
+                        lines = adapt_order(raw, customers, product_namespaces=batch.selection.order_product_namespaces)
+                        if orders.accept(raw, diagnose=True):
+                            for line in lines:
+                                interaction = builder.from_order_line(line)
+                                if interaction is not None:
+                                    resolved(interaction)
                     if progress and raw_count % 100000 == 0:
                         progress(f"{name}: {raw_count} raw records; {len(events)} resolved events")
             if progress:
                 progress(f"{name}: completed {raw_count} raw records; {len(events)} resolved events")
-        if (current_batch(root) != batch or any((p.stat().st_size, p.stat().st_mtime_ns) != state
+        if (catalog(root) != metadata or current_batch(root) != batch or any((p.stat().st_size, p.stat().st_mtime_ns) != state
                                                for p, state in source_state.items())):
             raise TemporalAuditError("Canonical input changed during audit")
         d, resolution = builder.diagnostics, products.diagnostics
@@ -99,9 +120,13 @@ def load_canonical_events(raw_root, catalog_path, progress=None):
             "selected_file_count": len(source_files), "selected_file_bytes": sum(size for size, _ in source_state.values()),
             "selection": asdict(batch.selection),
             "merge_start": merge_component.since.isoformat(), "merge_end": merge_component.until.isoformat(),
-            "ingestion": {"customer_merges": merge_count, "actions_raw": d.actions_total,
+            "ingestion": {"customer_merges": merge_count, "actions_raw": raw_counts["actions"],
                           "unmapped_actions": d.actions_unmapped, "malformed_mapped_actions": d.actions_malformed,
-                          "order_lines": d.order_lines_total, "orders_raw": orders.raw,
+                          "order_lines": d.order_lines_total, "orders_raw": raw_counts["orders"],
+                          "orders_in_period": orders.raw, "orders_selected": len(orders.fingerprints),
+                          "order_snapshot_policy": "first_in_period_source_order",
+                          "excluded_outside_period": {name: {key: excluded[name][key] for key in
+                              ("before_start", "at_or_after_end")} for name in excluded},
                           "orders_unique": len(orders.fingerprints), "orders_duplicate_identical": orders.identical,
                           "orders_duplicate_conflicting": orders.conflicting,
                           "classified_interactions": d.total_interactions,

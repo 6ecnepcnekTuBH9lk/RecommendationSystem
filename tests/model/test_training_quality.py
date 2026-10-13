@@ -119,8 +119,9 @@ def test_invalid_diagnostics_rejected(prepared):
 @pytest.mark.parametrize('count,attempts,level', [
     (0, 0, QualityLevel.PASS), (0, 10000, QualityLevel.PASS),
     (20, 1206884, QualityLevel.WARN), (1, 10000, QualityLevel.WARN),
-    (1, 9999, QualityLevel.BLOCK), (5, 10, QualityLevel.BLOCK),
-    (100, 10000000, QualityLevel.WARN), (101, 10000000, QualityLevel.BLOCK),
+    (1, 1000, QualityLevel.WARN), (1, 999, QualityLevel.BLOCK), (5, 10, QualityLevel.BLOCK),
+    (10000, 10000000, QualityLevel.WARN), (10001, 20000000, QualityLevel.BLOCK),
+    (5224, 8243333, QualityLevel.WARN), (111, 1610992, QualityLevel.WARN),
 ])
 def test_catalog_miss_rate_and_absolute_guard(prepared, count, attempts, level):
     report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
@@ -175,3 +176,36 @@ def test_catalog_loss_does_not_dilute_or_block_productless_action_warning(prepar
     assert report.metrics['malformed_rate'] == 1
     assert report.metrics['unresolved_product_rate'] == 20 / 1206884
     assert {issue.code for issue in report.issues} == {'MAPPED_ACTION_WITHOUT_PRODUCT', 'UNRESOLVED_PRODUCT'}
+
+
+@pytest.mark.parametrize('verified,level', [(False, QualityLevel.BLOCK), (True, QualityLevel.WARN)])
+def test_conflicts_warn_only_for_verified_first_in_period_policy(prepared, verified, level):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        orders_duplicate_conflicting=1553, first_snapshot_policy_verified=verified))
+    assert report.level is level
+    assert report.issues[0].count == 1553
+    assert report.metrics['first_snapshot_policy_verified'] is verified
+
+
+def test_warns_never_override_invalid_identity_or_prepared_data(prepared):
+    diagnostics = TrainingQualityDiagnostics(actions_view=100, malformed_mapped_actions=10,
+        orders_duplicate_conflicting=2, first_snapshot_policy_verified=True,
+        product_resolution_attempts=100000, unresolved_products=2,
+        unknown_candidate_products=1, invalid_product_ids=1)
+    report = evaluate_training_quality(prepared, diagnostics)
+    assert report.level is QualityLevel.BLOCK and not report.training_allowed
+    assert {i.code for i in report.issues if i.level is QualityLevel.WARN} == {
+        'CONFLICTING_ORDER_SNAPSHOTS', 'MAPPED_ACTION_WITHOUT_PRODUCT', 'UNRESOLVED_PRODUCT'}
+    assert any(i.code == 'INVALID_PRODUCT_ID' and i.level is QualityLevel.BLOCK for i in report.issues)
+    prepared.splits.train_weights[0] = float('nan')
+    assert any(i.code == 'INVALID_PREPARED_DATA' for i in evaluate_training_quality(prepared, diagnostics).issues)
+
+
+def test_policy_remains_configurable_and_proof_typed(prepared):
+    diagnostics = TrainingQualityDiagnostics(product_resolution_attempts=2000000,
+        unresolved_products=111, unknown_candidate_products=111, invalid_product_ids=0)
+    assert evaluate_training_quality(prepared, diagnostics).level is QualityLevel.WARN
+    assert evaluate_training_quality(prepared, diagnostics, TrainingQualityConfig(
+        unknown_candidate_max_count=100, unknown_candidate_max_rate=.0001)).level is QualityLevel.BLOCK
+    with pytest.raises(ValueError):
+        TrainingQualityDiagnostics(first_snapshot_policy_verified=1)

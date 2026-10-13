@@ -20,13 +20,36 @@ Actions/Orders, с existing manual precedence и CustomerMerges coverage.
 coverage также сохраняется в JSON; участки вне выбранной continuous range не
 подменяют production-compatible источник. Сохраняются все resolved occurrences.
 Unmapped actions не адаптируются, malformed mapped actions/unresolved products
-учитываются диагностически; конфликтующие Orders блокируют audit.
+учитываются диагностически. Orders используют первый снимок внутри выбранного
+периода в порядке компонентов, числовых part-файлов и записей; одинаковые дубли
+и конфликты сохраняются в диагностике, позиции снимков не объединяются.
+Некорректные записи по-прежнему отклоняются. Production quality gate не меняется.
+
+Фильтр `[batch.window.interaction_since, batch.window.interaction_until)` использует
+`Actions.dateTimeUtc` и `Orders.firstAction.dateTimeUtc` с UTC-нормализацией.
+Orders фильтруются до дедупликации, как в статистике; вспомогательные timestamps
+не заменяют дату PURCHASE. Годы не зашиты в loader.
 
 Существующий storage lock координирует сканирование с writers. Coordination file
 может открываться, но source JSON/catalog/production model/settings не изменяются.
 Revision и размеры/mtime consumed files проверяются после сканирования. Script
 не импортирует BPR trainer, не строит tensors/features и не публикует artifacts.
 Output внутри source/model/settings деревьев запрещён.
+
+Отдельный fixed-benchmark preflight без обучения/оценки модели:
+
+```powershell
+.venv312\Scripts\python.exe scripts/preflight_research.py
+```
+
+Он вызывает `load_canonical_events(read_only=True)`: coordination file также
+не открывается на запись, дрейф входов приводит к отказу. Следует запускать
+без параллельного импорта/GUI; это режим проверки стабильного локального источника.
+Используются существующие November/December 2025 cutoffs и cold-start правила.
+Результат — aggregate-only `diagnostics/data_research_preflight01/preflight.json`.
+Положительные train pairs считаются по distinct history user/item keys, без
+материализации BPR arrays; соответствие существующей агрегации проверено тестом.
+NDCG/Recall не вычисляются. Текущий `test_end=2025-12-31T00:00Z` не меняется.
 
 Default test_end — минимум конца declared continuous coverage и начала последнего
 наблюдаемого календарного дня UTC. Последний день не удаляется: остаётся в coverage,

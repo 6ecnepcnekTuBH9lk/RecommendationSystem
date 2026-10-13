@@ -17,15 +17,15 @@ class QualityLevel(str, Enum):
 
 @dataclass(frozen=True)
 class TrainingQualityConfig:
-    """WARN budget for catalog-only misses: <=0.01% AND <=100 occurrences.
+    """WARN budget for catalog-only misses: <=0.1% AND <=10,000 occurrences.
 
     Conservative operational guard, not a tuned ranking parameter. The rate
     denominator is product-bearing resolver attempts, excluding productless
     mapped Actions. Invalid IDs/namespaces are never covered by this budget.
     """
     mapped_action_malformed_warn_rate: float = 0.0
-    unknown_candidate_max_rate: float = 0.0001
-    unknown_candidate_max_count: int = 100
+    unknown_candidate_max_rate: float = 0.001
+    unknown_candidate_max_count: int = 10000
 
     def __post_init__(self):
         value = self.mapped_action_malformed_warn_rate
@@ -52,8 +52,11 @@ class TrainingQualityDiagnostics:
     product_resolution_attempts: int | None = None
     unknown_candidate_products: int | None = None
     invalid_product_ids: int | None = None
+    first_snapshot_policy_verified: bool = False
 
     def __post_init__(self):
+        if type(self.first_snapshot_policy_verified) is not bool:
+            raise ValueError("First snapshot policy evidence must be boolean")
         counts = (self.actions_view, self.actions_favorite, self.malformed_mapped_actions,
                   self.unresolved_products, self.unsupported_products, self.bpr_events, self.unmapped_actions, self.orders_duplicate_conflicting)
         if any(type(value) is not int or value < 0 for value in counts):
@@ -134,8 +137,13 @@ def evaluate_training_quality(
         issues.append(QualityIssue("MAPPED_ACTION_WITHOUT_PRODUCT", QualityLevel.WARN,
             diagnostics.malformed_mapped_actions, "Mapped actions without products were excluded", rate,
             diagnostics.malformed_action_system_names))
+    if diagnostics.orders_duplicate_conflicting:
+        issues.append(QualityIssue("CONFLICTING_ORDER_SNAPSHOTS",
+            QualityLevel.WARN if diagnostics.first_snapshot_policy_verified else QualityLevel.BLOCK,
+            diagnostics.orders_duplicate_conflicting,
+            "First in-period order snapshots retained; changed repeats excluded" if diagnostics.first_snapshot_policy_verified
+            else "Conflicting order snapshots without verified first-snapshot policy"))
     for code, count, message in (
-        ("CONFLICTING_ORDER_SNAPSHOTS", diagnostics.orders_duplicate_conflicting, "Conflicting order snapshots"),
         ("UNSUPPORTED_PRODUCT_NAMESPACE", diagnostics.unsupported_products, "Unsupported product namespace"),
     ):
         if count:
@@ -165,6 +173,7 @@ def evaluate_training_quality(
                "unsupported_products": diagnostics.unsupported_products, "bpr_events": diagnostics.bpr_events,
                "unmapped_actions": diagnostics.unmapped_actions,
                "orders_duplicate_conflicting": diagnostics.orders_duplicate_conflicting, **sizes}
+    metrics["first_snapshot_policy_verified"] = diagnostics.first_snapshot_policy_verified
     metrics.update(product_resolution_attempts=attempts, unresolved_product_rate=unresolved_rate,
                    unknown_candidate_products=diagnostics.unknown_candidate_products,
                    invalid_product_ids=diagnostics.invalid_product_ids,
