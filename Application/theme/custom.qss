@@ -32,6 +32,12 @@ QLabel[class="statisticsSection"] {{
     background-color: transparent;
     border: none;
 }}
+/* Customer cards inherit the statistics palette; only local typography differs. */
+QWidget#customerResultsTab QLabel[class="resultsTitle"] {{ font-size: 18pt; font-weight: 600; }}
+QWidget#customerResultsTab QLabel[class="resultsPlaceholderValue"] {{ font-size: 13pt; font-weight: 600; }}
+QWidget#customerResultsTab QLabel[class="resultsProductName"] {{ font-size: 11pt; font-weight: 600; }}
+QWidget#customerResultsTab QLabel[class="resultsCardRank"] {{ font-size: 11pt; font-weight: 600; }}
+QWidget#customerResultsTab QFrame[class="resultsProfileField"] {{ background: transparent; border: none; }}
 QLabel[class="sectionHeader"] {{
     font-size: 11pt;
     font-weight: 600;

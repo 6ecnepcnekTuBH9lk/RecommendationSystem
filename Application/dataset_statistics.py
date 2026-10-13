@@ -201,10 +201,11 @@ class _Interactions:
 
 
 def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=None):
+    from Application.customer_demographics import AGE_LABELS, age_group, calendar_age
+
     path = database(root)
     genders, ages, groups = Counter(), Counter(), Counter()
-    age_labels = ("До 18 лет", "18–25 лет", "26–35 лет", "36–45 лет", "46–55 лет", "56–65 лет",
-                  "66 лет и старше", "Возраст не определён")
+    age_labels = AGE_LABELS
     count, coverage = None, Coverage("Customers")
     if not path.exists():
         return count, coverage, _distribution(genders, ("Мужчины", "Женщины", "Не указан")), _distribution(groups, age_labels), None, None
@@ -234,9 +235,9 @@ def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=Non
             if born is None or born > as_of:
                 groups["Возраст не определён"] += 1
             else:
-                age = as_of.year - born.year - ((as_of.month, as_of.day) < (born.month, born.day))
+                age = calendar_age(born, as_of)
                 ages[age] += 1
-                groups[_bucket(age, (17, 25, 35, 45, 55, 65), age_labels[:-1])] += 1
+                groups[age_group(age)] += 1
         with connection:
             row = connection.execute("SELECT value FROM metadata WHERE key='summary'").fetchone()
             metadata = json.loads(row[0]) if row else {}

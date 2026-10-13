@@ -156,8 +156,11 @@ def _photo_to_url(raw: str) -> str:
 
 
 def _set_row_pixmap(table: QTableWidget, row: int, pm: QPixmap) -> None:
-    w = table.cellWidget(row, 0)
+    w = table if isinstance(table, QLabel) else table.cellWidget(row, 0)
     if not isinstance(w, QLabel):
+        return
+    if hasattr(w, "set_source_pixmap"):
+        w.set_source_pixmap(pm)
         return
 
     w.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -173,6 +176,40 @@ def _set_row_pixmap(table: QTableWidget, row: int, pm: QPixmap) -> None:
         Qt.TransformationMode.SmoothTransformation
     )
     w.setPixmap(scaled)
+
+
+def _set_photo_label(aboba, label: QLabel, photo_url: str, gen: int) -> None:
+    """Card target for the existing network queue; URL is prepared by the worker."""
+    if gen != aboba._img_gen:
+        return
+    url = _photo_to_url(photo_url)
+    if not url:
+        label.setText("Нет фото")
+        return
+    cached = aboba._img_cache.get(url)
+    if cached is not None:
+        _set_row_pixmap(label, None, cached)
+        return
+    label.setText("Загрузка фото…")
+    aboba._img_targets.setdefault(url, []).append((label, None))
+    if url not in aboba._img_inflight and url not in aboba._img_queue:
+        aboba._img_queue.append(url)
+    _pump_image_queue(aboba, gen)
+
+
+def _invalidate_photo_targets(aboba) -> int:
+    """Invalidate first, then abort old requests; late replies cannot touch new targets."""
+    aboba._img_gen += 1
+    replies = list(getattr(aboba, "_img_replies", {}).values())
+    aboba._img_queue.clear()
+    aboba._img_targets.clear()
+    aboba._img_inflight.clear()
+    aboba._img_retry_count.clear()
+    if hasattr(aboba, "_img_replies"):
+        aboba._img_replies.clear()
+    for reply in replies:
+        reply.abort()
+    return aboba._img_gen
     
 
 def _request_image(aboba, url: str, gen: int) -> None:
@@ -193,6 +230,8 @@ def _request_image(aboba, url: str, gen: int) -> None:
     reply = aboba.net.get(req)
     reply.setProperty("img_url", str(url).strip())
     reply.setProperty("img_gen", gen)
+    if hasattr(aboba, "_img_replies"):
+        aboba._img_replies[url] = reply
     reply.finished.connect(lambda r=reply: _on_image_loaded(aboba, r))
 
 
@@ -220,15 +259,13 @@ def _on_image_loaded(aboba, reply) -> None:
     data = bytes(reply.readAll())
     reply.deleteLater()
 
-    # Всегда снимаем inflight
-    aboba._img_inflight.discard(url)
-
-    # Старое поколение: подчистили и вышли
+    # A late old reply must not remove a new client's targets for the same URL.
     if gen != aboba._img_gen:
-        aboba._img_targets.pop(url, None)
-        aboba._img_retry_count.pop(url, None)
-        _pump_image_queue(aboba, aboba._img_gen)
         return
+
+    aboba._img_inflight.discard(url)
+    if hasattr(aboba, "_img_replies") and aboba._img_replies.get(url) is reply:
+        aboba._img_replies.pop(url, None)
 
     # Проверка успешности
     pm = QPixmap()
@@ -282,18 +319,23 @@ def _on_image_loaded(aboba, reply) -> None:
             reason = "Сеть"
 
         for table, r in targets:
-            w = table.cellWidget(int(r), 0)
+            w = table if isinstance(table, QLabel) else table.cellWidget(int(r), 0)
             if isinstance(w, QLabel):
                 w.clear()
-                w.setText(reason)
+                w.setText("Фото недоступно" if r is None else reason)
                 w.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         _pump_image_queue(aboba, gen)
         return
 
     aboba._img_cache[url] = pm
+    # Card views keep a bounded cache; legacy owners retain their existing policy.
+    limit = getattr(aboba, "_img_cache_limit", None)
+    if limit is not None:
+        while len(aboba._img_cache) > limit:
+            aboba._img_cache.pop(next(iter(aboba._img_cache)))
     for table, r in targets:
-        _set_row_pixmap(table, int(r), pm)
+        _set_row_pixmap(table, None if r is None else int(r), pm)
 
     _pump_image_queue(aboba, gen)
 

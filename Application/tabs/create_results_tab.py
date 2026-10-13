@@ -35,6 +35,14 @@ class _ResultTableHeader(QHeaderView):
 
 # -------------------------------------------ВКЛАДКА ВЫГРУЗКА РЕЗУЛЬТАТОВ-------------------------------------------
 def create_result_widgets_tab(aboba):
+    from .customer_results_tab import CustomerResultsTab
+
+    aboba.results_tab = CustomerResultsTab(aboba)
+    aboba.tabs.addTab(aboba.results_tab, "Выгрузка результатов")
+
+
+def _create_legacy_result_widgets_tab(aboba):
+    """Retained legacy builder/helpers; the application uses the new card tab."""
     tab = QWidget()
 
     # === ВЕРХНИЙ УРОВЕНЬ: вертикально ===

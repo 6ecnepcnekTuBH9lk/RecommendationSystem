@@ -12,7 +12,7 @@ import pytest
 from PyQt6.QtCore import Qt, QDir, QPoint, QPointF, QEvent
 from PyQt6.QtGui import QFont, QWheelEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import (QApplication, QTableWidgetItem, QLabel, QPushButton, QSizePolicy, QGridLayout,
+from PyQt6.QtWidgets import (QApplication, QLabel, QPushButton, QSizePolicy, QGridLayout,
                             QHBoxLayout, QWidget, QVBoxLayout, QTableWidget, QStyle, QStyleOptionSlider)
 
 from Application.theme.apply_theme import apply_app_theme
@@ -82,7 +82,7 @@ def test_shared_scrollbars_geometry_wheel_drag_and_hover_pressed(app, dark, name
                 if not bar.isVisible():
                     continue
                 vertical = bar.orientation() == Qt.Orientation.Vertical
-                assert (bar.width() if vertical else bar.height()) == 11
+                assert (bar.width() if vertical else bar.height()) == 9
                 rect = scrollbar_rect(bar)
                 assert (rect.height() if vertical else rect.width()) >= 36
                 assert table.rect().contains(bar.mapTo(table, rect.center()))
@@ -98,6 +98,10 @@ def test_shared_scrollbars_geometry_wheel_drag_and_hover_pressed(app, dark, name
             app.sendEvent(bar, wheel)
             assert bar.value() > bar.minimum()
             bar.setValue(bar.minimum())
+            # Move outside first: repeated offscreen cases can reuse the same
+            # global cursor position and otherwise produce no new enter event.
+            QTest.mouseMove(root, QPoint(2, 2))
+            app.processEvents()
             app.sendEvent(bar, QEvent(QEvent.Type.Leave))
             point = scrollbar_rect(bar).center()
             def color():
@@ -126,7 +130,7 @@ def test_shared_scrollbars_geometry_wheel_drag_and_hover_pressed(app, dark, name
 def test_custom_scrollbar_style_is_global_and_has_rounded_handle_states(app):
     from Application.theme.apply_theme import CUSTOM_QSS
     text = CUSTOM_QSS.read_text()
-    assert 'width: 11px' in text and 'height: 11px' in text
+    assert 'width: 9px' in text and 'height: 9px' in text
     assert 'border-radius: 5px' in text and 'min-height: 36px' in text and 'min-width: 36px' in text
     assert 'background: {QTMATERIAL_PRIMARYCOLOR}' in text and 'background: {QTMATERIAL_PRIMARYLIGHTCOLOR}' in text
     assert 'QScrollBar::handle:vertical:hover' in text and 'QScrollBar::handle:horizontal:pressed' in text
@@ -134,9 +138,11 @@ def test_custom_scrollbar_style_is_global_and_has_rounded_handle_states(app):
 
 
 @pytest.mark.usefixtures("window_settings")
-def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
+def test_main_window_switch_preserves_tabs_and_customer_cards(app, monkeypatch):
     from main import MainWindow
-    from Application.photo.photo_processing import _set_photo_cell
+    from Application.customer_card_data import CustomerCardResult, ProductContent, ViewState
+    from Application.model.customer_identity_bridge import CustomerModelIdentityResult, CustomerModelIdentityStatus
+    from Application.model.raw_bpr_inference import RawBprRecommendation
     from Application.tabs import reference_loading_section as csv_ui
 
     monkeypatch.setattr(socket.socket, "connect", lambda *args: pytest.fail("No network in theme tests"))
@@ -147,8 +153,8 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         assert window.minimumHeight() < window.maximumHeight()
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
             "Получение данных", "Пользовательские настройки", "Статистика и анализ", "Обучение модели", "Выгрузка результатов"]
-        assert window.purchases_table.columnCount() == 6
-        assert window.recs_table.columnCount() == 7
+        assert window.results_tab.scroll.widget() is window.results_tab.page
+        assert not window.results_tab.export_button.isEnabled()
         assert window.mb_progress.isTextVisible()
         assert window.mb_progress.text() == "Прогресс загрузки"
         assert window.btn_load.font().weight() >= QFont.Weight.DemiBold
@@ -187,23 +193,20 @@ def test_main_window_switch_preserves_tabs_and_table_widgets(app, monkeypatch):
         window.btn_load.click()
         handler.assert_called_once_with(window)
         dialog.assert_not_called()
-        table = window.recs_table
-        table.setRowCount(1)
-        table.setItem(0, 1, QTableWidgetItem("synthetic SKU"))
-        _set_photo_cell(window, table, 0, "synthetic", 0, photo_url=None)
-        photo = table.cellWidget(0, 0)
-        resize_modes = [table.horizontalHeader().sectionResizeMode(i) for i in range(table.columnCount())]
-        table.selectRow(0)
+        identity = CustomerModelIdentityResult("synthetic", "synthetic", CustomerModelIdentityStatus.MATCHED_EXACT, 1, "g")
+        product = ProductContent(RawBprRecommendation(1, "synthetic SKU", 1.1234567), "Synthetic item")
+        window.results_tab.apply_result(CustomerCardResult(ViewState.READY, "Synthetic ready", identity, "g", (product,)))
+        card = window.results_tab.product_grid.cards[0]
+        photo = card.photo
         for dark in (False, True):
             QTest.mouseClick(window.theme_switch, Qt.MouseButton.LeftButton)
             assert window._current_is_dark is dark
             assert Path(os.environ["QTMATERIAL_THEME"]).name == (
                 "dark_custom.xml" if dark else "light_custom.xml"
             )
-            assert table.cellWidget(0, 0) is photo
-            assert table.item(0, 1).text() == "synthetic SKU"
-            assert table.item(0, 1).isSelected()
-            assert resize_modes == [table.horizontalHeader().sectionResizeMode(i) for i in range(table.columnCount())]
+            assert window.results_tab.product_grid.cards[0] is card
+            assert card.photo is photo and card.code.text() == "Код: synthetic SKU"
+            assert card.content.recommendation.raw_score == 1.1234567
         assert all(label.property("class") == "sectionHeader" for label in window.mb_headings)
     finally:
         window.close()

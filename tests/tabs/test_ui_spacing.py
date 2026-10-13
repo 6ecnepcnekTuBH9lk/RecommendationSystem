@@ -54,7 +54,7 @@ def test_shared_spacing_scale():
     ('mb_manual_interactions_button', 'mb_manual_customers_button'),
     ('analysis_filter_tab.apply_button', 'analysis_filter_tab.reset_button'),
     ('dataset_statistics_tab.refresh', 'dataset_statistics_tab.export_button', 'dataset_statistics_tab.cancel_button'),
-    ('start_train', 'cancel_train'), ('btn_excel', 'btn_show_history'),
+    ('start_train', 'cancel_train'), ('results_tab.search_button', 'results_tab.cancel_button', 'results_tab.export_button'),
     ('analysis_filter_tab.types.select_all', 'analysis_filter_tab.types.select_none'),
 ])
 def test_action_rows_share_control_spacing(spacing_window, names):
@@ -137,7 +137,7 @@ def test_status_indicator_spacing_and_main_bar(spacing_window):
     assert w.centralWidget().layout().contentsMargins() == QMargins(*(metrics.PAGE_MARGIN,) * 4)
 
 
-def test_separator_layouts_keep_structural_zeros_and_results_tables_use_layout(spacing_window):
+def test_separator_layouts_keep_structural_zeros_and_results_cards_use_shared_spacing(spacing_window):
     w = spacing_window
     for index in (0, 3):
         root = w.tabs.widget(index).layout()
@@ -148,14 +148,13 @@ def test_separator_layouts_keep_structural_zeros_and_results_tables_use_layout(s
         assert root.itemAt(1).widget().objectName() == 'hSeparator'
     root = w.tabs.widget(4).layout()
     assert root.spacing() == 0 and root.contentsMargins() == QMargins()
-    assert root.itemAt(1).widget().objectName() == 'hSeparator'
-    bottom = root.itemAt(2).layout()
-    assert bottom.spacing() == 0 and bottom.contentsMargins() == QMargins()
-    assert bottom.itemAt(1).widget().objectName() == 'vSeparator'
-    for table in (w.purchases_table, w.recs_table):
-        assert table.styleSheet() == ''
-        assert table.parentWidget().layout().spacing() == metrics.BLOCK_SPACING
-        assert table.parentWidget().layout().contentsMargins() == QMargins(*(metrics.PAGE_MARGIN,) * 4)
+    card = w.results_tab
+    assert root.itemAt(0).widget() is card.scroll
+    assert card.page_layout.spacing() == metrics.SECTION_SPACING
+    assert card.page_layout.contentsMargins() == QMargins(*(metrics.PAGE_MARGIN,) * 4)
+    for section in (card.profile, card.kpis, card.recommendations, card.history, card.propensity):
+        assert section.box.spacing() == metrics.BLOCK_SPACING
+    assert card.product_grid.grid.spacing() == card.kpi_grid.grid.spacing() == metrics.BLOCK_SPACING
 
 
 def test_analysis_spacing_has_no_statistics_tab_dependency():
