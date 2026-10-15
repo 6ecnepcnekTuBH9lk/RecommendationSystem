@@ -19,6 +19,7 @@ from Application.settings.settings_and_filter import get_selected_list_values
 from Application.settings.set_status import (set_status_processing, schedule_status_reset,
                                              set_status_error, set_status_ok)
 from Application.evaluation.experiments.gui_history import ExperimentHistory, now, clean_record, RESEARCH_FIXED
+from Application.evaluation.experiments.gui_benchmark import gui_benchmark_metadata
 from Application.mindbox.canonical_storage import atomic_json
 from Application.training_charts import TrainingChart
 from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
@@ -413,6 +414,7 @@ def start_training_process(aboba):
     _set_training_phase(aboba, 'preflight')
     if research:
         aboba._research_record = {'run_id': uuid.uuid4().hex, 'started_at': now(), 'status': 'running',
+                                  'benchmark': gui_benchmark_metadata(),
                                   'hyperparameters': {**RESEARCH_FIXED, **values}, 'epochs_requested': values['epochs'], 'epochs_completed': 0}
     try:
         USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -583,7 +585,13 @@ def _load_history(aboba, recover=False):
                   _metric(record, 'VIEW', 'ndcg'), _metric(record, 'PURCHASE', 'ndcg'),
                   _duration(record.get('total_seconds')), (record.get('device') or '—').upper(), _STATUS_TEXT[record['status']]]
         for col, value in enumerate(values):
-            table.setItem(row, col, QTableWidgetItem(str(value)))
+            item = QTableWidgetItem(str(value))
+            if col == 0:
+                benchmark = record['benchmark']
+                item.setToolTip(f"{benchmark['id']}\nОбучение до: {benchmark['history_end']}\n"
+                                f"Валидация до: {benchmark['validation_end']}"
+                                + (f"\nНезависимый тест до: {benchmark['test_end']}" if 'test_end' in benchmark else ''))
+            table.setItem(row, col, item)
 
 
 def _update_progress(aboba):

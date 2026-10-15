@@ -20,17 +20,20 @@ from Application.settings.set_status import schedule_status_reset, set_status_er
 from Application.theme.layout_metrics import BLOCK_SPACING, CONTROL_SPACING, PAGE_MARGIN, SECTION_SPACING
 from .customer_card_widgets import AdaptiveCardGrid, FieldCard, ProductCard, StateSection, card_frame, text_label
 from .customer_card_worker import CustomerCardRequest, CustomerCardWorker
+from .customer_history_widgets import CustomerHistorySection
 
 
 class CustomerResultsTab(QWidget):
     dispatch = pyqtSignal(object)
+    history_dispatch = pyqtSignal(object)
     result_applied = pyqtSignal(int)
 
-    def __init__(self, window, *, service=None):
+    def __init__(self, window, *, service=None, history_lookup=None):
         super().__init__(window)
         self.setObjectName("customerResultsTab")
         self.window = window
         self.service = service if service is not None else CustomerCardService()
+        self._history_lookup = history_lookup
         self._thread = self._worker = self._active = self._pending = None
         self._request_id = 0
         self._closing = False
@@ -185,25 +188,14 @@ class CustomerResultsTab(QWidget):
         self.page_layout.addWidget(self.recommendations)
 
     def _build_history(self):
-        self.history = StateSection("История взаимодействий", SectionContent(
-            ViewState.NOT_CONNECTED, "История взаимодействий будет доступна после подключения канонических данных Mindbox."),
-            name="customerHistory")
-        card, box = card_frame()
-        self.history_row = QHBoxLayout()
-        self.history_row.setContentsMargins(0, 0, 0, 0)
-        self.history_row.setSpacing(CONTROL_SPACING)
-        self.history_filter = QComboBox()
-        self.history_filter.addItems(["Все события", "Покупки", "Просмотры", "Избранное"])
-        self.history_view = QComboBox()
-        self.history_view.addItems(["Хронологическая лента", "Таблица"])
-        for control in (self.history_filter, self.history_view):
-            control.setEnabled(False)
-            control.setToolTip("Источник истории ещё не подключён.")
-            self.history_row.addWidget(control)
-        box.addLayout(self.history_row)
-        box.addWidget(text_label("События не загружены. Здесь будет хронологическая лента покупок, просмотров и избранного."))
-        self.history.box.addWidget(card)
+        self.history = CustomerHistorySection()
+        self.history_filter = self.history.category
+        self.history.dispatch.connect(self._load_history)
         self.page_layout.addWidget(self.history)
+
+    def _load_history(self, request):
+        self._ensure_worker()
+        self.history_dispatch.emit(request)
 
     def _build_propensity(self):
         self.propensity = StateSection("Вероятность покупки в следующие 30 дней", SectionContent(
@@ -224,11 +216,13 @@ class CustomerResultsTab(QWidget):
         # Application ownership prevents QThread destruction with an active
         # worker even if a window is deleted directly instead of being closed.
         thread = QThread(QApplication.instance())
-        worker = CustomerCardWorker(self.service)
+        worker = CustomerCardWorker(self.service, history_lookup=self._history_lookup)
         worker.moveToThread(thread)
         self.dispatch.connect(worker.run, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(self._finished)
         worker.profile_ready.connect(self._profile_received)
+        self.history_dispatch.connect(worker.load_history, Qt.ConnectionType.QueuedConnection)
+        worker.history_ready.connect(self.history.receive)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._thread_finished)
         self.destroyed.connect(thread.quit)
@@ -249,7 +243,9 @@ class CustomerResultsTab(QWidget):
         if state is not ViewState.LOADING:
             schedule_status_reset(self.window, 5)
 
-    def _clear_result(self):
+    def _clear_result(self, *, clear_history=True):
+        if clear_history:
+            self.history.set_customer(None)
         self.result = None
         _invalidate_photo_targets(self)
         self.product_grid.set_cards([])
@@ -320,6 +316,8 @@ class CustomerResultsTab(QWidget):
         except Exception:
             profile = CustomerProfileResult(ProfileStatus.STALE)
         self._render_profile(profile)
+        if profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
+            self.history.set_customer(profile.canonical_customer_id)
 
     def _render_profile(self, profile):
         content = profile_content(profile)
@@ -363,7 +361,7 @@ class CustomerResultsTab(QWidget):
                 result.identity is None or not result.identity.is_matched
                 or result.model_generation != result.identity.model_generation):
             result = replace(result, state=ViewState.STALE, products=(), message="Источники рекомендаций изменились. Повторите поиск.")
-        self._clear_result()
+        self._clear_result(clear_history=False)
         self.result = result
         identity = result.identity
         if identity is not None:
@@ -381,6 +379,14 @@ class CustomerResultsTab(QWidget):
             self.profile_fields.set_cards([])
             self.profile_title.setText("Покупатель не выбран")
         self._display_state(result.state, result.message)
+        customer_id = None
+        if result.profile is not None and result.profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
+            customer_id = result.profile.canonical_customer_id
+        elif result.contact_search is not None and result.contact_search.status is ContactSearchStatus.MATCHED:
+            customer_id = result.contact_search.canonical_customer_id
+        elif identity is not None and result.state is not ViewState.STALE:
+            customer_id = identity.canonical_customer_id
+        self.history.set_customer(customer_id)
         if result.state is ViewState.READY:
             cards = [ProductCard(product) for product in result.products]
             self.product_grid.set_cards(cards)
@@ -403,6 +409,7 @@ class CustomerResultsTab(QWidget):
 
     def shutdown(self):
         self._closing = True
+        self.history.shutdown()
         if self._active is not None:
             self._active.cancelled.set()
         self._pending = None
@@ -430,5 +437,3 @@ class CustomerResultsTab(QWidget):
         super().resizeEvent(event)
         direction = QHBoxLayout.Direction.TopToBottom if self.width() < 760 else QHBoxLayout.Direction.LeftToRight
         self.search_row.setDirection(direction)
-        self.history_row.setDirection(QHBoxLayout.Direction.TopToBottom if self.width() < 550
-                                      else QHBoxLayout.Direction.LeftToRight)

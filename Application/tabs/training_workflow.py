@@ -1,10 +1,10 @@
 """Cheap metadata readiness and four GUI values; no trainer import in the GUI."""
-from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
 
-from Application.mindbox.canonical_storage import catalog, current_batch, effective_entries
+from Application.mindbox.canonical_storage import current_batch
+from Application.evaluation.experiments.gui_benchmark import require_gui_coverage
 
 
 def input_values(window):
@@ -33,20 +33,10 @@ def metadata_readiness(data_dir, research):
         product_stat = (Path(data_dir) / "nomenclature.csv").stat()
         revision = (batch.batch_id, product_stat.st_mtime_ns, product_stat.st_size)
         if research:
-            data = catalog(root)
-            start = datetime(2025, 11, 1, tzinfo=timezone.utc)
-            end = datetime(2025, 12, 1, tzinfo=timezone.utc)
-            for name in ("actions", "orders"):
-                entries = effective_entries(data, name)
-                cursor = start
-                history = False
-                for entry in entries:
-                    since, until = (datetime.fromisoformat(entry[k]) for k in ("since", "until"))
-                    history |= since < start
-                    if since <= cursor < until:
-                        cursor = until
-                if not history or cursor < end:
-                    return False, "Temporal validation benchmark недоступен", revision
+            try:
+                require_gui_coverage(batch.window.interaction_since, batch.window.interaction_until)
+            except ValueError:
+                return False, "Нет непрерывного покрытия истории с января 2022 по август 2026 для эксперимента", revision
         return True, "Данные готовы · полная проверка перед обучением", revision
     except FileNotFoundError:
         return False, "Canonical batch или данные для обучения отсутствуют", None

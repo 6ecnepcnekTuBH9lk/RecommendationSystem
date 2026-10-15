@@ -7,6 +7,8 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from Application.customer_card_data import CustomerCardResult, ViewState, contact_search_failure
 from Application.customer_contact_search import ContactSearchStatus, ContactType, search_customers_by_contact
+from Application.customer_history_service import HistoryPage, HistoryStatus, get_customer_history
+from Application.customer_history_records import HistoryKind
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -17,13 +19,37 @@ class CustomerCardRequest:
     contact_type: ContactType | None = None
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class CustomerHistoryRequest:
+    request_id: int
+    customer_id: str
+    kind: HistoryKind
+    cursor: str | None = None
+    cancelled: Event = field(default_factory=Event)
+
+
 class CustomerCardWorker(QObject):
     finished = pyqtSignal(int, object)
     profile_ready = pyqtSignal(int, object)
+    history_ready = pyqtSignal(object, object)
 
-    def __init__(self, service):
+    def __init__(self, service, *, history_lookup=None):
         super().__init__()
         self.service = service
+        self.history_lookup = history_lookup or get_customer_history
+
+    @pyqtSlot(object)
+    def load_history(self, request):
+        # One bounded page, on the existing card thread. Never builds or verifies
+        # the index. Cancellation discards delivery; an in-flight read may finish.
+        page = None
+        if not request.cancelled.is_set():
+            try:
+                page = self.history_lookup(request.customer_id, kinds=(request.kind,), limit=50,
+                                           cursor=request.cursor, raw_root=self.service.raw_root)
+            except Exception:
+                page = HistoryPage(HistoryStatus.SOURCE_INCONSISTENT)
+        self.history_ready.emit(request, None if request.cancelled.is_set() else page)
 
     @pyqtSlot(object)
     def run(self, request):

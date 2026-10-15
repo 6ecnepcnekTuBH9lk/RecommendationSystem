@@ -7,6 +7,7 @@ import re
 
 from Application.mindbox.canonical_storage import atomic_json
 from Application.mindbox.daily_training_batch import _writer_lock
+from .gui_benchmark import clean_benchmark_metadata
 
 VERSION = 1
 RESEARCH_FIXED = {"seed": 42, "embedding_dim": 128, "batch_size": 256, "n_neg": 10,
@@ -68,9 +69,27 @@ def clean_record(record):
                     and math.isfinite(value) and value >= 0}
             if safe:
                 result["metrics"].setdefault(label, {})[k] = safe
-    # Fixed benchmark identity and dates, never a user-provided test metric.
-    result["benchmark"] = {"id": "mindbox-validation-2025-11", "history_end": "2025-11-01T00:00:00Z",
-                           "validation_end": "2025-12-01T00:00:00Z", "min_history_events": 10}
+    try:
+        result["benchmark"] = clean_benchmark_metadata(record.get("benchmark"))
+    except (ValueError, TypeError, AttributeError):
+        raise HistoryError("Invalid experiment benchmark metadata") from None
+    # Optional actual loader window, introduced without rewriting legacy artifacts.
+    coverage = record.get("data_coverage")
+    if coverage is not None:
+        if not isinstance(coverage, dict):
+            raise HistoryError("Invalid experiment coverage")
+        try:
+            safe = {}
+            for name in ("declared_start", "declared_end"):
+                parsed = datetime.fromisoformat(coverage[name].replace("Z", "+00:00"))
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError
+                safe[name] = parsed.astimezone(timezone.utc).isoformat()
+            if safe["declared_start"] >= safe["declared_end"]:
+                raise ValueError
+            result["data_coverage"] = safe
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise HistoryError("Invalid experiment coverage") from None
     provenance = record.get("provenance", {})
     head = provenance.get("git_head", "")
     result["provenance"] = {

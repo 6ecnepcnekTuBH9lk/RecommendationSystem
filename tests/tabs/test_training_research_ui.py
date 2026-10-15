@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QApplication, QWidget, QTabWidget, QDoubleSpinBox, Q
 from Application.tabs import train_model_tab as tab
 from Application.tabs import training_workflow as workflow
 from Application.evaluation.experiments.gui_history import ExperimentHistory
+from Application.evaluation.experiments.gui_benchmark import gui_benchmark_metadata
 
 
 class Process(QProcess):
@@ -167,6 +168,8 @@ def test_research_launch_config_lock_progress_and_completed_history(ui, monkeypa
     assert '0,012346' in w.train_log.toPlainText() and '00:02:03' in w.train_log.toPlainText()
     records = ExperimentHistory(w._experiment_store.directory).read()
     assert len(records) == 1 and records[0]['status'] == 'completed'
+    assert records[0]['benchmark'] == gui_benchmark_metadata()
+    assert '2026-07-01' in w.experiment_history.item(0, 0).toolTip()
     log = w.train_log.toPlainText()
     w.experiment_history.selectRow(0)
     assert w.train_log.toPlainText() == log and 'NDCG@10 (покупки)' in log
@@ -673,7 +676,7 @@ def test_ui02_opening_with_real_metadata_never_reads_payloads(ui, monkeypatch):
     w.tabs = QTabWidget(w)
     try:
         tab.create_train_model_widgets_tab(w)
-        assert not w.start_train.isEnabled()  # January data cannot satisfy November research.
+        assert not w.start_train.isEnabled()  # One January day cannot cover July/August research.
         w.training_mode.setCurrentIndex(1)
         assert w._training_ready[0] and w.start_train.isEnabled()
         assert not hasattr(w, 'training_data_counts') and not w.train_log.toPlainText()

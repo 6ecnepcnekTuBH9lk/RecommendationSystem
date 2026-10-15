@@ -9,6 +9,7 @@ import torch
 
 from Application.evaluation.experiments import gui_run as runner
 from Application.evaluation.experiments.bpr_weights import benchmark_config
+from Application.evaluation.experiments.gui_benchmark import gui_benchmark_config, GUI_BENCHMARK
 from Application.evaluation.temporal import TemporalProtocolError, build_temporal_protocol
 from Application.interactions import InteractionType
 from scripts import run_gui_research as cli
@@ -201,14 +202,18 @@ def test_cli_single_final_artifact_aggregate_only(tmp_path, monkeypatch, capsys,
     from Application import paths
     from Application.evaluation import audit, temporal as temporal_module
     from Application.evaluation.experiments import bpr_weights
+    from Application.mindbox import canonical_storage
     monkeypatch.setattr(paths, 'USER_SETTINGS_DIR', tmp_path / 'settings')
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     monkeypatch.setattr(bpr_weights, 'git_provenance', lambda root: {'git_head': 'c' * 40, 'working_tree_dirty': True})
     calls = []
-    monkeypatch.setattr(audit, 'load_canonical_events', lambda *a, **kw: ([], {'SECRET': 'email'}))
+    window = SimpleNamespace(interaction_since=GUI_BENCHMARK.history_start, interaction_until=GUI_BENCHMARK.test_end)
+    monkeypatch.setattr(canonical_storage, 'current_batch', lambda *a: SimpleNamespace(window=window))
+    monkeypatch.setattr(audit, 'load_canonical_events', lambda *a, **kw: ([], {
+        'SECRET': 'email', 'declared_start': window.interaction_since.isoformat(), 'declared_end': window.interaction_until.isoformat()}))
     sentinel = object()
     def protocol(events, config):
-        assert config == benchmark_config()
+        assert config == gui_benchmark_config()
         return SimpleNamespace(validation=sentinel)  # No test attribute: GUI cannot access it.
     monkeypatch.setattr(temporal_module, 'build_temporal_protocol', protocol)
     def run(snapshot, temporal, cfg, device, emit, check):
@@ -231,9 +236,41 @@ def test_cli_single_final_artifact_aggregate_only(tmp_path, monkeypatch, capsys,
     result = json.loads(artifact.read_text())
     assert result['status'] == outcome and result['epochs_completed'] == 1
     assert result['torch_version'] == str(torch.__version__) and result['device'] == 'cpu'
+    assert result['benchmark']['id'] == GUI_BENCHMARK.id
+    assert result['benchmark']['test_end'] == GUI_BENCHMARK.test_end.isoformat()
+    assert result['data_coverage']['declared_start'] == GUI_BENCHMARK.history_start.isoformat()
     output = capsys.readouterr().out
     assert 'SECRET' not in output + artifact.read_text() and 'Traceback' not in output
     assert 'research_finished' in output
+
+
+@pytest.mark.parametrize('changed_after_load', [False, True])
+def test_cli_blocks_insufficient_actual_coverage_without_training(tmp_path, monkeypatch, changed_after_load):
+    from Application import paths
+    from Application.evaluation import audit
+    from Application.mindbox import canonical_storage
+    from Application.evaluation.experiments import bpr_weights
+    monkeypatch.setattr(paths, 'USER_SETTINGS_DIR', tmp_path / 'settings')
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(bpr_weights, 'git_provenance', lambda root: {})
+    valid = SimpleNamespace(interaction_since=GUI_BENCHMARK.history_start, interaction_until=GUI_BENCHMARK.test_end)
+    short = SimpleNamespace(interaction_since=GUI_BENCHMARK.validation_start, interaction_until=GUI_BENCHMARK.test_end)
+    monkeypatch.setattr(canonical_storage, 'current_batch', lambda *a: SimpleNamespace(window=valid if changed_after_load else short))
+    calls = []
+    def load(*args, **kwargs):
+        calls.append(True)
+        return [], {'declared_start': short.interaction_since.isoformat(), 'declared_end': short.interaction_until.isoformat()}
+    monkeypatch.setattr(audit, 'load_canonical_events', load)
+    monkeypatch.setattr(runner, 'run_validation', lambda *a: pytest.fail('Training without required history'))
+    config = tmp_path / 'config.json'
+    config.write_text(json.dumps(values()))
+    assert cli.main(['--config', str(config), '--run-id', 'b' * 32, '--cancel-file', str(tmp_path / 'cancel'),
+                     '--raw-root', str(tmp_path / 'raw'), '--catalog', str(tmp_path / 'catalog.csv')]) == 1
+    assert len(calls) == int(changed_after_load)
+    artifact = tmp_path / 'settings/research_experiments/runs' / ('b' * 32) / 'result.json'
+    result = json.loads(artifact.read_text())
+    assert result['error_summary'] == 'BENCHMARK_UNAVAILABLE'
+    assert result['benchmark']['id'] == GUI_BENCHMARK.id
 
 
 def test_real_qprocess_single_research_keeps_event_loop_responsive(tmp_path, monkeypatch, fixed_events):
@@ -262,11 +299,16 @@ def test_real_qprocess_single_research_keeps_event_loop_responsive(tmp_path, mon
         f'paths.USER_SETTINGS_DIR=Path({str(tmp_path / "settings")!r})\n'
         'def event(u,i,m):\n'
         '    return ResolvedInteraction(InteractionRecord(source_customer_id=u,customer_id=u,product=ProductKey("offline1C",i),'
-        'interaction_type=InteractionType.VIEW,event_datetime_utc=datetime(2025,m,5,tzinfo=timezone.utc),'
+        'interaction_type=InteractionType.VIEW,event_datetime_utc=datetime(2026,m,5,tzinfo=timezone.utc),'
         'source=InteractionSource.ACTION,source_event_id="synthetic"),i)\n'
-        'events=[event("u","A" if i%2 else "B",10) for i in range(10)]+'
-        '[event("other",["C","D","E"][i%3],10) for i in range(12)]+[event("u","C",11)]\n'
-        'audit.load_canonical_events=lambda *a,**kw:(events,{})\n'
+        'events=[event("u","A" if i%2 else "B",6) for i in range(10)]+'
+        '[event("other",["C","D","E"][i%3],6) for i in range(12)]+[event("u","C",7)]\n'
+        'from Application.evaluation.experiments.gui_benchmark import GUI_BENCHMARK\n'
+        'from Application.mindbox import canonical_storage\nfrom types import SimpleNamespace\n'
+        'canonical_storage.current_batch=lambda *a:SimpleNamespace(window=SimpleNamespace('
+        'interaction_since=GUI_BENCHMARK.history_start, interaction_until=GUI_BENCHMARK.test_end))\n'
+        'audit.load_canonical_events=lambda *a,**kw:(events,{"declared_start":GUI_BENCHMARK.history_start.isoformat(),'
+        '"declared_end":GUI_BENCHMARK.test_end.isoformat()})\n'
         'from scripts.run_gui_research import main\nraise SystemExit(main())\n', encoding='utf-8')
     monkeypatch.setattr(tab, 'PROJECT_ROOT', tmp_path)
     current = tmp_path / 'model/current.json'

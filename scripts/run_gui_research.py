@@ -17,10 +17,11 @@ def main(argv=None):
     import torch
     from Application.evaluation.audit import load_canonical_events
     from Application.evaluation.temporal import build_temporal_protocol
-    from Application.evaluation.experiments.bpr_weights import benchmark_config, git_provenance
+    from Application.evaluation.experiments.bpr_weights import git_provenance
+    from Application.evaluation.experiments.gui_benchmark import gui_benchmark_config, gui_benchmark_metadata, require_gui_coverage
     from Application.evaluation.experiments.gui_history import clean_record, now
     from Application.evaluation.experiments.gui_run import gui_config, run_validation, BenchmarkUnavailable
-    from Application.mindbox.canonical_storage import atomic_json
+    from Application.mindbox.canonical_storage import atomic_json, current_batch
     from Application.paths import USER_SETTINGS_DIR
     from scripts.mindbox_production_train import EVENT_PREFIX
 
@@ -31,7 +32,8 @@ def main(argv=None):
     parser.add_argument("--raw-root", required=True, type=Path)
     parser.add_argument("--catalog", required=True, type=Path)
     args = parser.parse_args(argv)
-    record = clean_record({"run_id": args.run_id, "status": "running", "started_at": now(), "pid": os.getpid()})
+    record = clean_record({"run_id": args.run_id, "status": "running", "started_at": now(), "pid": os.getpid(),
+                           "benchmark": gui_benchmark_metadata()})
     artifact = USER_SETTINGS_DIR / "research_experiments" / record["artifact"]
     terminal = sys.stdout
     start = time.monotonic()
@@ -54,9 +56,19 @@ def main(argv=None):
         check_cancel()
         emit({"stage": "loading", "device": str(device)})
         with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
-            events, _ = load_canonical_events(args.raw_root, args.catalog, progress=lambda _: check_cancel())
+            selected = current_batch(args.raw_root)
+            try:
+                require_gui_coverage(selected.window.interaction_since, selected.window.interaction_until)
+            except ValueError:
+                raise BenchmarkUnavailable("Selected canonical batch does not cover GUI benchmark") from None
+            events, source = load_canonical_events(args.raw_root, args.catalog, progress=lambda _: check_cancel())
+            try:
+                require_gui_coverage(source["declared_start"], source["declared_end"])
+            except (ValueError, KeyError, TypeError):
+                raise BenchmarkUnavailable("Loaded canonical window does not cover GUI benchmark") from None
+            record["data_coverage"] = {key: source[key] for key in ("declared_start", "declared_end")}
             check_cancel()
-            temporal = benchmark_config()
+            temporal = gui_benchmark_config()
             protocol = build_temporal_protocol(events, temporal)
             snapshot = protocol.validation
             del protocol, events

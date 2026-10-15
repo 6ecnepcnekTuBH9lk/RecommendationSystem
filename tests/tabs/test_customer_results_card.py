@@ -17,6 +17,7 @@ from Application.customer_card_data import CustomerCardResult, ProductContent, V
 from Application.model.customer_identity_bridge import CustomerModelIdentityResult, CustomerModelIdentityStatus as S
 from Application.model.raw_bpr_inference import RawBprRecommendation
 from Application.photo import photo_processing as photos
+from Application.customer_history_service import HistoryPage, HistoryStatus
 from Application.tabs.customer_results_tab import CustomerResultsTab
 from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
 
@@ -48,7 +49,7 @@ def card(app):
             return replace(result, state=ViewState.STALE, products=())
         return result
     service.validate_result.side_effect = validate
-    tab = CustomerResultsTab(host, service=service)
+    tab = CustomerResultsTab(host, service=service, history_lookup=lambda customer, **kw: HistoryPage(HistoryStatus.EMPTY, customer))
     host.setCentralWidget(tab)
     host.resize(1250, 900)
     host.show()
@@ -76,11 +77,12 @@ def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card,
         "customerSearch", "customerProfile", "customerKpis", "customerRecommendations", "customerHistory", "customerPropensity"]
     assert tab.recommendations.content.state is ViewState.INITIAL
     assert tab.profile.content.state is ViewState.INITIAL
-    assert all(section.content.state is ViewState.NOT_CONNECTED for section in (tab.kpis, tab.history))
+    assert tab.kpis.content.state is ViewState.NOT_CONNECTED
+    assert tab.history.content.state is ViewState.INITIAL
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert not tab.export_button.isEnabled()
-    assert not tab.history_filter.isEnabled() and not tab.history_view.isEnabled()
-    assert tab.history_view.currentText() == "Хронологическая лента"
+    assert not tab.history_filter.isEnabled()
+    assert [tab.history_filter.itemText(i) for i in range(4)] == ["Заказы", "Просмотры", "Избранное", "Прочее"]
     assert tab._thread is None
     assert not tab.product_grid.cards
     service.load.assert_not_called()
@@ -134,7 +136,7 @@ def test_independent_future_sections_survive_recommendation_failures(card, state
     assert not tab.product_grid.cards
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.NOT_CONNECTED
-    assert tab.history.content.state is ViewState.NOT_CONNECTED
+    assert tab.history.content.state is ViewState.INITIAL
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert all(c.value.text() != "0" for c in tab.kpi_grid.cards)
     assert "недоступен" in tab.propensity.message.text()

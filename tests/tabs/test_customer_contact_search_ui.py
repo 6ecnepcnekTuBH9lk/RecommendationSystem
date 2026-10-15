@@ -24,6 +24,7 @@ from Application.mindbox.records import CustomerRecord
 from Application.model.customer_identity_bridge import CustomerModelIdentityResult, CustomerModelIdentityStatus as I
 from Application.model.raw_bpr_inference import RawBprRecommendation, RawBprResult, RawBprStatus
 from Application.tabs import customer_card_worker as worker
+from Application.customer_history_service import HistoryPage, HistoryStatus
 from Application.tabs.customer_results_tab import CustomerResultsTab
 from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
 
@@ -67,7 +68,7 @@ def card(app, monkeypatch):
     service = CustomerCardService(profile_service=profile, bridge=bridge, inference=inference)
     service._references = Mock(return_value={})
     host = QMainWindow()
-    tab = CustomerResultsTab(host, service=service)
+    tab = CustomerResultsTab(host, service=service, history_lookup=lambda customer, **kw: HistoryPage(HistoryStatus.EMPTY, customer))
     host.setCentralWidget(tab)
     host.resize(1200, 850)
     host.show()

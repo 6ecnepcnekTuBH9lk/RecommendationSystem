@@ -17,6 +17,7 @@ from Application.customer_profiles import CustomerContact
 from Application.mindbox.records import CustomerRecord
 from Application.model.customer_identity_bridge import CustomerModelIdentityResult, CustomerModelIdentityStatus as S
 from Application.model.raw_bpr_inference import RawBprRecommendation, RawBprResult, RawBprStatus
+from Application.customer_history_service import HistoryPage, HistoryStatus
 from Application.tabs.customer_results_tab import CustomerResultsTab
 from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
 
@@ -56,7 +57,7 @@ def widget(app):
     inference.get_recommendations.return_value = RawBprResult("g", "A", RawBprStatus.OK,
         tuple(p.recommendation for p in recommendations().products))
     service = CustomerCardService(profile_service=profile, bridge=bridge, inference=inference)
-    tab = CustomerResultsTab(host, service=service)
+    tab = CustomerResultsTab(host, service=service, history_lookup=lambda customer, **kw: HistoryPage(HistoryStatus.EMPTY, customer))
     host.setCentralWidget(tab); host.resize(1250, 900); host.show(); QTest.qWait(20)
     yield host, tab, service
     tab.shutdown()
