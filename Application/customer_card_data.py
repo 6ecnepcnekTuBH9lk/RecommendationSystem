@@ -238,7 +238,7 @@ class CustomerCardService:
                 and self.bridge.is_current(result.identity, model_dir=self.model_dir, raw_root=self.raw_root))
 
     def validate_result(self, result: CustomerCardResult) -> CustomerCardResult:
-        """Validate each source independently; an error never erases the other block."""
+        """Validate model and purchase evidence independently of profile/history UI."""
         match = result.contact_search
         if match is not None:
             if match.status is not contact_backend.ContactSearchStatus.MATCHED:
@@ -260,9 +260,18 @@ class CustomerCardService:
             if not current:
                 result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
                                  message="Источники рекомендаций изменились. Повторите поиск.")
-            elif result.state in (ViewState.READY, ViewState.EMPTY) and result.hybrid is not None:
+            elif result.hybrid is not None:
+                if result.raw_state in (ViewState.READY, ViewState.EMPTY):
+                    try:
+                        raw_current = self.hybrid is not None and self.hybrid.raw_is_current(result.hybrid, raw_root=self.raw_root)
+                    except Exception:
+                        raw_current = False
+                    if not raw_current:
+                        result = replace(result, raw_products=(), raw_state=ViewState.STALE,
+                                         raw_message="История покупок изменилась или недоступна. Повторите поиск.")
                 try:
-                    hybrid_current = self.hybrid is not None and self.hybrid.is_current(result.hybrid, raw_root=self.raw_root)
+                    hybrid_current = (result.state not in (ViewState.READY, ViewState.EMPTY)
+                                      or self.hybrid is not None and self.hybrid.is_current(result.hybrid, raw_root=self.raw_root))
                 except Exception:
                     hybrid_current = False
                 if not hybrid_current:
@@ -300,7 +309,7 @@ class CustomerCardService:
             rec, historical[rec.model_item_code].name if rec.model_item_code in historical else "",
             photos.get(rec.model_item_code, ("", ""))[1] if rec.model_item_code not in self._catalog_ambiguous else "",
             collection=historical[rec.model_item_code].collection if rec.model_item_code in historical else "",
-        ) for rec in hybrid.raw_bpr.recommendations[:10])
+        ) for rec in hybrid.displayed_raw)
 
     def load(self, customer_id: str, cancelled=lambda: False) -> CustomerCardResult:
         try:
@@ -342,18 +351,26 @@ class CustomerCardService:
             raw = hybrid.raw_bpr
             if raw is not None and raw.status is RawBprStatus.OK and state is not ViewState.CANCELLED:
                 if raw.model_generation == identity.model_generation and raw.model_user_id == identity.model_user_id:
-                    raw_products = self._historical_products(hybrid)
-                    raw_state = ViewState.READY if raw_products else ViewState.EMPTY
+                    evidence = hybrid.purchases.historical if hybrid.purchases is not None else None
+                    if (evidence is not None and evidence.status == "READY"
+                            and all(rec.model_item_code in evidence.checked_codes for rec in raw.recommendations)):
+                        raw_products = self._historical_products(hybrid)
+                        raw_state = ViewState.READY if raw_products else ViewState.EMPTY
                 else:
                     raw_state = ViewState.STALE
             if raw_state is ViewState.STALE:
                 state, products = ViewState.STALE, ()
-            elif raw_state is ViewState.UNAVAILABLE and state is ViewState.READY:
-                state, products = ViewState.UNAVAILABLE, ()
+            raw_message = ""
+            if raw_state is ViewState.EMPTY:
+                raw_message = "После исключения покупок и неопределённых соответствий допустимых рекомендаций нет."
+            elif raw_state is ViewState.STALE:
+                raw_message = "Модель изменилась. Повторите поиск."
+            elif raw_state is ViewState.UNAVAILABLE:
+                raw_message = ("Рекомендации BPR-MF недоступны: не удалось достоверно проверить историю покупок."
+                               if raw is not None and raw.status is RawBprStatus.OK else "Исходные рекомендации BPR-MF недоступны.")
             return CustomerCardResult(state, hybrid.message, identity, identity.model_generation,
                                       products, hybrid=hybrid, raw_products=raw_products, raw_state=raw_state,
-                                      raw_message=("Исходных рекомендаций нет." if raw_state is ViewState.EMPTY else
-                                                   "Исходный BPR Top-10 недоступен." if not raw_products else ""))
+                                      raw_message=raw_message)
         try:
             raw = self.inference.get_recommendations(identity.model_user_id, k=10, model_dir=self.model_dir)
         except Exception:

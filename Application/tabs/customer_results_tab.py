@@ -78,6 +78,7 @@ class CustomerResultsTab(QWidget):
         self._build_propensity()
         self._build_recommendations()
         self._build_history()
+        self.page_layout.addWidget(self.calculations)
         QApplication.instance().installEventFilter(self)
         QApplication.instance().aboutToQuit.connect(self.shutdown)
 
@@ -181,7 +182,6 @@ class CustomerResultsTab(QWidget):
         self.recommendations.box.addWidget(self.raw_grid)
         self.page_layout.addWidget(self.recommendations)
         self.calculations = HybridCalculationSection()
-        self.page_layout.addWidget(self.calculations)
         self.hybrid_recommendations = StateSection("Рекомендации гибридной модели", SectionContent(
             ViewState.INITIAL, "После поиска появятся актуальные товары."), name="customerHybridRecommendations")
         self.product_grid = AdaptiveCardGrid(minimum_card_width=250, maximum_columns=5)
@@ -217,6 +217,7 @@ class CustomerResultsTab(QWidget):
         self.propensity = StateSection("Вероятность покупки в следующие 30 дней", SectionContent(
             ViewState.UNAVAILABLE, "Прогноз пока недоступен. Для расчёта нужна отдельная модель вероятности покупки."),
             name="customerPropensity")
+        self.propensity.message.hide()
         fields = AdaptiveCardGrid()
         fields.set_cards([FieldCard(field) for field in (
             DisplayField("Горизонт прогноза", "30 дней", ViewState.READY),

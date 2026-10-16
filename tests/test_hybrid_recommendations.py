@@ -438,7 +438,7 @@ def test_hybrid_service_unconfigured_unavailable_and_current_settings(tmp_path, 
                                           rules_path=path, purchases=evidence)
     result = service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path)
     assert result.status == "RULES_NOT_READY" and result.raw_bpr == raw
-    evidence.get.assert_not_called()
+    evidence.get.assert_called_once()  # Raw presentation now requires purchase verification even without rules.
     save_rules(rules(catalog), path)
     result = service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path)
     assert result.status == "READY" and len(result.items) == 5
@@ -464,6 +464,8 @@ def test_card_hybrid_does_not_change_profile_or_raw_source_contract(tmp_path, ca
     inference.get_candidate_sources.return_value = (raw_result(), {"source-0": BASE})
     purchases = Mock()
     purchases.get.return_value = PurchaseEvidence("READY")
+    purchases.get.return_value = replace(purchases.get.return_value, historical=PurchaseEvidence(
+        "READY", checked_codes=frozenset(r.model_item_code for r in raw_result().recommendations)))
     purchases.is_current.return_value = True
     path = tmp_path / "rules.json"
     save_rules(rules(catalog), path)

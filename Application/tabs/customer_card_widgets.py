@@ -221,10 +221,10 @@ class ProductCard(QFrame):
         self.code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.collection = text_label(f"Коллекция: {content.collection or 'Не указано'}")
         self.collection.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.score = text_label(f"Исходный BPR-score: {rec.raw_score:.6g}", style="resultsCardRank")
+        self.score = text_label(f"Исходный BPR-score: {rec.raw_score:.3f}", style="resultsCardRank")
         self.score.setToolTip(f"Полное значение: {rec.raw_score!r}. BPR-score не является вероятностью.")
         if hybrid is not None:
-            self.score.setText(f"Итоговый рейтинг: {hybrid.final_score:.8g}")
+            self.score.setText(f"Итоговый рейтинг: {hybrid.final_score:.3f}")
             self.score.setToolTip("Оценка ранжирования, не вероятность покупки. "
                                   f"Полное значение: {hybrid.final_score!r}. "
                                   f"Исходный товар: {rec.model_item_code}; BPR-score: {rec.raw_score!r}.")

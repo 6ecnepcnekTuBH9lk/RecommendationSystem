@@ -74,7 +74,7 @@ def wait_for(predicate, timeout=4000):
 def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card, monkeypatch):
     _, tab, service = card
     assert [tab.page_layout.itemAt(i).widget().objectName() for i in range(tab.page_layout.count())] == [
-        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "hybridCalculations", "customerHybridRecommendations", "customerHistory"]
+        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "customerHybridRecommendations", "customerHistory", "hybridCalculations"]
     assert tab.recommendations.content.state is ViewState.INITIAL
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.NOT_CONNECTED
@@ -140,6 +140,7 @@ def test_independent_future_sections_survive_recommendation_failures(card, state
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert all(c.value.text() != "0" for c in tab.kpi_grid.cards)
     assert "недоступен" in tab.propensity.message.text()
+    assert tab.propensity.message.isHidden()
 
 
 def test_fixed_top10_without_selector(card):

@@ -10,6 +10,7 @@ from PyQt6.QtTest import QTest
 
 from Application.customer_card_data import ViewState
 from Application.hybrid_recommendations import HybridItem, HybridResult, MatchSource
+from Application.purchased_products import PurchaseEvidence
 from Application.recommendation_rules import RecommendationRules, load_rules, save_rules
 from Application.tabs import recommendation_rules_widget as settings
 from Application.tabs.customer_card_widgets import ProductCard
@@ -27,7 +28,9 @@ def hybrid_result(customer="C", status="READY"):
     source = MatchSource("original-source", "Исходные брюки", -1.123456789, 37, .85, "weighted_attributes_v1", .7)
     item = HybridItem(f"target-{customer}", "Актуальные брюки", "Брюки", "NOS", 10, "", 1, .7, (source,))
     raw = RawBprResult("g", "A", RawBprStatus.OK, (RawBprRecommendation(37, "original-source", -1.123456789),))
-    return HybridResult(status, "Рекомендации из актуального ассортимента", (item,) if status == "READY" else (), raw_bpr=raw)
+    purchases = PurchaseEvidence("READY", historical=PurchaseEvidence("READY", checked_codes=frozenset(("original-source",))))
+    return HybridResult(status, "Рекомендации из актуального ассортимента", (item,) if status == "READY" else (),
+                        raw_bpr=raw, purchases=purchases, displayed_raw=raw.recommendations)
 
 
 @pytest.mark.parametrize("state", ["RULES_NOT_READY", "PURCHASES_NOT_READY", "EMPTY", "READY"])

@@ -71,7 +71,8 @@ def card_service(tmp_path, catalog):
     inference = Mock()
     inference.get_candidate_sources.return_value = (raw_result(20), {"source-0": BASE})
     purchases = Mock()
-    purchases.get.return_value = PurchaseEvidence("READY")
+    purchases.get.return_value = PurchaseEvidence("READY", historical=PurchaseEvidence(
+        "READY", checked_codes=frozenset(r.model_item_code for r in raw_result(20).recommendations)))
     purchases.is_current.return_value = True
     hybrid = HybridRecommendationService(catalog_path=catalog.path, categories_path=catalog.categories_path,
                                          rules_path=tmp_path / "rules.json", purchases=purchases)
@@ -87,14 +88,12 @@ def card_service(tmp_path, catalog):
     return service, catalog
 
 
-@pytest.mark.parametrize("failure", ["rules", "purchases", "empty", "catalog", "matching"])
+@pytest.mark.parametrize("failure", ["rules", "empty", "catalog", "matching"])
 def test_raw_top10_survives_later_failure_with_historical_metadata(card_service, monkeypatch, failure):
     service, catalog = card_service
     if failure != "rules":
         save_rules(rules(catalog), service.hybrid.rules_path)
-    if failure == "purchases":
-        service.hybrid.purchases.get.return_value = PurchaseEvidence("INDEX_NOT_READY")
-    elif failure == "empty":
+    if failure == "empty":
         save_rules(replace(rules(catalog), minimum_stock=99999), service.hybrid.rules_path)
     elif failure == "catalog":
         service.hybrid.catalog.path.unlink()
@@ -133,7 +132,7 @@ def test_ambiguous_current_photo_does_not_contaminate_historical_fields(card_ser
     assert result.raw_products[0].name == BASE["НазваниеНаСайте"]
 
 
-def test_hybrid_freshness_exception_keeps_independently_verified_raw(card_service):
+def test_purchase_freshness_exception_invalidates_both_recommendation_sections(card_service):
     service, catalog = card_service
     save_rules(rules(catalog), service.hybrid.rules_path)
     result = service.load("canonical")
@@ -141,7 +140,7 @@ def test_hybrid_freshness_exception_keeps_independently_verified_raw(card_servic
     service.hybrid.purchases.is_current.side_effect = RuntimeError()
     checked = service.validate_result(result)
     assert checked.state is ViewState.STALE and not checked.products
-    assert checked.raw_products == result.raw_products and checked.raw_state is ViewState.READY
+    assert not checked.raw_products and checked.raw_state is ViewState.STALE
 
 
 @pytest.mark.parametrize("mode", ["not_in_model", "changed_generation", "empty"])
@@ -158,4 +157,5 @@ def test_missing_stale_or_empty_raw_cannot_produce_fictitious_cards(card_service
     service.inference.get_candidate_sources.return_value = raw, metadata
     result = service.load("canonical")
     assert not result.raw_products and not result.products
-    assert result.raw_state is (ViewState.EMPTY if mode == "empty" else ViewState.UNAVAILABLE)
+    assert result.raw_state is {"empty": ViewState.EMPTY, "changed_generation": ViewState.STALE,
+                               "not_in_model": ViewState.UNAVAILABLE}[mode]

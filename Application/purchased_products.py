@@ -5,7 +5,7 @@ No source-order/creation-time heuristic selects a winning order snapshot.
 """
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
@@ -32,6 +32,9 @@ class PurchaseEvidence:
     generation: str | None = None
     source_version: str | None = None
     coverage: tuple = ()
+    # An independent resolver scope, evaluated over the SAME order snapshots.
+    historical: "PurchaseEvidence | None" = None
+    checked_codes: frozenset[str] = frozenset()
 
 
 def classify(status):
@@ -102,11 +105,58 @@ def assess_order(snapshots, resolver, *, owner_conflict=False, diagnostics=None,
     return purchased, uncertain, counts, cancelled_lines, conflict, unresolved
 
 
+class _PurchaseScope:
+    """Accumulate the existing consensus separately for each identity universe."""
+
+    def __init__(self, codes):
+        self.codes = frozenset(codes)
+        self.resolver = ProductResolver(ProductCatalog(self.codes, CatalogDiagnostics()))
+        self.ambiguous_prefixes = frozenset(code[:6] for code in self.codes if len(code) > 6)
+        self.purchased, self.uncertain, self.statuses = set(), set(), Counter()
+        self.cancelled_lines = self.conflicts = 0
+        self.unresolved = False
+        self.identities = {}
+
+    def add(self, snapshots, owner_conflict):
+        bought, doubtful, count, excluded, conflict, missing = assess_order(
+            snapshots, self.resolver, owner_conflict=owner_conflict, diagnostics=self.identities,
+            ambiguous_catalog_prefixes=self.ambiguous_prefixes)
+        self.purchased.update(bought)
+        self.uncertain.update(doubtful)
+        self.statuses.update(count)
+        self.cancelled_lines += excluded
+        self.conflicts += int(conflict)
+        self.unresolved |= missing
+
+    def evidence(self, ready):
+        # Keep outside identities throughout snapshot comparison; only clip the
+        # final evidence. Never merge model codes into the current catalog scope.
+        purchased = frozenset(self.purchased & self.codes)
+        uncertain = frozenset(self.uncertain & self.codes)
+        diagnostics = {"rows_by_status": dict(sorted(self.statuses.items())), "purchased_codes": len(purchased),
+                       "cancelled_lines_not_purchases": self.cancelled_lines,
+                       "unknown_status_lines": sum(n for s, n in self.statuses.items() if classify(s) == "UNKNOWN"),
+                       "conflicting_orders": self.conflicts, "uncertain_codes": len(uncertain),
+                       "unresolved_non_cancelled_products": self.unresolved,
+                       "historical_out_of_scope_codes": len(self.identities.get("historical_out_of_scope_codes", ())),
+                       "historical_out_of_scope_lines": self.identities.get("historical_out_of_scope_lines", 0),
+                       "unsafe_unresolved_identifier_lines": self.identities.get("unsafe_unresolved_identifier_lines", 0),
+                       "coverage_complete": True}
+        return PurchaseEvidence("UNRESOLVED_PRODUCTS" if self.unresolved else "READY", purchased, uncertain,
+                                diagnostics, ready.generation, ready.source_version, ready.coverage,
+                                checked_codes=self.codes)
+
+
 class PurchasedProductsService:
     def __init__(self, *, cache_dir=index.DEFAULT_CACHE_DIR):
         self._index = index.CustomerHistoryIndexService(cache_dir=cache_dir)
 
-    def get(self, customer_id, catalog, *, raw_root=index.DEFAULT_RAW_ROOT, cancelled=lambda: False):
+    def get(self, customer_id, catalog, *, raw_root=index.DEFAULT_RAW_ROOT, cancelled=lambda: False,
+            historical_codes=None):
+        """One indexed read; optional historical evidence never changes target resolution.
+
+        catalog=None permits historical-only validation when current CSV is unavailable.
+        """
         request = _request(customer_id, ("ORDER",), None, None, 1)
         root = Path(raw_root).resolve()
         path = self._index.index_path(raw_root=root)
@@ -116,14 +166,13 @@ class PurchasedProductsService:
             with index._reader_lock(root):
                 sources = index._capture_sources(root)
                 version = index._database_version(path)
-                resolver = ProductResolver(ProductCatalog(catalog.all_codes, CatalogDiagnostics()))
-                # A noncanonical long catalog code might alias the source prefix;
-                # do not use a mere membership miss as proof of disjointness.
-                ambiguous_prefixes = frozenset(code[:6] for code in catalog.all_codes if len(code) > 6)
-                purchased, uncertain, statuses = set(), set(), Counter()
-                cancelled_lines = conflicts = 0
-                unresolved = False
-                identity_diagnostics = {}
+                current = _PurchaseScope(catalog.all_codes if catalog is not None else ())
+                historical = _PurchaseScope(historical_codes) if historical_codes is not None else None
+                if historical is not None:
+                    # These model identities cannot be recovered unambiguously by
+                    # the existing prefix-6 resolver, even in an otherwise empty history.
+                    historical.uncertain.update(code for code in historical.codes if not code or len(code) > 6
+                                                or any(not c.isprintable() or c.isspace() for c in code))
                 with index._read_index(path) as connection:
                     connection.set_progress_handler(lambda: int(cancelled()), 1000)
                     ready = index._inspect_connection(connection, sources)  # No integrity scan.
@@ -145,33 +194,15 @@ class PurchasedProductsService:
                                 "LEFT JOIN product_occurrences p ON p.variant_key=l.variant_key "
                                 "AND p.role='line' AND p.ordinal=l.ordinal WHERE l.variant_key=?",
                                 (variant,)).fetchall())
-                        bought, doubtful, count, excluded, conflict, missing = assess_order(
-                            snapshots, resolver, owner_conflict=bool(event["owner_conflict"]), diagnostics=identity_diagnostics,
-                            ambiguous_catalog_prefixes=ambiguous_prefixes)
-                        purchased.update(bought)
-                        uncertain.update(doubtful)
-                        statuses.update(count)
-                        cancelled_lines += excluded
-                        conflicts += int(conflict)
-                        unresolved |= missing
+                        current.add(snapshots, bool(event["owner_conflict"]))
+                        if historical is not None:
+                            historical.add(snapshots, bool(event["owner_conflict"]))
                 if version != index._database_version(path) or index._capture_sources(root).version != sources.version:
                     return PurchaseEvidence("INDEX_NOT_READY")
-                # The whole current catalog is a conservative superset of every
-                # target pool. Retain outside identities during snapshot comparison
-                # so an old/new product conflict still makes the current code uncertain.
-                purchased.intersection_update(catalog.all_codes)
-                uncertain.intersection_update(catalog.all_codes)
-                diagnostics = {"rows_by_status": dict(sorted(statuses.items())), "purchased_codes": len(purchased),
-                               "cancelled_lines_not_purchases": cancelled_lines,
-                               "unknown_status_lines": sum(n for s, n in statuses.items() if classify(s) == "UNKNOWN"),
-                               "conflicting_orders": conflicts, "uncertain_codes": len(uncertain),
-                               "unresolved_non_cancelled_products": unresolved,
-                               "historical_out_of_scope_codes": len(identity_diagnostics.get("historical_out_of_scope_codes", ())),
-                               "historical_out_of_scope_lines": identity_diagnostics.get("historical_out_of_scope_lines", 0),
-                               "unsafe_unresolved_identifier_lines": identity_diagnostics.get("unsafe_unresolved_identifier_lines", 0),
-                               "coverage_complete": True}
-                return PurchaseEvidence("UNRESOLVED_PRODUCTS" if unresolved else "READY", frozenset(purchased),
-                                        frozenset(uncertain), diagnostics, ready.generation, ready.source_version, ready.coverage)
+                result = current.evidence(ready)
+                if historical is not None:
+                    result = replace(result, historical=historical.evidence(ready))
+                return result
         except Exception as exc:
             if cancelled():
                 return PurchaseEvidence("CANCELLED")
