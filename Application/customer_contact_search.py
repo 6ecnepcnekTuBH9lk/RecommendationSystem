@@ -20,6 +20,7 @@ from enum import Enum
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,9 @@ import sqlite3
 import tempfile
 from threading import Lock
 from time import perf_counter
+
+
+logger = logging.getLogger(__name__)
 
 from Application.customer_profile_service import _database_version, _reader_lock, _valid_id
 from Application.customer_profiles import _card_number
@@ -234,14 +238,21 @@ def _sources(root):
 
 @contextmanager
 def _read_database(path):
+    logger.debug("contact_database stage=header")
     _database_version(path)  # No WAL/shm creation or hot-journal recovery.
-    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.5)
+    logger.debug("contact_database stage=sqlite_open")
+    try:
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error as exc:
+        logger.warning("contact_database stage=sqlite_open error=%s", type(exc).__name__)
+        raise
     try:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")
         yield connection
     finally:
         connection.close()
+        logger.debug("contact_database stage=sqlite_closed")
 
 
 def _metadata(connection, sources):
@@ -320,31 +331,40 @@ class CustomerContactSearchService:
         normalized = normalize_search_input(kind, value)
         if normalized is None:
             return ContactSearchResult(ContactSearchStatus.INVALID_INPUT)
+        stage = "lock"
         try:
             root = Path(raw_root).resolve()
             with _reader_lock(root):
+                stage = "sources"
                 sources = _sources(root)
                 path = self.index_path(raw_root=root)
                 if not path.exists():
                     raise _IndexNotReady
                 start = perf_counter()
+                stage = "sqlite_open"
                 with _read_database(path) as connection:
+                    stage = "metadata"
                     metadata = _metadata(connection, sources)
+                    stage = "lookup"
                     count, customer = connection.execute(
                         "SELECT COUNT(*), MIN(customer_id) FROM contacts WHERE kind=? AND contact_key=?",
                         (kind.value, _contact_key(metadata["hmac_key"], kind, normalized)),
                     ).fetchone()
+                stage = "source_version"
                 if _sources(root).version != sources.version:
                     raise _IndexNotReady
                 if count == 1 and not _valid_id(customer):
                     raise ValueError("Invalid indexed identity")
                 status = (ContactSearchStatus.MATCHED if count == 1 else ContactSearchStatus.AMBIGUOUS
                           if count > 1 else ContactSearchStatus.NOT_FOUND)
+                logger.debug("contact_search stage=complete status=%s", status.value)
                 return ContactSearchResult(status, customer if count == 1 else None, count,
                                            sources.version, (perf_counter() - start) * 1000)
         except _IndexNotReady:
+            logger.debug("contact_search stage=%s status=INDEX_NOT_READY", stage)
             return ContactSearchResult(ContactSearchStatus.INDEX_NOT_READY)
         except Exception as exc:
+            logger.warning("contact_search stage=%s error=%s", stage, type(exc).__name__)
             return ContactSearchResult(ContactSearchStatus.SOURCE_UNAVAILABLE if _unavailable(exc)
                                        else ContactSearchStatus.SOURCE_INCONSISTENT)
 

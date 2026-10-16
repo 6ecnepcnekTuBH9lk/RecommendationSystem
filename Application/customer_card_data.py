@@ -1,9 +1,17 @@
 """Display contracts and one-customer lookup; no widgets, history or exports."""
 
 import csv
+import logging
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from Application.hybrid_recommendations import HybridItem, HybridResult
+
+
+logger = logging.getLogger(__name__)
 
 from Application import customer_contact_search as contact_backend
 from Application.customer_profile_service import CustomerProfileResult, CustomerProfileService, ProfileStatus
@@ -65,6 +73,8 @@ class ProductContent:
     name: str = ""
     photo_url: str = ""
     reference_message: str = ""
+    collection: str = ""
+    hybrid_item: "HybridItem | None" = None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -76,6 +86,7 @@ class CustomerCardResult:
     products: tuple[ProductContent, ...] = ()
     profile: CustomerProfileResult | None = None
     contact_search: contact_backend.ContactSearchResult | None = None
+    hybrid: "HybridResult | None" = None
 
 
 def contact_search_failure(result):
@@ -83,12 +94,12 @@ def contact_search_failure(result):
     status = contact_backend.ContactSearchStatus
     messages = {
         status.AMBIGUOUS: (ViewState.UNAVAILABLE,
-                          f"Найдено несколько покупателей ({result.candidate_count}). Уточните поиск или используйте MindboxID."),
-        status.NOT_FOUND: (ViewState.EMPTY, "Покупатели с указанным контактом не найдены."),
+                          f"Найдено несколько клиентов ({result.candidate_count}). Уточните поиск или используйте MindboxID."),
+        status.NOT_FOUND: (ViewState.EMPTY, "Клиенты с указанным контактом не найдены."),
         status.INVALID_INPUT: (ViewState.ERROR, "Некорректный формат. Проверьте значение и подсказку для выбранного типа поиска."),
         status.INDEX_NOT_READY: (ViewState.UNAVAILABLE, "Поисковый индекс отсутствует или устарел. Необходимо построить или обновить индекс контактов."),
-        status.SOURCE_UNAVAILABLE: (ViewState.UNAVAILABLE, "Источник поиска покупателей недоступен. Повторите поиск позднее."),
-        status.SOURCE_INCONSISTENT: (ViewState.ERROR, "Источники поиска покупателей несогласованы. Карточка недоступна."),
+        status.SOURCE_UNAVAILABLE: (ViewState.UNAVAILABLE, "Источник поиска клиентов недоступен. Повторите поиск позднее."),
+        status.SOURCE_INCONSISTENT: (ViewState.ERROR, "Источники поиска клиентов несогласованы. Карточка недоступна."),
     }
     state, message = messages[result.status]
     return CustomerCardResult(state, message, contact_search=result)
@@ -99,36 +110,44 @@ def validate_contact_match(result, *, raw_root):
 
     The backend currently exposes search + source_version, but no public
     is_current(). Reuse its own metadata readers, keeping that compatibility
-    boundary here. Contact lookups themselves execute only in the Qt worker.
+    boundary here. Both lookups and this SQLite freshness check run in the worker.
     """
     status = contact_backend.ContactSearchStatus
+    stage = "lock"
     try:
         root = Path(raw_root).resolve()
         with contact_backend._reader_lock(root):
+            stage = "sources"
             sources = contact_backend._sources(root)
             if result.source_version != sources.version:
+                logger.debug("contact_validation stage=source_version status=INDEX_NOT_READY")
                 return contact_backend.ContactSearchResult(status.INDEX_NOT_READY)
             path = contact_backend.CustomerContactSearchService().index_path(raw_root=root)
             if not path.exists():
                 return contact_backend.ContactSearchResult(status.INDEX_NOT_READY)
+            stage = "sqlite_open"
             with contact_backend._read_database(path) as connection:
+                stage = "metadata"
                 contact_backend._metadata(connection, sources)
+        logger.debug("contact_validation stage=complete status=MATCHED")
         return result
     except contact_backend._IndexNotReady:
+        logger.debug("contact_validation stage=%s status=INDEX_NOT_READY", stage)
         return contact_backend.ContactSearchResult(status.INDEX_NOT_READY)
     except Exception as exc:
+        logger.warning("contact_validation stage=%s error=%s", stage, type(exc).__name__)
         return contact_backend.ContactSearchResult(status.SOURCE_UNAVAILABLE if contact_backend._unavailable(exc)
                                                  else status.SOURCE_INCONSISTENT)
 
 
 IDENTITY_MESSAGES = {
-    CustomerModelIdentityStatus.MATCHED_EXACT: "Найден единственный профиль в модели BPR-MF.",
-    CustomerModelIdentityStatus.MATCHED_VIA_MERGE: "Найден единственный исторический профиль после объединения клиентов.",
-    CustomerModelIdentityStatus.AMBIGUOUS: "У покупателя несколько исторических профилей в модели. Рекомендации недоступны.",
-    CustomerModelIdentityStatus.NOT_IN_MODEL: "Покупатель отсутствует в BPR-MF. Персональные рекомендации недоступны.",
-    CustomerModelIdentityStatus.INVALID_ID: "Введите корректный MindboxID без пробелов по краям.",
-    CustomerModelIdentityStatus.SOURCE_UNAVAILABLE: "Источники сопоставления покупателей недоступны. Повторите поиск позднее.",
-    CustomerModelIdentityStatus.SOURCE_INCONSISTENT: "Источники сопоставления покупателей несовместимы. Рекомендации недоступны.",
+    CustomerModelIdentityStatus.MATCHED_EXACT: "Найден единственный профиль в нейросетевой модели",
+    CustomerModelIdentityStatus.MATCHED_VIA_MERGE: "Найден единственный исторический профиль после объединения клиентов",
+    CustomerModelIdentityStatus.AMBIGUOUS: "У клиента несколько исторических профилей в модели. Рекомендации недоступны",
+    CustomerModelIdentityStatus.NOT_IN_MODEL: "Клиент отсутствует в данных нейросетевой модели. Персональные рекомендации недоступны",
+    CustomerModelIdentityStatus.INVALID_ID: "Введите корректный MindboxID без пробелов по краям",
+    CustomerModelIdentityStatus.SOURCE_UNAVAILABLE: "Источники сопоставления клиентов недоступны. Повторите поиск позднее",
+    CustomerModelIdentityStatus.SOURCE_INCONSISTENT: "Источники сопоставления клиентов несовместимы. Рекомендации недоступны",
 }
 
 
@@ -141,20 +160,24 @@ class CustomerCardService:
     """Owned by a single worker; backend caches and catalog are reused there."""
 
     def __init__(self, *, bridge=None, inference=None, profile_service=None, model_dir=PROJECT_ROOT / "model",
-                 raw_root=INPUT_DATA_DIR / "MindboxRaw", catalog_path=INPUT_DATA_DIR / "nomenclature.csv"):
+                 raw_root=INPUT_DATA_DIR / "MindboxRaw", catalog_path=INPUT_DATA_DIR / "nomenclature.csv", hybrid=None):
         self.bridge = bridge if bridge is not None else CustomerIdentityBridge()
         self.inference = inference if inference is not None else RawBprInferenceService()
         self.profile_service = profile_service if profile_service is not None else CustomerProfileService()
         self.profile_observer = None
+        self.hybrid = hybrid
         self.model_dir, self.raw_root, self.catalog_path = Path(model_dir), Path(raw_root), Path(catalog_path)
         self._catalog_key = None
         self._catalog = {}
+        self._catalog_ambiguous = set()
+        self._catalog_history_fields = {}
+        self._history_resolver = None
 
     def _references(self):
         key = _version(self.catalog_path)
         if self._catalog_key == key:
             return self._catalog
-        values = {}
+        values, ambiguous, history_fields = {}, set(), {}
         with self.catalog_path.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream, delimiter="|")
             if not reader.fieldnames or "КодНоменклатуры" not in reader.fieldnames:
@@ -164,12 +187,47 @@ class CustomerCardService:
                     raise ValueError("Malformed display catalog row")
                 code = row["КодНоменклатуры"].strip()
                 if code:
-                    values[code] = ((row.get("НазваниеНаСайте") or "").strip() or (row.get("Номенклатура") or "").strip(),
-                                    (row.get("ТитульнаяФотография") or "").strip())
+                    info = ((row.get("НазваниеНаСайте") or "").strip() or (row.get("Номенклатура") or "").strip(),
+                            (row.get("ТитульнаяФотография") or "").strip())
+                    fields = ((row.get("ВидНоменклатуры") or "").strip(), (row.get("Коллекция") or "").strip())
+                    if code in values:
+                        if values[code] != info:
+                            ambiguous.add(code)
+                        fields = tuple(value if value == previous else "" for value, previous in zip(fields, history_fields[code]))
+                    values[code] = info
+                    history_fields[code] = fields
         if _version(self.catalog_path) != key:
             raise ValueError("Display catalog changed during reading")
         self._catalog_key, self._catalog = key, values
+        self._catalog_ambiguous = ambiguous
+        self._catalog_history_fields = history_fields
+        self._history_resolver = None
         return values
+
+    def history_product_references(self, page):
+        """Reuse the display catalog and existing product identity rules in worker."""
+        from Application.product_resolution import CatalogDiagnostics, ProductCatalog, ProductResolver, ResolutionStatus
+        from Application.customer_history_records import OrderSnapshot
+        from Application.photo.photo_processing import _photo_to_url
+        metadata = self._references()
+        if self._history_resolver is None:
+            self._history_resolver = ProductResolver(ProductCatalog(frozenset(metadata), CatalogDiagnostics()))
+        resolver = self._history_resolver
+        output = {}
+        for event in page.events:
+            for variant in event.variants:
+                detail = variant.event.details
+                references = (line.reference for line in detail.lines) if isinstance(detail, OrderSnapshot) else (
+                    occurrence.reference for occurrence in detail.products)
+                for reference in references:
+                    key = reference.product
+                    if key is None or key in output:
+                        continue
+                    match = resolver.resolve(key, strict=False)
+                    if match.status is ResolutionStatus.RESOLVED and match.item_id not in self._catalog_ambiguous:
+                        name, url = metadata[match.item_id]
+                        output[key] = (name, _photo_to_url(url), *self._catalog_history_fields[match.item_id])
+        return output
 
     def is_current(self, result: CustomerCardResult) -> bool:
         return (result.identity is not None and result.identity.is_matched
@@ -199,6 +257,9 @@ class CustomerCardService:
             if not current:
                 result = replace(result, state=ViewState.STALE, products=(),
                                  message="Источники рекомендаций изменились. Повторите поиск.")
+            elif result.hybrid is not None and (self.hybrid is None or not self.hybrid.is_current(result.hybrid, raw_root=self.raw_root)):
+                result = replace(result, state=ViewState.STALE, products=(),
+                                 message="Источники или правила рекомендаций изменились. Повторите поиск.")
         profile = result.profile
         if profile is not None and profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
             profile = self.validate_profile(profile)
@@ -246,6 +307,18 @@ class CustomerCardService:
                 CustomerModelIdentityStatus.INVALID_ID, CustomerModelIdentityStatus.SOURCE_UNAVAILABLE,
                 CustomerModelIdentityStatus.SOURCE_INCONSISTENT) else ViewState.UNAVAILABLE)
             return CustomerCardResult(state, IDENTITY_MESSAGES[identity.status], identity)
+        if self.hybrid is not None:
+            hybrid = self.hybrid.get(identity, self.inference, model_dir=self.model_dir,
+                                     raw_root=self.raw_root, cancelled=cancelled)
+            state = {"READY": ViewState.READY, "EMPTY": ViewState.EMPTY, "STALE": ViewState.STALE,
+                     "CANCELLED": ViewState.CANCELLED}.get(hybrid.status, ViewState.UNAVAILABLE)
+            products = tuple(ProductContent(
+                RawBprRecommendation(item.sources[0].source_raw_rank, item.sources[0].source_model_item_code,
+                                     item.sources[0].source_raw_score),
+                item.target_name, item.photo_url, collection=item.target_collection, hybrid_item=item,
+            ) for item in hybrid.items)
+            return CustomerCardResult(state, hybrid.message, identity, identity.model_generation,
+                                      products, hybrid=hybrid)
         try:
             raw = self.inference.get_recommendations(identity.model_user_id, k=10, model_dir=self.model_dir)
         except Exception:
@@ -255,7 +328,7 @@ class CustomerCardService:
         if raw.model_generation != identity.model_generation:
             return CustomerCardResult(ViewState.STALE, "Модель изменилась во время поиска. Повторите запрос.", identity)
         if raw.status is not RawBprStatus.OK:
-            return CustomerCardResult(ViewState.UNAVAILABLE, "Покупатель больше не найден в активной модели.", identity)
+            return CustomerCardResult(ViewState.UNAVAILABLE, "Клиент больше не найден в активной модели.", identity)
         try:
             metadata = self._references()
             reference_error = False
@@ -265,12 +338,14 @@ class CustomerCardService:
             rec, *metadata.get(rec.model_item_code, ("", "")),
             "Справочник товаров недоступен" if reference_error else (
                 "Нет в текущем каталоге" if rec.model_item_code not in metadata else ""),
+            collection=(self._catalog_history_fields.get(rec.model_item_code, ("", ""))[1]
+                        if not reference_error and rec.model_item_code not in self._catalog_ambiguous else ""),
         ) for rec in raw.recommendations)
         result = CustomerCardResult(ViewState.READY if products else ViewState.EMPTY,
-                                    "Оригинальные рекомендации BPR-MF без дополнительной фильтрации.",
+                                    "Оригинальные рекомендации нейросетевой модели без дополнительной фильтрации",
                                     identity, raw.model_generation, products)
         if cancelled():
             return CustomerCardResult(ViewState.CANCELLED, "Поиск отменён.")
         if not self.is_current(result):
-            return CustomerCardResult(ViewState.STALE, "Модель или объединения покупателей изменились. Повторите поиск.", identity)
+            return CustomerCardResult(ViewState.STALE, "Модель или объединения клиентов изменились. Повторите поиск.", identity)
         return result

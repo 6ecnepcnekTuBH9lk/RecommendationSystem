@@ -1,7 +1,8 @@
 """Small card components using the existing statistics palette and spacing."""
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFrame, QGridLayout, QLabel, QLayout, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtGui import QPainter
+from PyQt6.QtWidgets import QFrame, QGridLayout, QLabel, QLayout, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
 
 from Application.customer_card_data import DisplayField, SectionContent, ViewState
 from Application.theme.layout_metrics import BLOCK_SPACING, COMPACT_SPACING, PAGE_MARGIN
@@ -16,6 +17,20 @@ def text_label(text="", *, style=None):
     if style:
         label.setProperty("class", style)
     return label
+
+
+class CustomerBusyProgressBar(QProgressBar):
+    """Same busy-text painting approach as the data-loading tab."""
+    def text(self):
+        return "Идет загрузка..." if self.maximum() == 0 else super().text()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.maximum() == 0:
+            painter = QPainter(self)
+            painter.setPen(self.palette().text().color())
+            painter.setFont(self.font())
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
 
 
 class AdaptiveCardGrid(QWidget):
@@ -68,6 +83,28 @@ class AdaptiveCardGrid(QWidget):
                              (self.width() + BLOCK_SPACING) // (self.minimum_card_width + BLOCK_SPACING)))
         if columns != self.columns:
             self.reflow()
+
+
+class ProfileFieldGrid(AdaptiveCardGrid):
+    """Three vertical field groups; whole groups wrap together on narrow cards."""
+
+    def __init__(self):
+        super().__init__(minimum_card_width=220, maximum_columns=3)
+
+    def reflow(self):
+        self.columns = max(1, min(self.maximum_columns,
+                                  (self.width() + BLOCK_SPACING) // (self.minimum_card_width + BLOCK_SPACING)))
+        while self.grid.count():
+            self.grid.takeAt(0)
+        for column in range(self.maximum_columns):
+            self.grid.setColumnStretch(column, int(column < self.columns))
+        for index, card in enumerate(self.cards):
+            visible = index < self.visible_count
+            card.setVisible(visible)
+            if visible:
+                group, row = divmod(index, 3)
+                self.grid.addWidget(card, (group // self.columns) * 3 + row, group % self.columns)
+        self.updateGeometry()
 
 
 class StateSection(QWidget):
@@ -168,7 +205,8 @@ class ProductCard(QFrame):
         box.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
         box.setSpacing(BLOCK_SPACING)
         rec = content.recommendation
-        self.rank = text_label(f"№{rec.rank}", style="resultsCardRank")
+        hybrid = content.hybrid_item
+        self.rank = text_label(f"№{hybrid.final_rank if hybrid is not None else rec.rank}", style="resultsCardRank")
         self.photo = PhotoLabel("Загрузка фото…")
         self.photo.setTextFormat(Qt.TextFormat.PlainText)
         self.photo.setMinimumWidth(0)
@@ -177,12 +215,19 @@ class ProductCard(QFrame):
         self.photo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.name = text_label(content.name or "Название недоступно", style="resultsProductName")
         self.name.setToolTip(content.name or "Справочные сведения о товаре недоступны")
-        self.code = text_label(f"Код: {rec.model_item_code}")
-        self.code.setToolTip(rec.model_item_code)
+        code = hybrid.target_item_code if hybrid is not None else rec.model_item_code
+        self.code = text_label(f"Код: {code}")
+        self.code.setToolTip(code)
         self.code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.collection = text_label(f"Коллекция: {content.collection or 'Не указано'}")
+        self.collection.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.score = text_label(f"Исходный BPR-score: {rec.raw_score:.6g}", style="resultsCardRank")
         self.score.setToolTip(f"Полное значение: {rec.raw_score!r}. BPR-score не является вероятностью.")
-        for widget in (self.rank, self.photo, self.name, self.code, self.score):
+        if hybrid is not None:
+            self.score.setText(f"Оценка подбора: {hybrid.final_score:.3f}")
+            self.score.setToolTip("Оценка ранжирования, не вероятность покупки. "
+                                  f"Исходный товар: {rec.model_item_code}; BPR-score: {rec.raw_score!r}.")
+        for widget in (self.rank, self.photo, self.name, self.code, self.collection, self.score):
             box.addWidget(widget)
         if content.reference_message:
             box.addWidget(text_label(content.reference_message, style="statisticsInfo"))

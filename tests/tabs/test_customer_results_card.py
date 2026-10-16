@@ -74,7 +74,7 @@ def wait_for(predicate, timeout=4000):
 def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card, monkeypatch):
     _, tab, service = card
     assert [tab.page_layout.itemAt(i).widget().objectName() for i in range(tab.page_layout.count())] == [
-        "customerSearch", "customerProfile", "customerKpis", "customerRecommendations", "customerHistory", "customerPropensity"]
+        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "customerHistory"]
     assert tab.recommendations.content.state is ViewState.INITIAL
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.NOT_CONNECTED
@@ -82,7 +82,7 @@ def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card,
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert not tab.export_button.isEnabled()
     assert not tab.history_filter.isEnabled()
-    assert [tab.history_filter.itemText(i) for i in range(4)] == ["Заказы", "Просмотры", "Избранное", "Прочее"]
+    assert [button.text().strip() for button in tab.history.buttons.values()] == ["Заказы", "Просмотры", "Избранное"]
     assert tab._thread is None
     assert not tab.product_grid.cards
     service.load.assert_not_called()
@@ -113,8 +113,8 @@ def test_search_button_enter_background_and_original_top10(card, trigger):
     assert tab.product_grid.cards[0].code.text() == "Код: ORIGINAL-1"
     assert tab.product_grid.cards[0].content.recommendation.raw_score == 1.123456789
     assert "1.123456789" in tab.product_grid.cards[0].score.toolTip()
-    assert tab.canonical_id.text() == "Canonical MindboxID: C"
-    assert tab.model_id.text() == "ID в модели BPR-MF: A"
+    assert tab.result.identity.canonical_customer_id == "C"
+    assert tab.result.identity.model_user_id == "A"
     assert not tab.progress.isVisible() and not tab.cancel_button.isEnabled()
     assert "BPR" in host.status_label.text()
 

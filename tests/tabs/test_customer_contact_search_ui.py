@@ -146,8 +146,8 @@ def test_lookup_failures_never_load_or_confirm_a_customer(card, status, state, m
     search(card)
     assert card.tab.result.state is state and message in card.tab.search_status.text()
     assert card.tab.result.identity is None and card.tab.result.profile is None
-    assert not card.tab.product_grid.cards and not card.tab.profile_fields.cards
-    assert "ещё не определён" in card.tab.canonical_id.text()
+    assert not card.tab.product_grid.cards and len(card.tab.profile_fields.cards) == 9
+    assert all(field.content.state is not ViewState.READY for field in card.tab.profile_fields.cards)
     card.service.profile_service.get_profile.assert_not_called()
     card.service.bridge.resolve.assert_not_called()
     card.service.inference.get_recommendations.assert_not_called()
@@ -191,7 +191,8 @@ def test_type_change_invalidates_running_result_and_keeps_gui_responsive(card):
     wait(lambda: card.tab.result is not None)
     card.backend.assert_called_once()
     assert card.service.profile_service.get_profile.call_args.args == ("LATEST",)
-    assert "LATEST" in card.tab.canonical_id.text() and "OLD" not in card.tab.canonical_id.text()
+    assert card.tab.result.profile.canonical_customer_id == "LATEST"
+    assert all("OLD" not in field.value.text() for field in card.tab.profile_fields.cards)
 
 
 def test_latest_contact_request_is_snapshot_of_type_and_value(card):
@@ -284,20 +285,22 @@ def test_contact_freshness_change_during_card_load_clears_profile_and_recommenda
     wait(lambda: card.tab.result is not None)
     assert card.tab.result.contact_search.status is S.INDEX_NOT_READY
     assert card.tab.result.profile is None and card.tab.result.identity is None
-    assert not card.tab.profile_fields.cards and not card.tab.product_grid.cards
+    assert all(field.content.state is not ViewState.READY for field in card.tab.profile_fields.cards)
+    assert not card.tab.product_grid.cards
 
 
-def test_contact_freshness_rechecked_at_gui_handoff(card):
-    original = card.service.validate_result
+def test_contact_freshness_rechecked_in_worker_after_gui_handoff(card):
+    original = card.tab._queue_validation
     gui_thread = get_ident()
-    def validate(result):
-        if get_ident() == gui_thread and result.state is ViewState.READY:
-            card.gate.side_effect = lambda *args, **kwargs: ContactSearchResult(S.INDEX_NOT_READY)
-        return original(result)
-    card.service.validate_result = validate
+    def queue(request_id, result):
+        assert get_ident() == gui_thread
+        card.gate.side_effect = lambda *args, **kwargs: ContactSearchResult(S.INDEX_NOT_READY)
+        original(request_id, result)
+    card.tab._queue_validation = queue
     search(card)
     assert card.tab.result.contact_search.status is S.INDEX_NOT_READY
-    assert not card.tab.profile_fields.cards and not card.tab.product_grid.cards
+    assert all(field.content.state is not ViewState.READY for field in card.tab.profile_fields.cards)
+    assert not card.tab.product_grid.cards
 
 
 def test_contact_selection_does_not_follow_an_unconfirmed_identity_change(card):

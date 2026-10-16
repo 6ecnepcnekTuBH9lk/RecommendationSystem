@@ -291,9 +291,9 @@ class AnalysisFilterTab(QWidget):
         self.save_mapping_button.clicked.connect(self.save_store_mapping)
         left_layout.addWidget(self.save_mapping_button, alignment=Qt.AlignmentFlag.AlignLeft)
         left_layout.addStretch()
-        placeholder = QLabel("В разработке")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_layout.addWidget(placeholder, 1)
+        from Application.tabs.recommendation_rules_widget import RecommendationRulesWidget
+        self.recommendation_rules = RecommendationRulesWidget(self)
+        right_layout.addWidget(self.recommendation_rules, 1)
         self._update_readiness()
         self._size_inputs()
         QTimer.singleShot(0, self.refresh_options)

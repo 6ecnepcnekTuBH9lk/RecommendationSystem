@@ -86,6 +86,19 @@ def test_saved_features_original_scores_ranks_and_precision(artifact):
     assert next(r.raw_score for r in result.recommendations if r.model_item_code == mappings["idx2item"][5]) == 10
 
 
+def test_candidate_sources_same_scores_snapshot_and_detached_historical_metadata(artifact):
+    service = raw.RawBprInferenceService()
+    paths = (artifact[1] / "bprmf.pt", artifact[1] / "mappings.json")
+    before = [p.read_bytes() for p in paths]
+    original = service.get_recommendations("user-exact", k=100, model_dir=artifact[0])
+    candidates, metadata = service.get_candidate_sources("user-exact", model_dir=artifact[0])
+    assert candidates == original
+    assert metadata == artifact[3]["train_item_meta"]
+    metadata.clear()
+    assert service.get_source_metadata(model_dir=artifact[0])[1] == artifact[3]["train_item_meta"]
+    assert [p.read_bytes() for p in paths] == before
+
+
 def test_prefixes_exact_ties_use_mapping_order_and_repeat(artifact):
     service = raw.RawBprInferenceService()
     results = [_request(artifact, k=k, service=service) for k in (1, 3, 5, 10)]

@@ -2,42 +2,52 @@
 
 from collections import defaultdict, deque
 from dataclasses import replace
+import logging
 
 from PyQt6.QtCore import QEvent, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtNetwork import QNetworkAccessManager
-from PyQt6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLineEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from Application.customer_card_data import (
-    CustomerCardResult, CustomerCardService, DisplayField, IDENTITY_MESSAGES, SectionContent, ViewState, contact_search_failure,
+    CustomerCardResult, CustomerCardService, DisplayField, SectionContent, ViewState, contact_search_failure,
 )
 from Application.paths import ICONS_DIR
 from Application.customer_profile_service import CustomerProfileResult, ProfileStatus
-from Application.customer_contact_search import ContactSearchResult, ContactSearchStatus, ContactType
+from Application.customer_contact_search import ContactSearchStatus, ContactType
 from Application.customer_profile_presentation import PROFILE_FIELDS, profile_content
 from Application.photo.photo_processing import _invalidate_photo_targets, _set_photo_label
 from Application.settings.set_status import schedule_status_reset, set_status_error, set_status_ok, set_status_processing
 from Application.theme.layout_metrics import BLOCK_SPACING, CONTROL_SPACING, PAGE_MARGIN, SECTION_SPACING
-from .customer_card_widgets import AdaptiveCardGrid, FieldCard, ProductCard, StateSection, card_frame, text_label
+from .customer_card_widgets import AdaptiveCardGrid, CustomerBusyProgressBar, FieldCard, ProductCard, ProfileFieldGrid, StateSection, card_frame, text_label
 from .customer_card_worker import CustomerCardRequest, CustomerCardWorker
 from .customer_history_widgets import CustomerHistorySection
+
+
+logger = logging.getLogger(__name__)
 
 
 class CustomerResultsTab(QWidget):
     dispatch = pyqtSignal(object)
     history_dispatch = pyqtSignal(object)
+    validation_dispatch = pyqtSignal(object, object)
     result_applied = pyqtSignal(int)
 
     def __init__(self, window, *, service=None, history_lookup=None):
         super().__init__(window)
         self.setObjectName("customerResultsTab")
         self.window = window
-        self.service = service if service is not None else CustomerCardService()
+        if service is None:
+            from Application.hybrid_recommendations import HybridRecommendationService
+            service = CustomerCardService(hybrid=HybridRecommendationService())
+        self.service = service
         self._history_lookup = history_lookup
+        self._deferred_history = None
         self._thread = self._worker = self._active = self._pending = None
         self._request_id = 0
         self._closing = False
         self.result = None
+        self._profile_notice = ""
         self.net = getattr(window, "net", None) or QNetworkAccessManager(self)
         self._img_gen = 0
         self._img_queue = deque()
@@ -61,12 +71,13 @@ class CustomerResultsTab(QWidget):
         self.page_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.page)
         self._build_search()
+        self._search_message = self.search_status.text()
         self._build_profile()
         self._build_kpis()
+        self._build_propensity()
         self._build_recommendations()
         self._build_history()
-        self._build_propensity()
-        window.installEventFilter(self)
+        QApplication.instance().installEventFilter(self)
         QApplication.instance().aboutToQuit.connect(self.shutdown)
 
     def _build_search(self):
@@ -74,12 +85,12 @@ class CustomerResultsTab(QWidget):
         self.search_card.setObjectName("customerSearch")
         self.search_card.setProperty("state", ViewState.INITIAL.value)
         box.setSpacing(BLOCK_SPACING)
-        box.addWidget(text_label("Карточка покупателя", style="resultsTitle"))
+        box.addWidget(text_label("Профиль клиента", style="resultsTitle"))
         self.search_row = QHBoxLayout()
         self.search_row.setContentsMargins(0, 0, 0, 0)
         self.search_row.setSpacing(CONTROL_SPACING)
         self.search_type = QComboBox()
-        self.search_type.setAccessibleName("Тип поиска покупателя")
+        self.search_type.setAccessibleName("Тип поиска клиента")
         self.search_type.setMinimumWidth(0)
         self.search_type.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.search_type.setMinimumContentsLength(12)
@@ -89,25 +100,25 @@ class CustomerResultsTab(QWidget):
         self.search_row.addWidget(self.search_type)
         self.customer_input = QLineEdit()
         self.customer_input.setMinimumWidth(0)
-        self.customer_input.setPlaceholderText("Введите MindboxID покупателя")
+        self.customer_input.setPlaceholderText("Введите MindboxID клиента...")
         self.customer_input.returnPressed.connect(self.search)
         self.search_row.addWidget(self.customer_input, 1)
-        self.search_button = QPushButton(QIcon(str(ICONS_DIR / "search.png")), "Найти")
+        self.search_button = QPushButton(QIcon(str(ICONS_DIR / "search.png")), " Найти")
         self.search_button.clicked.connect(self.search)
-        self.cancel_button = QPushButton("Отменить поиск")
+        self.cancel_button = QPushButton(QIcon(str(ICONS_DIR / "failure.png")), " Отменить поиск")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_search)
-        self.export_button = QPushButton(QIcon(str(ICONS_DIR / "excel.png")), "Экспорт в Excel")
+        self.export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт рекомендаций")
         self.export_button.setEnabled(False)
         self.export_button.setToolTip("Единый Excel-файл будет доступен после согласования его структуры.")
         for button in (self.search_button, self.cancel_button, self.export_button):
             self.search_row.addWidget(button)
         box.addLayout(self.search_row)
-        self.search_hint = text_label("MindboxID без пробелов по краям.", style="statisticsInfo")
+        self.search_hint = text_label("Вводить значение без пробелов по краям", style="statisticsInfo")
         box.addWidget(self.search_hint)
-        self.search_status = text_label("Введите MindboxID, чтобы посмотреть оригинальные рекомендации BPR-MF.")
+        self.search_status = text_label("Введите значение для выбранного типа поиска, чтобы посмотреть оригинальные рекомендации нейросетевой модели")
         box.addWidget(self.search_status)
-        self.progress = QProgressBar()
+        self.progress = CustomerBusyProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
         self.progress.hide()
@@ -125,31 +136,24 @@ class CustomerResultsTab(QWidget):
         self._clear_result()
         kind = self.search_type.currentData()
         placeholder, hint = {
-            None: ("Введите MindboxID покупателя", "MindboxID без пробелов по краям."),
-            ContactType.PHONE: ("Введите телефон: +7…", "Международный формат +… или 00…; также полный 7… (11 цифр). Номера с 8… и десятизначные не поддерживаются."),
-            ContactType.EMAIL: ("Введите email покупателя", "Полный email. Регистр не учитывается; точки и +suffix сохраняются."),
-            ContactType.DISCOUNT_CARD: ("Введите номер дисконтной карты", "Точный номер карты, включая ведущие нули."),
+            None: ("Введите MindboxID клиента...", "Вводить значение без пробелов по краям"),
+            ContactType.PHONE: ("Введите телефон клиента: +7...", "Не поддерживаются десятизначные номера, и начинающиеся с 8..."),
+            ContactType.EMAIL: ("Введите email клиента...", "Введите полный email. При поиске регистр не учитывается"),
+            ContactType.DISCOUNT_CARD: ("Введите номер дисконтной карты клиента...", "Введите точный номер карты, включая ведущие нули"),
         }[kind]
         self.customer_input.setPlaceholderText(placeholder)
         self.search_hint.setText(hint)
-        self.identity_status.setText("Покупатель не выбран.")
-        self._display_state(ViewState.INITIAL, "Введите значение для выбранного типа поиска.")
+        self._display_state(ViewState.INITIAL, "Введите значение для выбранного типа поиска, чтобы посмотреть оригинальные рекомендации нейросетевой модели")
 
     def _build_profile(self):
-        self.profile = StateSection("Профиль покупателя", SectionContent(
-            ViewState.INITIAL, "Введите MindboxID покупателя."),
+        self.profile = StateSection("Профиль клиента", SectionContent(
+            ViewState.INITIAL, "Введите MindboxID клиента."),
             name="customerProfile")
         card, box = card_frame()
         box.setSpacing(BLOCK_SPACING)
-        self.profile_title = text_label("Покупатель не выбран", style="resultsPlaceholderValue")
-        self.canonical_id = text_label("Canonical MindboxID ещё не определён")
-        self.model_id = text_label("ID в модели BPR-MF ещё не определён")
-        for label in (self.canonical_id, self.model_id):
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.identity_status = text_label("Введите MindboxID для проверки доступности рекомендаций.", style="statisticsInfo")
-        for label in (self.profile_title, self.canonical_id, self.model_id, self.identity_status):
-            box.addWidget(label)
-        self.profile_fields = AdaptiveCardGrid(minimum_card_width=200, maximum_columns=4)
+        self.profile.heading.hide()
+        self.profile.message.hide()
+        self.profile_fields = ProfileFieldGrid()
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.INITIAL), framed=False)
                                       for title in PROFILE_FIELDS])
         box.addWidget(self.profile_fields)
@@ -158,8 +162,9 @@ class CustomerResultsTab(QWidget):
 
     def _build_kpis(self):
         self.kpis = StateSection("Показатели активности", SectionContent(
-            ViewState.NOT_CONNECTED, "Показатели появятся после подключения истории и согласования финансовых правил."),
+            ViewState.NOT_CONNECTED, ""),
             name="customerKpis")
+        self.kpis.message.hide()
         self.kpi_grid = AdaptiveCardGrid()
         self.kpi_grid.set_cards([FieldCard(DisplayField(title), numeric=True) for title in (
             "Заказы", "Приобретённые единицы", "Сумма покупок", "Средний чек", "Просмотры", "Избранное",
@@ -168,34 +173,49 @@ class CustomerResultsTab(QWidget):
         self.page_layout.addWidget(self.kpis)
 
     def _build_recommendations(self):
-        self.recommendations = StateSection("Рекомендации BPR-MF", SectionContent(
+        self.recommendations = StateSection("Рекомендации нейросетевой модели", SectionContent(
             ViewState.INITIAL, "После поиска здесь появятся исходные рекомендации обученной модели."), name="customerRecommendations")
+        self.recommendations.message.hide()
         self.topk_row = QHBoxLayout()
         self.topk_row.setContentsMargins(0, 0, 0, 0)
         self.topk_row.setSpacing(CONTROL_SPACING)
         self.topk_row.addStretch(1)
-        from PyQt6.QtWidgets import QLabel
-        self.topk_row.addWidget(QLabel("Показывать"))
         self.topk = QComboBox()
         for count in (1, 3, 5, 10):
             self.topk.addItem(f"Топ-{count}", count)
         self.topk.setCurrentIndex(3)
         self.topk.currentIndexChanged.connect(self._show_topk)
         self.topk_row.addWidget(self.topk)
+        self.topk_row.addStretch(1)
         self.recommendations.box.insertLayout(1, self.topk_row)
         self.product_grid = AdaptiveCardGrid(minimum_card_width=250, maximum_columns=5)
         self.recommendations.box.addWidget(self.product_grid)
         self.page_layout.addWidget(self.recommendations)
 
     def _build_history(self):
-        self.history = CustomerHistorySection()
+        self.history = CustomerHistorySection(photo_owner=self)
         self.history_filter = self.history.category
         self.history.dispatch.connect(self._load_history)
         self.page_layout.addWidget(self.history)
 
     def _load_history(self, request):
+        # Keep history behind the complete card handoff, including its final
+        # background freshness check, so all source reads remain serial.
+        if self._active is not None:
+            self._deferred_history = request
+            return
         self._ensure_worker()
         self.history_dispatch.emit(request)
+
+    def _flush_history(self):
+        if self._active is not None or self._closing or self._deferred_history is None:
+            return
+        request, self._deferred_history = self._deferred_history, None
+        if request.cancelled.is_set():
+            # Acknowledge cancellation so the section can start its latest pending request.
+            self.history.receive(request, None)
+        else:
+            self._load_history(request)
 
     def _build_propensity(self):
         self.propensity = StateSection("Вероятность покупки в следующие 30 дней", SectionContent(
@@ -205,7 +225,7 @@ class CustomerResultsTab(QWidget):
         fields.set_cards([FieldCard(field) for field in (
             DisplayField("Горизонт прогноза", "30 дней", ViewState.READY),
             DisplayField("Дата расчёта", state=ViewState.UNAVAILABLE),
-            DisplayField("Сегмент покупателя", state=ViewState.UNAVAILABLE),
+            DisplayField("Сегмент клиента", state=ViewState.UNAVAILABLE),
             DisplayField("Версия прогнозной модели", state=ViewState.UNAVAILABLE))])
         self.propensity.box.addWidget(fields)
         self.page_layout.addWidget(self.propensity)
@@ -219,7 +239,9 @@ class CustomerResultsTab(QWidget):
         worker = CustomerCardWorker(self.service, history_lookup=self._history_lookup)
         worker.moveToThread(thread)
         self.dispatch.connect(worker.run, Qt.ConnectionType.QueuedConnection)
-        worker.finished.connect(self._finished)
+        worker.finished.connect(self._queue_validation)
+        self.validation_dispatch.connect(worker.validate_delivery, Qt.ConnectionType.QueuedConnection)
+        worker.validated.connect(self._finished)
         worker.profile_ready.connect(self._profile_received)
         self.history_dispatch.connect(worker.load_history, Qt.ConnectionType.QueuedConnection)
         worker.history_ready.connect(self.history.receive)
@@ -249,10 +271,8 @@ class CustomerResultsTab(QWidget):
         self.result = None
         _invalidate_photo_targets(self)
         self.product_grid.set_cards([])
-        self.profile_title.setText("Покупатель не выбран")
-        self.canonical_id.setText("Canonical MindboxID ещё не определён")
-        self.model_id.setText("ID в модели BPR-MF ещё не определён")
-        self.profile.set_content(SectionContent(ViewState.INITIAL, "Введите MindboxID покупателя."))
+        self._profile_notice = ""
+        self.profile.set_content(SectionContent(ViewState.INITIAL, "Введите MindboxID клиента."))
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.INITIAL), framed=False)
                                       for title in PROFILE_FIELDS])
 
@@ -268,17 +288,14 @@ class CustomerResultsTab(QWidget):
         kind = self.search_type.currentData()
         if kind is None and (not value or value != value.strip()):
             message = "Введите MindboxID." if not value else "Введите MindboxID без пробелов по краям."
-            self.identity_status.setText(message)
             self._render_profile(CustomerProfileResult(ProfileStatus.INVALID_ID))
             self._display_state(ViewState.ERROR, message)
             return
         request = CustomerCardRequest(self._request_id, value, contact_type=kind)
-        self.identity_status.setText("Проверяем доступность рекомендаций для покупателя…")
-        self.profile.set_content(SectionContent(ViewState.LOADING, "Загрузка профиля покупателя…"))
-        self.profile_title.setText("Загрузка профиля…")
+        self.profile.set_content(SectionContent(ViewState.LOADING, "Загрузка профиля клиента…"))
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.LOADING), framed=False)
                                       for title in PROFILE_FIELDS])
-        self._display_state(ViewState.LOADING, "Ищем покупателя и загружаем исходные рекомендации…")
+        self._display_state(ViewState.LOADING, "Ищем клиента и загружаем исходные рекомендации…")
         if self._active is not None:
             self._pending = request
         else:
@@ -291,43 +308,61 @@ class CustomerResultsTab(QWidget):
 
     def _display_state(self, state, message):
         self.search_card.setProperty("state", state.value)
-        self.search_status.setText(message)
+        self._search_message = message
+        self._update_search_message()
         self.recommendations.set_content(SectionContent(state, message))
+        self.recommendations.message.setVisible(state in (
+            ViewState.ERROR, ViewState.UNAVAILABLE, ViewState.STALE, ViewState.EMPTY, ViewState.CANCELLED))
+        if state is ViewState.EMPTY:
+            self.recommendations.message.setText("Рекомендаций нет.")
         loading = state is ViewState.LOADING
         self.progress.setVisible(loading)
         self.cancel_button.setEnabled(loading)
-        self._global_status(state, message)
+        self._global_status(state, self.search_status.text())
+
+    def _update_search_message(self):
+        self.search_status.setText(" ".join(filter(None, (self._search_message, self._profile_notice))))
+
+    def _set_profile_content(self, content):
+        self.profile.set_content(content)
+        placeholders = {
+            ViewState.EMPTY: "Нет данных профиля", ViewState.ERROR: "Профиль недоступен",
+            ViewState.UNAVAILABLE: "Профиль недоступен", ViewState.STALE: "Данные устарели",
+            ViewState.CANCELLED: "Загрузка отменена",
+        }
+        fields = content.fields or tuple(DisplayField(title, state=content.state,
+                                                      message=placeholders.get(content.state)) for title in PROFILE_FIELDS)
+        self.profile_fields.set_cards([FieldCard(field, framed=False) for field in fields])
+
+    def _set_profile_notice(self, message):
+        self._profile_notice = message
+        self._update_search_message()
 
     def _profile_received(self, request_id, profile):
         if self._closing or request_id != self._request_id:
             return
-        try:
-            if isinstance(profile, CustomerCardResult):
-                delivery = self.service.validate_result(profile)
-                if delivery.profile is None:
-                    self.profile.set_content(SectionContent(delivery.state, delivery.message))
-                    self.profile_fields.set_cards([])
-                    self.profile_title.setText("Покупатель не выбран")
-                    self.canonical_id.setText("Canonical MindboxID ещё не определён")
-                    self.model_id.setText("ID в модели BPR-MF ещё не определён")
-                    return
-                profile = delivery.profile
-            profile = self.service.validate_profile(profile)
-        except Exception:
-            profile = CustomerProfileResult(ProfileStatus.STALE)
+        if isinstance(profile, CustomerCardResult):
+            if profile.profile is None:
+                self._set_profile_content(SectionContent(profile.state, profile.message))
+                self._set_profile_notice(profile.message)
+                return
+            profile = profile.profile
         self._render_profile(profile)
         if profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
             self.history.set_customer(profile.canonical_customer_id)
 
     def _render_profile(self, profile):
         content = profile_content(profile)
-        self.profile.set_content(content)
-        self.profile_fields.set_cards([FieldCard(field, framed=False) for field in content.fields])
-        if profile.status is ProfileStatus.FOUND:
-            self.profile_title.setText(profile.profile.full_name or "Не указано")
-            self.canonical_id.setText(f"Canonical MindboxID: {profile.canonical_customer_id}")
+        self._set_profile_content(content)
+        self._set_profile_notice(content.message if profile.status is not ProfileStatus.FOUND else "")
+
+    def _queue_validation(self, request_id, result):
+        if (self._active is not None and request_id == self._active.request_id
+                and request_id == self._request_id and self._pending is None and not self._closing):
+            logger.debug("customer_delivery stage=queued request=%d", request_id)
+            self.validation_dispatch.emit(self._active, result)
         else:
-            self.profile_title.setText(content.message)
+            self._finished(request_id, result)
 
     def _finished(self, request_id, result):
         if self._active is None or request_id != self._active.request_id:
@@ -340,17 +375,13 @@ class CustomerResultsTab(QWidget):
             self._start(pending)
             return
         if request_id != self._request_id:
+            self._flush_history()
             return
-        # Metadata-only validation of independent sources at the GUI handoff.
-        try:
-            result = self.service.validate_result(result)
-        except Exception:
-            if result.contact_search is not None:
-                result = contact_search_failure(ContactSearchResult(ContactSearchStatus.SOURCE_INCONSISTENT))
-            else:
-                result = replace(result, state=ViewState.STALE, products=(), profile=CustomerProfileResult(ProfileStatus.STALE),
-                                 message="Источники изменились до показа данных. Повторите поиск.")
+        # Freshness has been rechecked by validate_delivery after the first GUI
+        # handoff. This slot only applies the current request; no source I/O.
+        logger.debug("customer_delivery stage=applied request=%d state=%s", request_id, result.state.value)
         self.apply_result(result)
+        self._flush_history()
         self.result_applied.emit(request_id)
 
     def apply_result(self, result: CustomerCardResult):
@@ -364,20 +395,10 @@ class CustomerResultsTab(QWidget):
         self._clear_result(clear_history=False)
         self.result = result
         identity = result.identity
-        if identity is not None:
-            self.identity_status.setText(IDENTITY_MESSAGES[identity.status])
-            if identity.canonical_customer_id is not None:
-                self.canonical_id.setText(f"Canonical MindboxID: {identity.canonical_customer_id}")
-            if identity.model_user_id is not None:
-                self.model_id.setText(f"ID в модели BPR-MF: {identity.model_user_id}")
-        else:
-            self.identity_status.setText(result.message)
         if result.profile is not None:
             self._render_profile(result.profile)
         elif result.contact_search is not None and result.contact_search.status is not ContactSearchStatus.MATCHED:
-            self.profile.set_content(SectionContent(result.state, result.message))
-            self.profile_fields.set_cards([])
-            self.profile_title.setText("Покупатель не выбран")
+            self._set_profile_content(SectionContent(result.state, result.message))
         self._display_state(result.state, result.message)
         customer_id = None
         if result.profile is not None and result.profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
@@ -403,12 +424,12 @@ class CustomerResultsTab(QWidget):
             self._active.cancelled.set()
         self._pending = None
         self._clear_result()
-        self.identity_status.setText("Поиск отменён.")
         self._render_profile(CustomerProfileResult(ProfileStatus.CANCELLED))
         self._display_state(ViewState.CANCELLED, "Поиск отменён. Можно начать новый запрос.")
 
     def shutdown(self):
         self._closing = True
+        self._deferred_history = None
         self.history.shutdown()
         if self._active is not None:
             self._active.cancelled.set()
@@ -426,6 +447,8 @@ class CustomerResultsTab(QWidget):
             self.window.close()
 
     def eventFilter(self, watched, event):
+        if event.type() is QEvent.Type.ToolTip and isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
+            return True
         if watched is self.window and event.type() is QEvent.Type.Close:
             self.shutdown()
             if self._thread is not None and self._thread.isRunning():

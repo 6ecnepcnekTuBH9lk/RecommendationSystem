@@ -6,11 +6,12 @@ snapshot on the next request. No model is loaded at import time.
 """
 
 from dataclasses import dataclass
+from copy import deepcopy
 from enum import Enum
 import json
 import math
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 
 import numpy as np
 from numpy._core.multiarray import _reconstruct
@@ -161,6 +162,7 @@ class _LoadedModel:
     idx2item: tuple[str, ...]
     model: core.BPRMF
     item_vectors: torch.Tensor
+    item_metadata: dict
 
 
 class RawBprInferenceService:
@@ -172,7 +174,7 @@ class RawBprInferenceService:
     """
 
     def __init__(self):
-        self._lock = Lock()
+        self._lock = RLock()
         self._loaded = None
 
     def _get_model(self, model_dir):
@@ -202,6 +204,7 @@ class RawBprInferenceService:
             self._loaded = _LoadedModel(
                 key, generation, {u: i for i, u in enumerate(mappings["idx2user"])},
                 tuple(mappings["idx2item"]), model, vectors,
+                deepcopy(checkpoint.get("train_item_meta", {})),
             )
             return self._loaded
         except Exception as exc:
@@ -238,6 +241,26 @@ class RawBprInferenceService:
                 for rank, i in enumerate(indices, 1)
             )
             return RawBprResult(loaded.generation, model_user_id, RawBprStatus.OK, recommendations)
+
+    def get_source_metadata(self, *, model_dir="model"):
+        """Detached historical attributes from the same safe generation cache."""
+        with self._lock:
+            loaded = self._get_model(model_dir)
+            return loaded.generation, deepcopy(loaded.item_metadata)
+
+    def get_candidate_sources(self, model_user_id, *, model_dir="model"):
+        """All original ranks plus historical metadata from ONE loaded snapshot.
+
+        Holding the service lock also protects the legacy pair without a named
+        generation. File changes are checked before/after both operations.
+        """
+        with self._lock:
+            raw = self.get_recommendations(model_user_id, k=2**31 - 1, model_dir=model_dir)
+            loaded = self._loaded
+            metadata = deepcopy(loaded.item_metadata)
+            if self._get_model(model_dir) is not loaded:
+                raise RawBprArtifactError("Artifacts changed during candidate lookup")
+            return raw, metadata
 
 
 _DEFAULT_SERVICE = RawBprInferenceService()

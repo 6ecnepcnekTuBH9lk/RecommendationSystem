@@ -49,6 +49,7 @@ def test_catalog_enrichment_cannot_filter_replace_or_rerank(service):
     assert len(result.products) == 10
     assert result.products[0].name == "Синтетический товар"
     assert result.products[0].photo_url == "/upload/photo.jpg"
+    assert result.products[0].collection == "Осень-Зима 2025"
     assert result.products[0].recommendation.model_item_code == "ORIGINAL-1"
     assert result.products[1].reference_message == "Нет в текущем каталоге"
     assert tuple(p.recommendation for p in result.products) == service.inference.get_recommendations.return_value.recommendations
@@ -121,3 +122,36 @@ def test_future_display_contract_distinguishes_missing_source_value_and_error():
         DisplayField("Сумма покупок", "0", ViewState.NOT_CONNECTED)
     with pytest.raises(TypeError):
         SectionContent(ViewState.READY, "Источник подключён", [])
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ("ORIGINAL-1|Имя|Весна\n", "Весна"),
+    ("ORIGINAL-1|Имя|\n", ""),
+    ("ORIGINAL-1|Имя|Весна\nORIGINAL-1|Имя|Осень\n", ""),
+    ("ORIGINAL-1|Первый|Весна\nORIGINAL-1|Другой|Весна\n", ""),
+    ("ORIGIN|Другой товар|Весна\n", ""),
+])
+def test_recommendation_collection_uses_shared_catalog_exact_code_without_reranking(service, rows, expected):
+    service.catalog_path.write_text("КодНоменклатуры|Номенклатура|Коллекция\n" + rows, encoding="utf-8")
+    result = service.load("C")
+    assert result.products[0].collection == expected
+    assert all(not p.collection for p in result.products[1:])
+    assert tuple(p.recommendation for p in result.products) == service.inference.get_recommendations.return_value.recommendations
+
+
+def test_collection_catalog_is_cached_and_refreshed_without_per_card_reads(service, monkeypatch):
+    from pathlib import Path
+    path = service.catalog_path
+    path.write_text("КодНоменклатуры|Номенклатура|Коллекция\nORIGINAL-1|Товар|Весна\n", encoding="utf-8")
+    original = Path.open
+    reads = []
+    def open_path(self, *args, **kwargs):
+        if self == path:
+            reads.append(True)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_path)
+    assert service.load("C").products[0].collection == "Весна"
+    assert service.load("C").products[0].collection == "Весна"
+    assert len(reads) == 1
+    path.write_text("КодНоменклатуры|Номенклатура|Коллекция\nORIGINAL-1|Товар|Осень-Зима\n", encoding="utf-8")
+    assert service.load("C").products[0].collection == "Осень-Зима"

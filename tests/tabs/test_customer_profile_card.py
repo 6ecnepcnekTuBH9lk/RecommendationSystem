@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow
 
 from Application.customer_card_data import CustomerCardResult, CustomerCardService, ProductContent, ViewState
 from Application.customer_profile_service import BirthDateStatus, CardStatus, CustomerProfile, CustomerProfileResult, ProfileStatus
@@ -18,6 +18,7 @@ from Application.mindbox.records import CustomerRecord
 from Application.model.customer_identity_bridge import CustomerModelIdentityResult, CustomerModelIdentityStatus as S
 from Application.model.raw_bpr_inference import RawBprRecommendation, RawBprResult, RawBprStatus
 from Application.customer_history_service import HistoryPage, HistoryStatus
+from Application.customer_profile_presentation import PROFILE_FIELDS
 from Application.tabs.customer_results_tab import CustomerResultsTab
 from Application.theme.apply_theme import apply_app_theme, prepare_app_theme
 
@@ -104,8 +105,8 @@ def test_profile_fields_and_recommendations_correct_and_off_gui_thread(widget, e
     assert actual["Телефон"] == "+7 (900) 123-45-67"
     assert actual["Возраст"] == "36 полных лет" and actual["Пол"] == "Мужской"
     assert actual["Дата рождения"] == "01.01.1990"
-    assert actual["Дата регистрации"] == "Нет подтверждённого источника"
-    assert "Возраст рассчитан на 13.10.2026" in tab.profile.message.text()
+    assert "Дата регистрации" not in actual and len(actual) == 9
+    assert actual["Последнее изменение профиля"] == found().profile.record.change_datetime_utc.astimezone().strftime("%d.%m.%Y %H:%M")
     assert tab.profile.content.state is ViewState.READY
     assert len(tab.product_grid.cards) == 10
     assert tab.product_grid.cards[0].content.recommendation.raw_score == 1.123456789
@@ -131,7 +132,8 @@ def test_profile_failure_does_not_destroy_raw_bpr(widget, status):
     search(tab)
     assert len(tab.product_grid.cards) == 10
     assert tab.profile.content.state in (ViewState.EMPTY, ViewState.ERROR, ViewState.UNAVAILABLE)
-    assert not tab.profile_fields.cards
+    assert len(tab.profile_fields.cards) == 9 and all(card.content.state is not ViewState.READY for card in tab.profile_fields.cards)
+    assert tab.profile.content.message in tab.search_status.text()
 
 
 def test_both_absent_do_not_confirm_profile(widget):
@@ -140,7 +142,8 @@ def test_both_absent_do_not_confirm_profile(widget):
     service.bridge.resolve.return_value = CustomerModelIdentityResult("unknown", None, S.NOT_IN_MODEL, 0)
     search(tab, "unknown")
     assert "не найден" in tab.profile.message.text()
-    assert not tab.profile_fields.cards and not tab.product_grid.cards
+    assert len(tab.profile_fields.cards) == 9 and not tab.product_grid.cards
+    assert "не найден" in tab.search_status.text()
 
 
 def test_missing_fields_card_ambiguity_bad_birth_and_registration_are_distinct(widget):
@@ -154,7 +157,7 @@ def test_missing_fields_card_ambiguity_bad_birth_and_registration_are_distinct(w
     assert actual["Дисконтная карта"] == "Найдено несколько карт"
     assert actual["Дата рождения"] == "Некорректная дата"
     assert actual["Возраст"] == "Возраст не определён"
-    assert actual["Дата регистрации"] != actual["Изменение профиля"]
+    assert "Дата регистрации" not in actual and actual["Последнее изменение профиля"]
     assert len(tab.product_grid.cards) == 10
 
 
@@ -189,7 +192,7 @@ def test_latest_request_never_gets_old_profile_and_cancel_then_repeat(widget):
     tab.customer_input.setText("new"); tab.search(); release.set()
     wait(lambda: tab.result is not None)
     assert fields(tab)["ФИО"] == "Иванов new Иванович"
-    assert "old" not in tab.profile_title.text()
+    assert all("old" not in card.value.text() for card in tab.profile_fields.cards)
 
 
 def test_customers_replacement_discards_only_profile(widget):
@@ -197,7 +200,9 @@ def test_customers_replacement_discards_only_profile(widget):
     service.profile_service.is_current.return_value = False
     search(tab)
     assert tab.result.profile.status is ProfileStatus.STALE
-    assert tab.profile.content.state is ViewState.STALE and not tab.profile_fields.cards
+    assert tab.profile.content.state is ViewState.STALE and len(tab.profile_fields.cards) == 9
+    assert all(card.value.text() == "Данные устарели" for card in tab.profile_fields.cards)
+    assert "Повторите поиск" in tab.search_status.text()
     assert len(tab.product_grid.cards) == 10
 
 
@@ -233,3 +238,86 @@ def test_close_while_profile_loading_is_safe(widget):
     host.close(); assert tab._closing
     release.set(); wait(lambda: tab._thread is None)
     assert not host.isVisible() and tab.result is None
+
+
+@pytest.mark.parametrize("dark", [False, True])
+@pytest.mark.parametrize("width,columns", [(1250, 3), (680, 2), (480, 1)])
+def test_nine_fields_exact_grouped_positions_and_no_duplicate_headers(widget, app, dark, width, columns):
+    host, tab, _ = widget
+    p = found(card=CardStatus.ACTIVATED)
+    tab.apply_result(replace(recommendations(), profile=p))
+    apply_app_theme(app, dark)
+    host.resize(width, 850)
+    QTest.qWait(60)
+    grid = tab.profile_fields
+    assert grid.columns == columns
+    expected = ("ФИО", "Пол", "Последнее изменение профиля", "Дата рождения", "Возраст",
+                "Возрастная группа", "Телефон", "Email", "Дисконтная карта")
+    assert tuple(card.content.title for card in grid.cards) == PROFILE_FIELDS == expected
+    assert len(grid.cards) == len(set(PROFILE_FIELDS)) == 9
+    for index, card in enumerate(grid.cards):
+        group, row = divmod(index, 3)
+        assert grid.grid.itemAtPosition((group // columns) * 3 + row, group % columns).widget() is card
+        assert card.value.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+    labels = [label for label in tab.profile.findChildren(QLabel) if label.isVisibleTo(tab.profile)]
+    texts = [label.text() for label in labels]
+    assert texts.count(p.profile.full_name) == 1
+    assert "Дата регистрации" not in texts and "Изменение профиля" not in texts
+    assert "Телефон подтверждён" in texts and "Последняя активированная карта" in texts
+    assert not tab.profile.heading.isVisibleTo(tab.profile) and not tab.profile.message.isVisibleTo(tab.profile)
+    assert tab.profile.box.itemAt(tab.profile.box.count() - 1).widget().geometry().top() == 0
+    assert not any("Canonical MindboxID" in t or "ID в модели" in t for t in texts)
+    assert not any(hasattr(tab, name) for name in ("profile_title", "canonical_id", "model_id", "identity_status"))
+    assert tab.recommendations.heading.isVisibleTo(tab.recommendations)
+    assert tab.kpis.heading.isVisibleTo(tab.kpis)
+    assert tab.scroll.horizontalScrollBar().maximum() == 0
+    assert tab.page.width() <= tab.scroll.viewport().width()
+
+
+def test_initial_loading_cancel_and_error_have_nine_fields_and_visible_search_status(widget):
+    _, tab, service = widget
+    assert len(tab.profile_fields.cards) == 9
+    assert all(card.content.state is ViewState.INITIAL for card in tab.profile_fields.cards)
+    entered, release = Event(), Event()
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert release.wait(4)
+        return found()
+    service.profile_service.get_profile.side_effect = blocked
+    tab.customer_input.setText("C")
+    tab.search()
+    try:
+        wait(entered.is_set)
+        assert len(tab.profile_fields.cards) == 9
+        assert all(card.value.text() == "Загрузка…" for card in tab.profile_fields.cards)
+        assert "Ищем клиента" in tab.search_status.text()
+        tab.cancel_search()
+        assert len(tab.profile_fields.cards) == 9
+        assert all(card.value.text() == "Загрузка отменена" for card in tab.profile_fields.cards)
+        assert "отменён" in tab.search_status.text()
+    finally:
+        release.set()
+    wait(lambda: tab._active is None)
+    service.profile_service.get_profile.side_effect = None
+    service.profile_service.get_profile.return_value = CustomerProfileResult(ProfileStatus.SOURCE_INCONSISTENT)
+    search(tab)
+    assert len(tab.profile_fields.cards) == 9
+    assert all(card.value.text() == "Профиль недоступен" for card in tab.profile_fields.cards)
+    assert "Данные профиля не удалось обработать" in tab.search_status.text()
+    assert len(tab.product_grid.cards) == 10
+
+
+def test_user_search_design_and_terminology_preserved(widget):
+    _, tab, _ = widget
+    assert tab.search_button.text() == " Найти" and not tab.search_button.icon().isNull()
+    assert tab.cancel_button.text() == " Отменить поиск" and not tab.cancel_button.icon().isNull()
+    assert tab.export_button.text() == " Экспорт рекомендаций" and not tab.export_button.icon().isNull()
+    assert tab.search_hint.text() == "Вводить значение без пробелов по краям"
+    assert tab.search_status.text() == "Введите значение для выбранного типа поиска, чтобы посмотреть оригинальные рекомендации нейросетевой модели"
+    assert tab.customer_input.placeholderText() == "Введите MindboxID клиента..."
+    assert tab.search_type.accessibleName() == "Тип поиска клиента"
+    for index in range(tab.search_type.count()):
+        tab.search_type.setCurrentIndex(index)
+        assert "покупател" not in tab.customer_input.placeholderText().lower()
+        assert "покупател" not in tab.search_status.text().lower()
+    assert not tab.history.content.message

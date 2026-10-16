@@ -13,11 +13,15 @@ from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
 from threading import Lock
 from time import perf_counter
+
+
+logger = logging.getLogger(__name__)
 
 from Application.customer_demographics import age_group, calendar_age
 from Application.customer_profiles import CustomerContact, contact_candidate_from_record
@@ -149,16 +153,28 @@ def _identity_source(root):
 @contextmanager
 def _reader_lock(root):
     # Coordinate with the existing publisher, without creating/writing its file.
-    with (root / "canonical/.writer.lock").open("rb") as stream:
-        if stream.read(1) == b"":
-            raise OSError("Coordination source unavailable")
-        stream.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(stream.fileno(), msvcrt.LK_NBRLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(stream.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    try:
+        stream = (root / "canonical/.writer.lock").open("rb")
+    except OSError as exc:
+        logger.warning("canonical_reader stage=open error=%s errno=%s", type(exc).__name__, exc.errno)
+        raise
+    with stream:
+        stage = "read"
+        try:
+            if stream.read(1) == b"":
+                raise OSError("Coordination source unavailable")
+            stream.seek(0)
+            stage = "acquire"
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBRLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            logger.warning("canonical_reader stage=%s error=%s errno=%s", stage, type(exc).__name__, exc.errno)
+            raise
+        logger.debug("canonical_reader stage=acquired")
         try:
             yield
         finally:
@@ -167,6 +183,7 @@ def _reader_lock(root):
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            logger.debug("canonical_reader stage=released")
 
 
 def _database_version(path):
