@@ -22,6 +22,7 @@ from Application.theme.layout_metrics import BLOCK_SPACING, CONTROL_SPACING, PAG
 from .customer_card_widgets import AdaptiveCardGrid, CustomerBusyProgressBar, FieldCard, ProductCard, ProfileFieldGrid, StateSection, card_frame, text_label
 from .customer_card_worker import CustomerCardRequest, CustomerCardWorker
 from .customer_history_widgets import CustomerHistorySection
+from .hybrid_calculation_widgets import HybridCalculationSection
 
 
 logger = logging.getLogger(__name__)
@@ -173,24 +174,19 @@ class CustomerResultsTab(QWidget):
         self.page_layout.addWidget(self.kpis)
 
     def _build_recommendations(self):
-        self.recommendations = StateSection("Рекомендации нейросетевой модели", SectionContent(
+        self.recommendations = StateSection("Рекомендации нейросетевой модели BPR-MF", SectionContent(
             ViewState.INITIAL, "После поиска здесь появятся исходные рекомендации обученной модели."), name="customerRecommendations")
         self.recommendations.message.hide()
-        self.topk_row = QHBoxLayout()
-        self.topk_row.setContentsMargins(0, 0, 0, 0)
-        self.topk_row.setSpacing(CONTROL_SPACING)
-        self.topk_row.addStretch(1)
-        self.topk = QComboBox()
-        for count in (1, 3, 5, 10):
-            self.topk.addItem(f"Топ-{count}", count)
-        self.topk.setCurrentIndex(3)
-        self.topk.currentIndexChanged.connect(self._show_topk)
-        self.topk_row.addWidget(self.topk)
-        self.topk_row.addStretch(1)
-        self.recommendations.box.insertLayout(1, self.topk_row)
-        self.product_grid = AdaptiveCardGrid(minimum_card_width=250, maximum_columns=5)
-        self.recommendations.box.addWidget(self.product_grid)
+        self.raw_grid = AdaptiveCardGrid(minimum_card_width=250, maximum_columns=5)
+        self.recommendations.box.addWidget(self.raw_grid)
         self.page_layout.addWidget(self.recommendations)
+        self.calculations = HybridCalculationSection()
+        self.page_layout.addWidget(self.calculations)
+        self.hybrid_recommendations = StateSection("Рекомендации гибридной модели", SectionContent(
+            ViewState.INITIAL, "После поиска появятся актуальные товары."), name="customerHybridRecommendations")
+        self.product_grid = AdaptiveCardGrid(minimum_card_width=250, maximum_columns=5)
+        self.hybrid_recommendations.box.addWidget(self.product_grid)
+        self.page_layout.addWidget(self.hybrid_recommendations)
 
     def _build_history(self):
         self.history = CustomerHistorySection(photo_owner=self)
@@ -270,7 +266,9 @@ class CustomerResultsTab(QWidget):
             self.history.set_customer(None)
         self.result = None
         _invalidate_photo_targets(self)
+        self.raw_grid.set_cards([])
         self.product_grid.set_cards([])
+        self.calculations.clear(ViewState.INITIAL, "После поиска появятся расчёты.")
         self._profile_notice = ""
         self.profile.set_content(SectionContent(ViewState.INITIAL, "Введите MindboxID клиента."))
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.INITIAL), framed=False)
@@ -311,6 +309,8 @@ class CustomerResultsTab(QWidget):
         self._search_message = message
         self._update_search_message()
         self.recommendations.set_content(SectionContent(state, message))
+        self.hybrid_recommendations.set_content(SectionContent(state, message))
+        self.calculations.clear(state, message)
         self.recommendations.message.setVisible(state in (
             ViewState.ERROR, ViewState.UNAVAILABLE, ViewState.STALE, ViewState.EMPTY, ViewState.CANCELLED))
         if state is ViewState.EMPTY:
@@ -388,10 +388,11 @@ class CustomerResultsTab(QWidget):
         """Presentation only; worker has checked snapshot freshness before emission."""
         if result.contact_search is not None and result.contact_search.status is not ContactSearchStatus.MATCHED:
             result = contact_search_failure(result.contact_search)
-        elif result.state in (ViewState.READY, ViewState.EMPTY) and (
+        elif (result.state in (ViewState.READY, ViewState.EMPTY) or result.raw_state in (ViewState.READY, ViewState.EMPTY)) and (
                 result.identity is None or not result.identity.is_matched
                 or result.model_generation != result.identity.model_generation):
-            result = replace(result, state=ViewState.STALE, products=(), message="Источники рекомендаций изменились. Повторите поиск.")
+            result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
+                             message="Источники рекомендаций изменились. Повторите поиск.")
         self._clear_result(clear_history=False)
         self.result = result
         identity = result.identity
@@ -408,15 +409,28 @@ class CustomerResultsTab(QWidget):
         elif identity is not None and result.state is not ViewState.STALE:
             customer_id = identity.canonical_customer_id
         self.history.set_customer(customer_id)
-        if result.state is ViewState.READY:
-            cards = [ProductCard(product) for product in result.products]
-            self.product_grid.set_cards(cards)
-            self._show_topk()
-            for card in cards:
-                _set_photo_label(self, card.photo, card.content.photo_url, self._img_gen)
-
-    def _show_topk(self):
-        self.product_grid.show_prefix(self.topk.currentData())
+        raw_state = result.raw_state if result.raw_state is not None else result.state
+        raw_products = result.raw_products if result.raw_state is not None else (
+            result.products if result.hybrid is None else ())
+        raw_message = result.raw_message or ("Исходных рекомендаций нет." if raw_state is ViewState.EMPTY else result.message)
+        self.recommendations.set_content(SectionContent(raw_state, raw_message))
+        self.recommendations.message.setVisible(raw_state is not ViewState.READY)
+        if raw_state is ViewState.READY:
+            self.raw_grid.set_cards([ProductCard(p) for p in raw_products[:10]])
+        if result.hybrid is not None:
+            state, message = result.state, result.message
+        else:
+            state, message = (ViewState.UNAVAILABLE, "Гибридные рекомендации не рассчитаны.") if result.state in (
+                ViewState.READY, ViewState.EMPTY) else (result.state, result.message)
+        self.hybrid_recommendations.set_content(SectionContent(state, message))
+        self.hybrid_recommendations.message.setVisible(state is not ViewState.READY)
+        if state is ViewState.READY:
+            self.product_grid.set_cards([ProductCard(p) for p in result.products[:10]])
+            self.calculations.set_items(result.hybrid.items[:10])
+        else:
+            self.calculations.clear(state, "Подходящих актуальных товаров нет." if state is ViewState.EMPTY else message)
+        for card in (*self.raw_grid.cards, *self.product_grid.cards):
+            _set_photo_label(self, card.photo, card.content.photo_url, self._img_gen)
 
     def cancel_search(self):
         self._request_id += 1

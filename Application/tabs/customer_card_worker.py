@@ -59,7 +59,8 @@ class CustomerCardWorker(QObject):
                 if result.contact_search is not None:
                     result = contact_search_failure(ContactSearchResult(ContactSearchStatus.SOURCE_INCONSISTENT))
                 else:
-                    result = replace(result, state=ViewState.STALE, products=(), profile=CustomerProfileResult(ProfileStatus.STALE),
+                    result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
+                                     profile=CustomerProfileResult(ProfileStatus.STALE),
                                      message="Источники изменились до показа данных. Повторите поиск.")
         self.validated.emit(request.request_id, result)
 

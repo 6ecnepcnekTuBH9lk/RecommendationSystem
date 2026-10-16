@@ -174,7 +174,7 @@ def test_actual_source_or_index_change_at_delivery_rejects_old_identity(card, re
     search(card, ContactType.PHONE, "+79001112200")
     wait(lambda: card.tab.history._active is None)
     assert card.tab.result.contact_search.status is ContactSearchStatus.INDEX_NOT_READY
-    assert not card.tab.product_grid.cards and card.tab.history.customer_id is None
+    assert not card.tab.raw_grid.cards and card.tab.history.customer_id is None
     assert all(db.closed for _, db in connections)
 
 

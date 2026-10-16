@@ -74,7 +74,7 @@ def wait_for(predicate, timeout=4000):
 def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card, monkeypatch):
     _, tab, service = card
     assert [tab.page_layout.itemAt(i).widget().objectName() for i in range(tab.page_layout.count())] == [
-        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "customerHistory"]
+        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "hybridCalculations", "customerHybridRecommendations", "customerHistory"]
     assert tab.recommendations.content.state is ViewState.INITIAL
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.NOT_CONNECTED
@@ -84,7 +84,7 @@ def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card,
     assert not tab.history_filter.isEnabled()
     assert [button.text().strip() for button in tab.history.buttons.values()] == ["Заказы", "Просмотры", "Избранное"]
     assert tab._thread is None
-    assert not tab.product_grid.cards
+    assert not tab.raw_grid.cards
     service.load.assert_not_called()
     assert all(c.value.text() == "Не подключено" for c in tab.kpi_grid.cards)
     assert all(c.value.text() == "Клиент не выбран" for c in tab.profile_fields.cards)
@@ -108,11 +108,11 @@ def test_search_button_enter_background_and_original_top10(card, trigger):
     assert seen and seen[0] != main_id
     service.load.assert_called_once()
     assert tab.result.state is ViewState.READY
-    assert len(tab.product_grid.cards) == 10
-    assert [c.content.recommendation.rank for c in tab.product_grid.cards] == list(range(1, 11))
-    assert tab.product_grid.cards[0].code.text() == "Код: ORIGINAL-1"
-    assert tab.product_grid.cards[0].content.recommendation.raw_score == 1.123456789
-    assert "1.123456789" in tab.product_grid.cards[0].score.toolTip()
+    assert len(tab.raw_grid.cards) == 10
+    assert [c.content.recommendation.rank for c in tab.raw_grid.cards] == list(range(1, 11))
+    assert tab.raw_grid.cards[0].code.text() == "Код: ORIGINAL-1"
+    assert tab.raw_grid.cards[0].content.recommendation.raw_score == 1.123456789
+    assert "1.123456789" in tab.raw_grid.cards[0].score.toolTip()
     assert tab.result.identity.canonical_customer_id == "C"
     assert tab.result.identity.model_user_id == "A"
     assert not tab.progress.isVisible() and not tab.cancel_button.isEnabled()
@@ -125,7 +125,7 @@ def test_invalid_input_is_inline_without_worker_or_fake_data(card, value):
     tab.customer_input.setText(value)
     tab.search()
     assert tab.recommendations.content.state is ViewState.ERROR
-    assert tab._thread is None and not tab.product_grid.cards
+    assert tab._thread is None and not tab.raw_grid.cards
     service.load.assert_not_called()
 
 
@@ -133,7 +133,7 @@ def test_invalid_input_is_inline_without_worker_or_fake_data(card, value):
 def test_independent_future_sections_survive_recommendation_failures(card, state):
     _, tab, _ = card
     tab.apply_result(CustomerCardResult(state, "Синтетическое состояние"))
-    assert not tab.product_grid.cards
+    assert not tab.raw_grid.cards
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.NOT_CONNECTED
     assert tab.history.content.state is ViewState.INITIAL
@@ -142,24 +142,19 @@ def test_independent_future_sections_survive_recommendation_failures(card, state
     assert "недоступен" in tab.propensity.message.text()
 
 
-def test_topk_uses_local_prefix_and_preserves_card_objects(card):
-    _, tab, service = card
+def test_fixed_top10_without_selector(card):
+    _, tab, _ = card
     tab.apply_result(ready())
-    cards = tuple(tab.product_grid.cards)
-    for i, count in enumerate((1, 3, 5, 10)):
-        tab.topk.setCurrentIndex(i)
-        QTest.qWait(10)
-        assert tab.product_grid.visible_count == count
-        assert tuple(tab.product_grid.cards) == cards
-        assert [c.content.recommendation.rank for c in cards[:count]] == list(range(1, count + 1))
-    service.load.assert_not_called()
+    assert not hasattr(tab, "topk") and not hasattr(tab, "topk_row")
+    assert len(tab.raw_grid.cards) == tab.raw_grid.visible_count == 10
+    assert not tab.product_grid.cards
 
 
 def test_missing_names_photos_and_catalog_keep_every_recommendation(card):
     _, tab, _ = card
     tab.apply_result(ready(name=""))
-    assert len(tab.product_grid.cards) == 10
-    assert all(c.name.text() == "Название недоступно" and c.photo.text() == "Нет фото" for c in tab.product_grid.cards)
+    assert len(tab.raw_grid.cards) == 10
+    assert all(c.name.text() == "Название недоступно" and c.photo.text() == "Нет фото" for c in tab.raw_grid.cards)
 
 
 @pytest.mark.parametrize("dark", [False, True])
@@ -171,7 +166,7 @@ def test_responsive_layout_both_themes_no_horizontal_page_scroll(card, app, dark
     host.resize(width, 850)
     QTest.qWait(60)
     assert tab.scroll.horizontalScrollBar().maximum() == 0
-    assert 1 <= tab.product_grid.columns <= 5
+    assert 1 <= tab.raw_grid.columns <= 5
     assert 1 <= tab.kpi_grid.columns <= 4
     assert tab.page.width() <= tab.scroll.viewport().width()
     for section in (tab.profile, tab.kpis, tab.recommendations, tab.history, tab.propensity):
@@ -206,7 +201,7 @@ def test_superseded_search_coalesces_requests_and_never_publishes_old_result(car
     wait_for(lambda: tab.result is not None)
     assert calls == ["first", "latest"]
     assert tab._thread is thread
-    assert tab.product_grid.cards[0].name.text() == "latest"
+    assert tab.raw_grid.cards[0].name.text() == "latest"
 
 
 def test_cancel_and_worker_exception_do_not_leave_loading(card):
@@ -224,7 +219,7 @@ def test_cancel_and_worker_exception_do_not_leave_loading(card):
     release.set()
     wait_for(lambda: tab._active is None)
     assert tab.recommendations.content.state is ViewState.CANCELLED
-    assert not tab.progress.isVisible() and not tab.product_grid.cards
+    assert not tab.progress.isVisible() and not tab.raw_grid.cards
     service.load.side_effect = ValueError("PRIVATE_PATH")
     tab.search()
     wait_for(lambda: tab.result is not None)
@@ -238,9 +233,9 @@ def test_generation_or_identity_freshness_failure_never_displays_products(card):
     tab.customer_input.setText("A")
     tab.search()
     wait_for(lambda: tab.result is not None)
-    assert tab.result.state is ViewState.STALE and not tab.product_grid.cards
+    assert tab.result.state is ViewState.STALE and not tab.raw_grid.cards
     tab.apply_result(ready(generation="different"))
-    assert tab.result.state is ViewState.STALE and not tab.product_grid.cards
+    assert tab.result.state is ViewState.STALE and not tab.raw_grid.cards
 
 
 def test_source_change_during_queued_signal_handoff_is_rechecked_on_gui(card):
@@ -249,7 +244,7 @@ def test_source_change_during_queued_signal_handoff_is_rechecked_on_gui(card):
     tab.customer_input.setText("A")
     tab.search()
     wait_for(lambda: tab.result is not None)
-    assert tab.result.state is ViewState.STALE and not tab.product_grid.cards
+    assert tab.result.state is ViewState.STALE and not tab.raw_grid.cards
     assert service.is_current.call_count == 2
 
 
@@ -320,7 +315,7 @@ def png():
 def test_late_photo_same_url_cannot_touch_new_client_targets(card):
     _, tab, _ = card
     tab.apply_result(ready())
-    label = tab.product_grid.cards[0].photo
+    label = tab.raw_grid.cards[0].photo
     url = "https://example.invalid/photo"
     tab._img_targets[url] = [(label, None)]
     tab._img_inflight.add(url)
@@ -337,7 +332,7 @@ def test_photo_queue_deduplicates_and_pixmap_preserves_aspect_ratio(card, monkey
     tab.apply_result(ready())
     calls = []
     monkeypatch.setattr(photos, "_request_image", lambda owner, url, gen: calls.append(url))
-    first, second = [c.photo for c in tab.product_grid.cards[:2]]
+    first, second = [c.photo for c in tab.raw_grid.cards[:2]]
     for label in (first, second):
         photos._set_photo_label(tab, label, "https://example.invalid/photo", tab._img_gen)
     assert calls == ["https://example.invalid/photo"]

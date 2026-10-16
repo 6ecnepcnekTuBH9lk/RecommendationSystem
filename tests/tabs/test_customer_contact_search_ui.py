@@ -124,10 +124,9 @@ def test_four_modes_button_enter_background_and_original_topk(card, kind, enter)
         assert search_threads == load_threads
     assert card.service.profile_service.get_profile.call_args.args == ("C",)
     assert card.service.bridge.resolve.call_args.args == ("C",)
-    assert tuple(c.content.recommendation for c in card.tab.product_grid.cards) == card.raw
-    for i, count in enumerate((1, 3, 5, 10)):
-        card.tab.topk.setCurrentIndex(i)
-        assert card.tab.product_grid.visible_count == count
+    assert tuple(c.content.recommendation for c in card.tab.raw_grid.cards) == card.raw
+    assert not hasattr(card.tab, "topk")
+    assert card.tab.raw_grid.visible_count == 10
     assert card.service.inference.get_recommendations.call_count == 1
     assert card.tab.profile.content.state is ViewState.READY
     assert not card.tab.export_button.isEnabled()
@@ -146,7 +145,7 @@ def test_lookup_failures_never_load_or_confirm_a_customer(card, status, state, m
     search(card)
     assert card.tab.result.state is state and message in card.tab.search_status.text()
     assert card.tab.result.identity is None and card.tab.result.profile is None
-    assert not card.tab.product_grid.cards and len(card.tab.profile_fields.cards) == 9
+    assert not card.tab.raw_grid.cards and len(card.tab.profile_fields.cards) == 9
     assert all(field.content.state is not ViewState.READY for field in card.tab.profile_fields.cards)
     card.service.profile_service.get_profile.assert_not_called()
     card.service.bridge.resolve.assert_not_called()
@@ -222,7 +221,7 @@ def test_switch_type_clears_previous_card_and_late_photos(card):
     search(card)
     generation = card.tab._img_gen
     choose(card.tab, ContactType.PHONE)
-    assert card.tab.result is None and not card.tab.product_grid.cards
+    assert card.tab.result is None and not card.tab.raw_grid.cards
     assert card.tab.profile.content.state is ViewState.INITIAL
     assert card.tab._img_gen > generation
     assert "+" in card.tab.customer_input.placeholderText()
@@ -247,7 +246,7 @@ def test_cancel_or_close_during_lookup_does_not_load_profile(card, action):
     release.set()
     wait(lambda: card.tab._active is None if action == "cancel" else card.tab._thread is None)
     card.service.profile_service.get_profile.assert_not_called()
-    assert card.tab.result is None and not card.tab.product_grid.cards
+    assert card.tab.result is None and not card.tab.raw_grid.cards
 
 
 def test_contact_profile_can_appear_before_bpr_and_old_profiles_cannot_mix(card):
@@ -286,7 +285,7 @@ def test_contact_freshness_change_during_card_load_clears_profile_and_recommenda
     assert card.tab.result.contact_search.status is S.INDEX_NOT_READY
     assert card.tab.result.profile is None and card.tab.result.identity is None
     assert all(field.content.state is not ViewState.READY for field in card.tab.profile_fields.cards)
-    assert not card.tab.product_grid.cards
+    assert not card.tab.raw_grid.cards
 
 
 def test_contact_freshness_rechecked_in_worker_after_gui_handoff(card):
@@ -300,7 +299,7 @@ def test_contact_freshness_rechecked_in_worker_after_gui_handoff(card):
     search(card)
     assert card.tab.result.contact_search.status is S.INDEX_NOT_READY
     assert all(field.content.state is not ViewState.READY for field in card.tab.profile_fields.cards)
-    assert not card.tab.product_grid.cards
+    assert not card.tab.raw_grid.cards
 
 
 def test_contact_selection_does_not_follow_an_unconfirmed_identity_change(card):
@@ -319,10 +318,10 @@ def test_independent_card_states_are_preserved_for_contacts(card, failure):
         card.service.inference.get_recommendations.side_effect = ValueError("synthetic private detail")
     search(card)
     if failure == "profile":
-        assert tuple(c.content.recommendation for c in card.tab.product_grid.cards) == card.raw
+        assert tuple(c.content.recommendation for c in card.tab.raw_grid.cards) == card.raw
         assert card.tab.profile.content.state is ViewState.UNAVAILABLE
     else:
-        assert card.tab.profile.content.state is ViewState.READY and not card.tab.product_grid.cards
+        assert card.tab.profile.content.state is ViewState.READY and not card.tab.raw_grid.cards
 
 
 def test_lookup_exception_is_generic_and_no_pii_is_logged(card, caplog, capsys):

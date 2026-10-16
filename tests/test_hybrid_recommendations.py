@@ -458,7 +458,7 @@ def test_hybrid_service_unconfigured_unavailable_and_current_settings(tmp_path, 
 def test_card_hybrid_does_not_change_profile_or_raw_source_contract(tmp_path, catalog):
     from tests.test_customer_card_data import identity
     bridge = Mock()
-    bridge.resolve.return_value = identity()
+    bridge.resolve.return_value = replace(identity(), model_user_id="model-user")
     bridge.is_current.return_value = True
     inference = Mock()
     inference.get_candidate_sources.return_value = (raw_result(), {"source-0": BASE})

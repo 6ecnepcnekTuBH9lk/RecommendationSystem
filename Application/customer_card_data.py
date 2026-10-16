@@ -87,6 +87,9 @@ class CustomerCardResult:
     profile: CustomerProfileResult | None = None
     contact_search: contact_backend.ContactSearchResult | None = None
     hybrid: "HybridResult | None" = None
+    raw_products: tuple[ProductContent, ...] = ()
+    raw_state: ViewState | None = None
+    raw_message: str = ""
 
 
 def contact_search_failure(result):
@@ -249,17 +252,22 @@ class CustomerCardService:
                 confirmed.append(result.profile.canonical_customer_id)
             if any(value is not None and value != match.canonical_customer_id for value in confirmed):
                 return contact_search_failure(contact_backend.ContactSearchResult(contact_backend.ContactSearchStatus.INDEX_NOT_READY))
-        if result.state in (ViewState.READY, ViewState.EMPTY):
+        if result.state in (ViewState.READY, ViewState.EMPTY) or result.raw_state in (ViewState.READY, ViewState.EMPTY):
             try:
                 current = self.is_current(result)
             except Exception:
                 current = False
             if not current:
-                result = replace(result, state=ViewState.STALE, products=(),
+                result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
                                  message="Источники рекомендаций изменились. Повторите поиск.")
-            elif result.hybrid is not None and (self.hybrid is None or not self.hybrid.is_current(result.hybrid, raw_root=self.raw_root)):
-                result = replace(result, state=ViewState.STALE, products=(),
-                                 message="Источники или правила рекомендаций изменились. Повторите поиск.")
+            elif result.state in (ViewState.READY, ViewState.EMPTY) and result.hybrid is not None:
+                try:
+                    hybrid_current = self.hybrid is not None and self.hybrid.is_current(result.hybrid, raw_root=self.raw_root)
+                except Exception:
+                    hybrid_current = False
+                if not hybrid_current:
+                    result = replace(result, state=ViewState.STALE, products=(),
+                                     message="Источники или правила рекомендаций изменились. Повторите поиск.")
         profile = result.profile
         if profile is not None and profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
             profile = self.validate_profile(profile)
@@ -267,7 +275,7 @@ class CustomerCardService:
             if (profile.status is ProfileStatus.FOUND and result.identity is not None
                   and result.identity.canonical_customer_id is not None
                   and profile.canonical_customer_id != result.identity.canonical_customer_id):
-                result = replace(result, state=ViewState.STALE, products=(),
+                result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
                                  message="Идентификация источников изменилась. Повторите поиск.")
         return result
 
@@ -280,6 +288,19 @@ class CustomerCardService:
             if not current:
                 return CustomerProfileResult(ProfileStatus.STALE)
         return profile
+
+    def _historical_products(self, hybrid):
+        """Historical labels only; optional exact-code current photos in worker."""
+        historical = {item.code: item for item in hybrid.historical_items}
+        try:
+            photos = self._references()
+        except Exception:
+            photos = {}
+        return tuple(ProductContent(
+            rec, historical[rec.model_item_code].name if rec.model_item_code in historical else "",
+            photos.get(rec.model_item_code, ("", ""))[1] if rec.model_item_code not in self._catalog_ambiguous else "",
+            collection=historical[rec.model_item_code].collection if rec.model_item_code in historical else "",
+        ) for rec in hybrid.raw_bpr.recommendations[:10])
 
     def load(self, customer_id: str, cancelled=lambda: False) -> CustomerCardResult:
         try:
@@ -317,8 +338,22 @@ class CustomerCardService:
                                      item.sources[0].source_raw_score),
                 item.target_name, item.photo_url, collection=item.target_collection, hybrid_item=item,
             ) for item in hybrid.items)
+            raw_state, raw_products = ViewState.UNAVAILABLE, ()
+            raw = hybrid.raw_bpr
+            if raw is not None and raw.status is RawBprStatus.OK and state is not ViewState.CANCELLED:
+                if raw.model_generation == identity.model_generation and raw.model_user_id == identity.model_user_id:
+                    raw_products = self._historical_products(hybrid)
+                    raw_state = ViewState.READY if raw_products else ViewState.EMPTY
+                else:
+                    raw_state = ViewState.STALE
+            if raw_state is ViewState.STALE:
+                state, products = ViewState.STALE, ()
+            elif raw_state is ViewState.UNAVAILABLE and state is ViewState.READY:
+                state, products = ViewState.UNAVAILABLE, ()
             return CustomerCardResult(state, hybrid.message, identity, identity.model_generation,
-                                      products, hybrid=hybrid)
+                                      products, hybrid=hybrid, raw_products=raw_products, raw_state=raw_state,
+                                      raw_message=("Исходных рекомендаций нет." if raw_state is ViewState.EMPTY else
+                                                   "Исходный BPR Top-10 недоступен." if not raw_products else ""))
         try:
             raw = self.inference.get_recommendations(identity.model_user_id, k=10, model_dir=self.model_dir)
         except Exception:

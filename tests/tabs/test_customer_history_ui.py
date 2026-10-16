@@ -131,7 +131,7 @@ def test_find_background_catalog_and_original_bpr_are_independent(card):
     assert card.data.calls and all(t != get_ident() for t, _, _ in card.data.calls)
     assert card.data.calls[0][2] == dict(kinds=(K.ORDER,), limit=50, cursor=None, raw_root=card.service.raw_root)
     assert card.tab.result.products == result().products
-    assert card.tab.product_grid.cards[0].content.recommendation.raw_score == 1.23456789012345
+    assert card.tab.raw_grid.cards[0].content.recommendation.raw_score == 1.23456789012345
     assert history.generation and history.source_version
     before = len(card.data.calls)
     card.tab.apply_result(result())
@@ -254,7 +254,7 @@ def test_history_works_without_bpr(card):
     from tests.tabs.test_customer_profile_card import found
     card.service.load = lambda customer, cancelled: replace(result(customer, bpr=False), profile=found())
     history = loaded(card)
-    assert rows(history) and not card.tab.product_grid.cards
+    assert rows(history) and not card.tab.raw_grid.cards
     assert card.tab.result.state is ViewState.UNAVAILABLE
     assert card.tab.profile.content.state is ViewState.READY
 
@@ -310,7 +310,7 @@ def test_stale_generation_rejects_append_and_requires_explicit_restart(app):
 
 @pytest.mark.parametrize("dark", [False, True])
 @pytest.mark.parametrize("width", [480, 1200])
-def test_table_themes_tabs_and_centered_topk_progress(card, app, dark, width):
+def test_table_themes_tabs_and_progress_without_topk(card, app, dark, width):
     history = loaded(card)
     apply_app_theme(app, dark)
     card.host.resize(width, 850)
@@ -322,7 +322,7 @@ def test_table_themes_tabs_and_centered_topk_progress(card, app, dark, width):
     assert card.tab.recommendations.message.isHidden()
     assert card.tab.progress.minimum() == card.tab.progress.maximum() == 0
     assert card.tab.progress.text() == "Идет загрузка..."
-    assert abs(card.tab.topk.geometry().center().x() - card.tab.recommendations.width() / 2) <= 2
+    assert not hasattr(card.tab, "topk")
     for kind, button in history.buttons.items():
         assert button.isChecked() == (kind is K.ORDER)
         assert button.width() < history.width()
@@ -430,7 +430,7 @@ def test_recommendation_problems_remain_visible(card, state):
     loaded(card)
     card.tab.apply_result(replace(result(), state=state, message="Проблема рекомендаций", products=()))
     assert not card.tab.recommendations.message.isHidden()
-    assert card.tab.recommendations.message.text() == ("Рекомендаций нет." if state is ViewState.EMPTY else "Проблема рекомендаций")
+    assert card.tab.recommendations.message.text() == ("Исходных рекомендаций нет." if state is ViewState.EMPTY else "Проблема рекомендаций")
 
 
 def test_catalog_failure_keeps_history_readable(card):
@@ -451,7 +451,7 @@ def test_history_photos_share_queue_and_preserve_recommendation_targets(card, mo
     calls = []
     monkeypatch.setattr(photos, "_request_image", lambda owner, url, gen: calls.append(url))
     url = "https://example.invalid/shared-photo"
-    label = card.tab.product_grid.cards[0].photo
+    label = card.tab.raw_grid.cards[0].photo
     photos._set_photo_label(card.tab, label, url, card.tab._img_gen)
     history.table.ensure_photo(url)
     QTest.qWait(20)
@@ -685,7 +685,7 @@ def test_ui04_tooltips_blocked_only_inside_tab_including_dynamic_widgets(card, a
     dynamic = Probe(card.tab.page)
     outside = Probe()
     targets = [card.tab, card.tab.customer_input, card.tab.search_button, card.tab.export_button,
-               card.tab.profile, card.tab.product_grid.cards[0].photo, history.more,
+               card.tab.profile, card.tab.raw_grid.cards[0].photo, history.more,
                history.table.viewport(), history.table.horizontalHeader().viewport(), dynamic]
     QToolTip.hideText()
     for target in targets:

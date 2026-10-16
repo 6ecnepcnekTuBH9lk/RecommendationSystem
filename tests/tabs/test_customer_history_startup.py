@@ -74,7 +74,7 @@ def test_first_history_waits_for_worker_validation_without_lock_collision(card, 
     assert history.table.rows.rowCount() == 2
     assert len(calls) == 1 and calls[0][0] == "C"
     assert calls[0][1]["kinds"] == (HistoryKind.ORDER,) and calls[0][1]["limit"] == 50
-    assert tuple(product.content.recommendation for product in card.tab.product_grid.cards) == card.raw
+    assert tuple(product.content.recommendation for product in card.tab.raw_grid.cards) == card.raw
     page_rows = history.table.rows.rowCount()
     card.tab.apply_result(card.tab.result)
     QTest.qWait(20)
@@ -113,7 +113,7 @@ def test_first_history_without_bpr_and_repeated_find(card):
         card.tab.search()
         wait(lambda: card.tab.result is not None and card.tab.history._active is None)
         assert card.tab.profile.content.state is ViewState.READY
-        assert not card.tab.product_grid.cards
+        assert not card.tab.raw_grid.cards
         assert card.tab.history.table.rows.rowCount() == 2
         assert len(calls) == attempt + 1
 

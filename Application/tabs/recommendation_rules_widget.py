@@ -2,12 +2,13 @@
 
 from PyQt6.QtCore import QObject, QRunnable, QSize, QThreadPool, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QComboBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
+                             QPushButton, QSpinBox, QVBoxLayout, QWidget, QSizePolicy)
 
 from Application.paths import ICONS_DIR
 from Application.recommendation_catalog import RecommendationCatalog, signature
 from Application.recommendation_rules import RULES_PATH, RecommendationRules, load_rules, save_rules
-from Application.theme.layout_metrics import CONTROL_SPACING
+from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING
 
 
 PRIMARY_UNAVAILABLE = ("Основная коллекция больше не доступна среди выбранных сезонов. "
@@ -67,8 +68,15 @@ class RecommendationRulesWidget(QWidget):
         self._populating = False
         self._dirty = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(BLOCK_SPACING)
+
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(CONTROL_SPACING)
+        form.setVerticalSpacing(CONTROL_SPACING)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+
         self.kinds, self.collections = MultiSelect(), MultiSelect()
         self.primary_collection = QComboBox()
         self.primary_collection.setMinimumWidth(0)
@@ -86,16 +94,29 @@ class RecommendationRulesWidget(QWidget):
         self.message = QLabel("Загрузка справочников…")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
-        self.save_button = QPushButton(QIcon(str(ICONS_DIR / "save.png")), "Сохранить правила рекомендаций")
-        self.refresh_button = QPushButton(QIcon(str(ICONS_DIR / "refresh.png")), "Обновить значения")
+        self.save_button = QPushButton(
+            QIcon(str(ICONS_DIR / "save.png")),
+            " Сохранить правила рекомендаций"
+        )
+        self.refresh_button = QPushButton(
+            QIcon(str(ICONS_DIR / "refresh.png")),
+            " Обновить значения"
+        )
+
         self.buttons = QHBoxLayout()
         self.buttons.setSpacing(CONTROL_SPACING)
-        self.buttons.addWidget(self.save_button)
-        self.buttons.addStretch()
-        self.buttons.addWidget(self.refresh_button)
-        layout.addLayout(self.buttons)
+
         for button in (self.save_button, self.refresh_button):
             button.setIconSize(QSize(17, 17))
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed
+            )
+
+        self.buttons.addWidget(self.save_button, 1)
+        self.buttons.addWidget(self.refresh_button, 1)
+
+        layout.addLayout(self.buttons)
         layout.addStretch()
         self.save_button.clicked.connect(self.save)
         self.refresh_button.clicked.connect(self.refresh)

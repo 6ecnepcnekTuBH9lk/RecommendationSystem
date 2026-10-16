@@ -108,8 +108,8 @@ def test_profile_fields_and_recommendations_correct_and_off_gui_thread(widget, e
     assert "Дата регистрации" not in actual and len(actual) == 9
     assert actual["Последнее изменение профиля"] == found().profile.record.change_datetime_utc.astimezone().strftime("%d.%m.%Y %H:%M")
     assert tab.profile.content.state is ViewState.READY
-    assert len(tab.product_grid.cards) == 10
-    assert tab.product_grid.cards[0].content.recommendation.raw_score == 1.123456789
+    assert len(tab.raw_grid.cards) == 10
+    assert tab.raw_grid.cards[0].content.recommendation.raw_score == 1.123456789
     assert all(not card.value.toolTip() for card in tab.profile_fields.cards)
 
 
@@ -121,7 +121,7 @@ def test_profile_stays_available_without_bpr(widget, status):
     search(tab)
     assert fields(tab)["ФИО"] == "Иванов Иван Иванович"
     assert tab.profile.content.state is ViewState.READY
-    assert not tab.product_grid.cards
+    assert not tab.raw_grid.cards
     service.inference.get_recommendations.assert_not_called()
 
 
@@ -130,7 +130,7 @@ def test_profile_failure_does_not_destroy_raw_bpr(widget, status):
     _, tab, service = widget
     service.profile_service.get_profile.return_value = CustomerProfileResult(status)
     search(tab)
-    assert len(tab.product_grid.cards) == 10
+    assert len(tab.raw_grid.cards) == 10
     assert tab.profile.content.state in (ViewState.EMPTY, ViewState.ERROR, ViewState.UNAVAILABLE)
     assert len(tab.profile_fields.cards) == 9 and all(card.content.state is not ViewState.READY for card in tab.profile_fields.cards)
     assert tab.profile.content.message in tab.search_status.text()
@@ -142,7 +142,7 @@ def test_both_absent_do_not_confirm_profile(widget):
     service.bridge.resolve.return_value = CustomerModelIdentityResult("unknown", None, S.NOT_IN_MODEL, 0)
     search(tab, "unknown")
     assert "не найден" in tab.profile.message.text()
-    assert len(tab.profile_fields.cards) == 9 and not tab.product_grid.cards
+    assert len(tab.profile_fields.cards) == 9 and not tab.raw_grid.cards
     assert "не найден" in tab.search_status.text()
 
 
@@ -158,7 +158,7 @@ def test_missing_fields_card_ambiguity_bad_birth_and_registration_are_distinct(w
     assert actual["Дата рождения"] == "Некорректная дата"
     assert actual["Возраст"] == "Возраст не определён"
     assert "Дата регистрации" not in actual and actual["Последнее изменение профиля"]
-    assert len(tab.product_grid.cards) == 10
+    assert len(tab.raw_grid.cards) == 10
 
 
 def test_profile_can_be_shown_while_recommendations_are_still_loading(widget):
@@ -203,14 +203,14 @@ def test_customers_replacement_discards_only_profile(widget):
     assert tab.profile.content.state is ViewState.STALE and len(tab.profile_fields.cards) == 9
     assert all(card.value.text() == "Данные устарели" for card in tab.profile_fields.cards)
     assert "Повторите поиск" in tab.search_status.text()
-    assert len(tab.product_grid.cards) == 10
+    assert len(tab.raw_grid.cards) == 10
 
 
 def test_inconsistent_confirmed_identities_cannot_show_other_customer_recommendations(widget):
     _, tab, service = widget
     service.profile_service.get_profile.return_value = found(canonical="DIFFERENT")
     search(tab)
-    assert tab.result.state is ViewState.STALE and not tab.product_grid.cards
+    assert tab.result.state is ViewState.STALE and not tab.raw_grid.cards
     assert tab.profile.content.state is ViewState.READY
 
 
@@ -304,7 +304,7 @@ def test_initial_loading_cancel_and_error_have_nine_fields_and_visible_search_st
     assert len(tab.profile_fields.cards) == 9
     assert all(card.value.text() == "Профиль недоступен" for card in tab.profile_fields.cards)
     assert "Данные профиля не удалось обработать" in tab.search_status.text()
-    assert len(tab.product_grid.cards) == 10
+    assert len(tab.raw_grid.cards) == 10
 
 
 def test_user_search_design_and_terminology_preserved(widget):

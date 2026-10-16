@@ -14,17 +14,20 @@ from Application.recommendation_rules import RecommendationRules, load_rules, sa
 from Application.tabs import recommendation_rules_widget as settings
 from Application.tabs.customer_card_widgets import ProductCard
 from Application.customer_card_data import ProductContent
-from Application.model.raw_bpr_inference import RawBprRecommendation
+from Application.model.raw_bpr_inference import RawBprRecommendation, RawBprResult, RawBprStatus
 from Application.paths import ICONS_DIR
 from Application.theme.apply_theme import apply_app_theme
 from tests.test_hybrid_recommendations import write_catalog
 from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search, wait, found
 
+from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING
+
 
 def hybrid_result(customer="C", status="READY"):
     source = MatchSource("original-source", "Исходные брюки", -1.123456789, 37, .85, "weighted_attributes_v1", .7)
     item = HybridItem(f"target-{customer}", "Актуальные брюки", "Брюки", "NOS", 10, "", 1, .7, (source,))
-    return HybridResult(status, "Рекомендации из актуального ассортимента", (item,) if status == "READY" else ())
+    raw = RawBprResult("g", "A", RawBprStatus.OK, (RawBprRecommendation(37, "original-source", -1.123456789),))
+    return HybridResult(status, "Рекомендации из актуального ассортимента", (item,) if status == "READY" else (), raw_bpr=raw)
 
 
 @pytest.mark.parametrize("state", ["RULES_NOT_READY", "PURCHASES_NOT_READY", "EMPTY", "READY"])
@@ -48,7 +51,7 @@ def test_hybrid_background_and_profile_history_independent(card, state):
         assert widget.code.text() == "Код: target-C"
         assert widget.rank.text() == "№1"
         assert widget.content.recommendation.raw_score == -1.123456789
-        assert "Оценка подбора" in widget.score.text()
+        assert "Итоговый рейтинг" in widget.score.text()
         assert "-1.123456789" in widget.score.toolTip()
     else:
         assert not card.tab.product_grid.cards
@@ -273,18 +276,67 @@ def test_rules_layout_icons_messages_and_themes(rules_widget, app, dark, width):
     apply_app_theme(app, dark)
     widget.resize(width, 420)
     QTest.qWait(30)
+
+    # Проверяем подписи полей
     form = widget.layout().itemAt(0).layout()
+
+    # Проверяем общие настройки отступов
+    margins = widget.layout().contentsMargins()
+
+    assert margins.left() == 0
+    assert margins.top() == 0
+    assert margins.right() == 0
+    assert margins.bottom() == 0
+
+    assert widget.layout().spacing() == BLOCK_SPACING
+
+    assert form.contentsMargins().top() == 0
+    assert form.contentsMargins().bottom() == 0
+    assert form.horizontalSpacing() == CONTROL_SPACING
+    assert form.verticalSpacing() == CONTROL_SPACING
+
     assert form.labelForField(widget.kinds).text() == "Вид номенклатуры:"
     assert form.labelForField(widget.primary_collection).text() == "Основная коллекция:"
     assert widget.message.isHidden()
+
+    # Проверяем горизонтальную компоновку кнопок
+    assert widget.buttons.count() == 2
     assert widget.buttons.itemAt(0).widget() is widget.save_button
-    assert widget.buttons.itemAt(1).spacerItem() is not None
-    assert widget.buttons.itemAt(2).widget() is widget.refresh_button
-    assert widget.save_button.geometry().right() < widget.refresh_button.geometry().left()
-    assert widget.save_button.geometry().center().y() == widget.refresh_button.geometry().center().y()
-    for button, name in ((widget.save_button, "save.png"), (widget.refresh_button, "refresh.png")):
+    assert widget.buttons.itemAt(1).widget() is widget.refresh_button
+
+    # Обе кнопки должны растягиваться с одинаковым коэффициентом
+    assert widget.buttons.stretch(0) == 1
+    assert widget.buttons.stretch(1) == 1
+
+    save_rect = widget.save_button.geometry()
+    refresh_rect = widget.refresh_button.geometry()
+    layout_rect = widget.buttons.geometry()
+
+    # Сохранение слева, обновление справа, обе на одной строке
+    assert save_rect.right() < refresh_rect.left()
+    assert save_rect.center().y() == refresh_rect.center().y()
+
+    # Между кнопками только стандартный отступ, без большого spacer
+    gap = refresh_rect.left() - save_rect.right() - 1
+    assert abs(gap - widget.buttons.spacing()) <= 1
+
+    # Кнопки занимают всю доступную ширину строки
+    assert abs(save_rect.left() - layout_rect.left()) <= 1
+    assert abs(refresh_rect.right() - layout_rect.right()) <= 1
+
+    # Проверяем иконки
+    for button, name in (
+        (widget.save_button, "save.png"),
+        (widget.refresh_button, "refresh.png"),
+    ):
         assert button.iconSize() == QSize(17, 17)
         assert not button.icon().isNull()
-        assert button.icon().pixmap(17, 17).toImage() == QIcon(str(ICONS_DIR / name)).pixmap(17, 17).toImage()
+        assert (
+            button.icon().pixmap(17, 17).toImage()
+            == QIcon(str(ICONS_DIR / name)).pixmap(17, 17).toImage()
+        )
+
+    # Проверяем отображение ошибки при сохранении пустых правил
     widget.save_button.click()
-    assert widget.message.isVisible() and "Выберите" in widget.message.text()
+    assert widget.message.isVisible()
+    assert "Выберите" in widget.message.text()
