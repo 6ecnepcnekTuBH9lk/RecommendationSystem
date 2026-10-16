@@ -237,9 +237,41 @@ def test_missing_duplicate_or_changing_line_identity_and_owner_conflict(resolver
 
 def test_unresolved_namespace_never_blindly_slices_and_nonpositive_purchase_uncertain(resolver):
     assert assess_order([[line(namespace="website")]], resolver)[-1]
-    assert assess_order([[line(code="999999-size")]], resolver)[-1]
+    assert not assess_order([[line(code="999999-size")]], resolver)[-1]
+    assert assess_order([[line(code="bad")]], resolver)[-1]
     assert not assess_order([[line("otmenen", namespace="website")]], resolver)[-1]
     assert assess_order([[line(quantity="0")]], resolver)[1] == {"000001"}
+
+
+@pytest.mark.parametrize("minimum,value,allowed", [(0, "0", False), (0, "1", True), (3, "2", False),
+                                                  (3, "3", True), (3, "15", True), (0, "?", False),
+                                                  (0, "-1", False), (3, "1\xa0000", True), (3, "1 000", True)])
+def test_availability_is_strictly_positive_even_without_extra_threshold(tmp_path, minimum, value, allowed):
+    catalog = write_catalog(tmp_path, [("000001", {"Коллекция": "NOS", "Остаток": value})])
+    result = compose(raw_result(), {"source-0": BASE}, catalog,
+                     RecommendationRules(("Брюки",), ("NOS",), minimum), PurchaseEvidence("READY"))
+    assert bool(result) is allowed
+
+
+def test_legacy_rules_without_priority_are_still_version_one(tmp_path):
+    path = tmp_path / "rules.json"
+    path.write_text(json.dumps({"version": 1, "kinds": ["Брюки"], "collections": ["NOS"], "minimum_stock": 0}), encoding="utf-8")
+    assert load_rules(path).primary_collection is None
+    save_rules(load_rules(path), path)
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
+
+
+def test_primary_bonus_exact_formula_preserves_other_seasons_and_raw_scores(catalog):
+    raw = raw_result()
+    plain = compose(raw, {"source-0": BASE}, catalog, rules(catalog), PurchaseEvidence("READY"))
+    priority = compose(raw, {"source-0": BASE}, catalog,
+                       replace(rules(catalog), primary_collection="Всесезонный"), PurchaseEvidence("READY"))
+    assert {i.target_item_code for i in priority} == {i.target_item_code for i in plain}
+    assert priority[0].target_collection == "Всесезонный"
+    for item in priority:
+        original = next(i for i in plain if i.target_item_code == item.target_item_code)
+        assert item.final_score == pytest.approx((original.final_score + .05 * (item.target_collection == "Всесезонный")) / 1.05)
+        assert item.sources[0].source_raw_score == raw.recommendations[0].raw_score
 
 
 @pytest.fixture
@@ -304,7 +336,63 @@ def test_sqlite_cancellation_missing_index_and_generation_change(sqlite_history,
 def test_partial_coverage_fail_closed(sqlite_history, catalog):
     root, service, _, sources = sqlite_history
     sources.components = ()
-    assert service.get("canonical", catalog, raw_root=root).status == "INCOMPLETE_COVERAGE"
+    result = service.get("canonical", catalog, raw_root=root)
+    assert result.status == "INCOMPLETE_COVERAGE" and result.diagnostics["coverage_complete"] is False
+
+
+@pytest.mark.parametrize("namespace", ["offline1C", "kanzlerKz"])
+def test_old_purchase_outside_catalog_does_not_block_current_purchase_exclusion(sqlite_history, catalog, namespace):
+    root, service, path, _ = sqlite_history
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE product_occurrences SET selected_value='999999-historical',selected_namespace=? WHERE variant_key='variant-64'", (namespace,))
+    result = service.get("canonical", catalog, raw_root=root)
+    assert result.status == "READY" and result.purchased == {"000001"} and not result.uncertain
+    assert result.diagnostics["historical_out_of_scope_codes"] == 1
+    assert result.diagnostics["historical_out_of_scope_lines"] == 1
+    assert result.diagnostics["unsafe_unresolved_identifier_lines"] == 0
+    assert result.diagnostics["rows_by_status"] == {"F": 65}
+    targets = compose(raw_result(), {"source-0": BASE}, catalog, rules(catalog), result)
+    assert "000001" not in {i.target_item_code for i in targets}
+    assert "000002" in {i.target_item_code for i in targets}
+
+
+@pytest.mark.parametrize("namespace,value", [("offline1C", ""), ("offline1C", " 999999"),
+                                             ("offline1C", None), ("offline1C", "short"),
+                                             ("offline1C", "AB CDE-size"), ("offline1C", "999999\x00"),
+                                             ("website", "999999"), (None, None)])
+def test_unsafe_or_ambiguous_reference_still_blocks_whole_output(sqlite_history, catalog, namespace, value):
+    root, service, path, _ = sqlite_history
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE product_occurrences SET selected_namespace=?,selected_value=? WHERE variant_key='variant-64'", (namespace, value))
+    result = service.get("canonical", catalog, raw_root=root)
+    assert result.status == "UNRESOLVED_PRODUCTS"
+    assert result.purchased == {"000001"}
+    assert result.diagnostics["unsafe_unresolved_identifier_lines"] == 1
+    assert not compose(raw_result(), {"source-0": BASE}, catalog, rules(catalog), result)
+
+
+def test_outside_identity_still_participates_in_conflicting_snapshot_comparison(sqlite_history, catalog):
+    root, service, path, _ = sqlite_history
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("INSERT INTO variants SELECT 'changed',event_key,?,canonical_customer_id,source_customer_id,kind,event_us,quality FROM variants WHERE variant_key='variant-64'", (bytes([1]) * 32,))
+        db.execute("INSERT INTO order_snapshots SELECT 'changed','changed',retail_order_id,order_us,channel_system_name,channel_external_id,channel_mindbox_id,channel_name,total_price,delivery_cost FROM order_snapshots WHERE variant_key='variant-64'")
+        db.execute("INSERT INTO order_lines SELECT 'changed-line','changed',source_line_key,line_id,source_line_id,is_synthetic,ordinal,line_number,product_name,quantity,raw_status,price_of_line,base_price_per_item,quality FROM order_lines WHERE variant_key='variant-64'")
+        db.execute("INSERT INTO product_occurrences VALUES ('changed','line',0,'offline1C','999999-old','[]')")
+    result = service.get("canonical", catalog, raw_root=root)
+    assert result.status == "READY" and result.purchased == {"000001"}
+    assert result.uncertain == {"000002"} and result.diagnostics["conflicting_orders"] == 1
+    assert result.diagnostics["historical_out_of_scope_codes"] == 1
+
+
+def test_catalog_code_with_possible_prefix_alias_is_not_proven_disjoint(sqlite_history, catalog):
+    root, service, path, _ = sqlite_history
+    catalog.all_codes = catalog.all_codes | {"999999-catalog-sku"}
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE product_occurrences SET selected_value='999999-old-size' WHERE variant_key='variant-64'")
+    result = service.get("canonical", catalog, raw_root=root)
+    assert result.status == "UNRESOLVED_PRODUCTS"
+    assert result.diagnostics["unsafe_unresolved_identifier_lines"] == 1
+    assert result.diagnostics["historical_out_of_scope_codes"] == 0
 
 
 def test_sqlite_resources_closed_on_success_cancellation_and_query_error(sqlite_history, catalog, monkeypatch):
@@ -355,6 +443,10 @@ def test_hybrid_service_unconfigured_unavailable_and_current_settings(tmp_path, 
     result = service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path)
     assert result.status == "READY" and len(result.items) == 5
     assert result.raw_bpr == raw
+    save_rules(replace(rules(catalog), primary_collection="Всесезонный"), path)
+    priority_result = service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path)
+    assert priority_result.status == "READY" and priority_result.items[0].target_collection == "Всесезонный"
+    assert priority_result.raw_bpr == raw
     save_rules(replace(rules(catalog), minimum_stock=50), path)
     assert not service.is_current(result, raw_root=tmp_path)
     assert service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path).status == "EMPTY"

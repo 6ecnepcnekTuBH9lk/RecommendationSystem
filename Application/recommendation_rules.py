@@ -16,8 +16,8 @@ RULES_PATH = USER_SETTINGS_DIR / "recommendation_rules.json"
 class RecommendationRules:
     kinds: tuple[str, ...]
     collections: tuple[str, ...]
-    minimum_stock: int
-    # Reserved for an explicitly selected business priority; no inferred season.
+    minimum_stock: int  # Zero disables the extra threshold, never the in-stock gate.
+    # Explicit user priority; never inferred from the calendar.
     primary_collection: str | None = None
 
     def __post_init__(self):
@@ -40,11 +40,12 @@ def load_rules(path=RULES_PATH):
     with Path(path).open(encoding="utf-8") as stream:
         value = json.load(stream)
     if (not isinstance(value, dict) or type(value.get("version")) is not int or value.get("version") != 1
-            or set(value) != {"version", "kinds", "collections", "minimum_stock", "primary_collection"}
+            or not {"version", "kinds", "collections", "minimum_stock"} <= set(value)
+            or set(value) - {"version", "kinds", "collections", "minimum_stock", "primary_collection"}
             or not isinstance(value["kinds"], list) or not isinstance(value["collections"], list)):
         raise ValueError("Некорректная версия настроек рекомендаций.")
     return RecommendationRules(tuple(value["kinds"]), tuple(value["collections"]),
-                               value["minimum_stock"], value["primary_collection"])
+                               value["minimum_stock"], value.get("primary_collection"))
 
 
 def save_rules(rules, path=RULES_PATH):

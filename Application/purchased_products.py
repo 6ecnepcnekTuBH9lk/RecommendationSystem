@@ -14,7 +14,9 @@ from Application import customer_history_index as index
 from Application.customer_history_service import _coverage_complete, _request
 from Application.mindbox.records import ProductKey
 from Application.mindbox.selection import DEFAULT_PURCHASE_STATUSES
-from Application.product_resolution import CatalogDiagnostics, ProductCatalog, ProductResolver, ResolutionStatus
+from Application.product_resolution import (
+    CatalogDiagnostics, ProductCatalog, ProductResolver, ResolutionStatus, normalize_product_key,
+)
 
 
 CANCELLED = frozenset(("Mindbox-Tech-Cancellation", "otmenen", "out-of-stock"))
@@ -42,7 +44,7 @@ def classify(status):
     return "UNKNOWN"
 
 
-def assess_order(snapshots, resolver, *, owner_conflict=False):
+def assess_order(snapshots, resolver, *, owner_conflict=False, diagnostics=None, ambiguous_catalog_prefixes=frozenset()):
     """Return code evidence and aggregate diagnostics for ONE logical order.
 
     Missing/repeated cross-snapshot identities and changing product identities
@@ -52,6 +54,7 @@ def assess_order(snapshots, resolver, *, owner_conflict=False):
     groups = defaultdict(list)
     counts = Counter()
     unresolved = False
+    diagnostics = {} if diagnostics is None else diagnostics
     for snapshot_no, lines in enumerate(snapshots):
         for row in lines:
             status = row["raw_status"]
@@ -60,8 +63,19 @@ def assess_order(snapshots, resolver, *, owner_conflict=False):
             key = None if row["selected_namespace"] is None else ProductKey(row["selected_namespace"], row["selected_value"])
             match = None if key is None else resolver.resolve(key, strict=False)
             code = match.item_id if match is not None and match.status is ResolutionStatus.RESOLVED else None
+            if match is not None and match.status is ResolutionStatus.UNKNOWN_CANDIDATE:
+                normalized = normalize_product_key(key)
+                # Only a complete, well-formed legacy prefix proves disjointness.
+                # Keep short unknown IDs and damaged/unsupported references unsafe.
+                if (normalized.item_id is not None and len(normalized.item_id) == 6
+                        and normalized.item_id not in ambiguous_catalog_prefixes
+                        and all(c.isprintable() and not c.isspace() for c in key.value)):
+                    code = normalized.item_id
+                    diagnostics.setdefault("historical_out_of_scope_codes", set()).add(code)
+                    diagnostics["historical_out_of_scope_lines"] = diagnostics.get("historical_out_of_scope_lines", 0) + 1
             if code is None and state != "CANCELLED":
                 unresolved = True
+                diagnostics["unsafe_unresolved_identifier_lines"] = diagnostics.get("unsafe_unresolved_identifier_lines", 0) + 1
             identity = row["source_line_key"]
             # A single snapshot needs no cross-snapshot line alignment.
             identity = identity or ("local", snapshot_no, row["ordinal"])
@@ -103,14 +117,18 @@ class PurchasedProductsService:
                 sources = index._capture_sources(root)
                 version = index._database_version(path)
                 resolver = ProductResolver(ProductCatalog(catalog.all_codes, CatalogDiagnostics()))
+                # A noncanonical long catalog code might alias the source prefix;
+                # do not use a mere membership miss as proof of disjointness.
+                ambiguous_prefixes = frozenset(code[:6] for code in catalog.all_codes if len(code) > 6)
                 purchased, uncertain, statuses = set(), set(), Counter()
                 cancelled_lines = conflicts = 0
                 unresolved = False
+                identity_diagnostics = {}
                 with index._read_index(path) as connection:
                     connection.set_progress_handler(lambda: int(cancelled()), 1000)
                     ready = index._inspect_connection(connection, sources)  # No integrity scan.
                     if not _coverage_complete(ready.coverage, request):
-                        return PurchaseEvidence("INCOMPLETE_COVERAGE", coverage=ready.coverage)
+                        return PurchaseEvidence("INCOMPLETE_COVERAGE", diagnostics={"coverage_complete": False}, coverage=ready.coverage)
                     connection.row_factory = sqlite3.Row
                     events = connection.execute(
                         "SELECT e.event_key,e.owner_conflict FROM event_customers ec "
@@ -128,7 +146,8 @@ class PurchasedProductsService:
                                 "AND p.role='line' AND p.ordinal=l.ordinal WHERE l.variant_key=?",
                                 (variant,)).fetchall())
                         bought, doubtful, count, excluded, conflict, missing = assess_order(
-                            snapshots, resolver, owner_conflict=bool(event["owner_conflict"]))
+                            snapshots, resolver, owner_conflict=bool(event["owner_conflict"]), diagnostics=identity_diagnostics,
+                            ambiguous_catalog_prefixes=ambiguous_prefixes)
                         purchased.update(bought)
                         uncertain.update(doubtful)
                         statuses.update(count)
@@ -137,11 +156,20 @@ class PurchasedProductsService:
                         unresolved |= missing
                 if version != index._database_version(path) or index._capture_sources(root).version != sources.version:
                     return PurchaseEvidence("INDEX_NOT_READY")
+                # The whole current catalog is a conservative superset of every
+                # target pool. Retain outside identities during snapshot comparison
+                # so an old/new product conflict still makes the current code uncertain.
+                purchased.intersection_update(catalog.all_codes)
+                uncertain.intersection_update(catalog.all_codes)
                 diagnostics = {"rows_by_status": dict(sorted(statuses.items())), "purchased_codes": len(purchased),
                                "cancelled_lines_not_purchases": cancelled_lines,
                                "unknown_status_lines": sum(n for s, n in statuses.items() if classify(s) == "UNKNOWN"),
                                "conflicting_orders": conflicts, "uncertain_codes": len(uncertain),
-                               "unresolved_non_cancelled_products": unresolved}
+                               "unresolved_non_cancelled_products": unresolved,
+                               "historical_out_of_scope_codes": len(identity_diagnostics.get("historical_out_of_scope_codes", ())),
+                               "historical_out_of_scope_lines": identity_diagnostics.get("historical_out_of_scope_lines", 0),
+                               "unsafe_unresolved_identifier_lines": identity_diagnostics.get("unsafe_unresolved_identifier_lines", 0),
+                               "coverage_complete": True}
                 return PurchaseEvidence("UNRESOLVED_PRODUCTS" if unresolved else "READY", frozenset(purchased),
                                         frozenset(uncertain), diagnostics, ready.generation, ready.source_version, ready.coverage)
         except Exception as exc:

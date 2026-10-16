@@ -107,7 +107,7 @@ def compose(raw, metadata, catalog, rules, purchases, *, k=10, per_source=10, ca
     targets = {}
     for item in catalog.items.values():
         if (item.get("ВидНоменклатуры") in rules.kinds and item.get("Коллекция") in rules.collections
-                and item.stock is not None and item.stock >= rules.minimum_stock
+                and item.stock is not None and item.stock > 0 and item.stock >= rules.minimum_stock
                 and item.code not in purchases.purchased and item.code not in purchases.uncertain):
             targets.setdefault(item.get("ВидНоменклатуры"), []).append(item)
     unique = {}

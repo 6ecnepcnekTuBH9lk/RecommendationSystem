@@ -4,7 +4,9 @@ from threading import Event, get_ident
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QThreadPool
+from PyQt6.QtCore import QSize, QThreadPool, Qt
+from PyQt6.QtGui import QIcon
+from PyQt6.QtTest import QTest
 
 from Application.customer_card_data import ViewState
 from Application.hybrid_recommendations import HybridItem, HybridResult, MatchSource
@@ -13,6 +15,8 @@ from Application.tabs import recommendation_rules_widget as settings
 from Application.tabs.customer_card_widgets import ProductCard
 from Application.customer_card_data import ProductContent
 from Application.model.raw_bpr_inference import RawBprRecommendation
+from Application.paths import ICONS_DIR
+from Application.theme.apply_theme import apply_app_theme
 from tests.test_hybrid_recommendations import write_catalog
 from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search, wait, found
 
@@ -144,6 +148,8 @@ def test_settings_no_implicit_unrestricted_first_use_and_background_read(rules_w
     widget, path, _, threads = rules_widget
     assert not path.exists() and not widget.kinds.selected() and not widget.collections.selected()
     assert all(t != get_ident() for t in threads)
+    assert widget.message.isHidden() and widget.message.text() == ""
+    assert widget.primary_collection.count() == 1 and widget.primary_collection.currentData() is None
     widget.save_button.click()
     assert not path.exists() and "Выберите" in widget.message.text()
     widget.kinds.set_checked(True)
@@ -186,3 +192,99 @@ def test_settings_draft_survives_catalog_refresh(rules_widget):
     assert widget.kinds.selected() == ("Брюки",)
     assert widget.collections.selected() == ("NOS", "Зима")
     assert widget.minimum_stock.value() == 23 and not path.exists()
+
+
+def test_priority_choices_save_restore_and_explicit_clear(rules_widget):
+    widget, path, _, _ = rules_widget
+    widget.kinds.set_checked(True)
+    widget.collections.set_checked(True)
+    assert [widget.primary_collection.itemData(i) for i in range(widget.primary_collection.count())] == [None, "NOS", "Зима"]
+    widget.primary_collection.setCurrentIndex(widget.primary_collection.findData("Зима"))
+    widget.save_button.click()
+    wait(lambda: widget._task is None)
+    assert load_rules(path).primary_collection == "Зима"
+    widget.primary_collection.blockSignals(True)
+    widget.primary_collection.setCurrentIndex(0)
+    widget.primary_collection.blockSignals(False)
+    widget._primary_collection = None
+    widget.refresh_button.click()
+    wait(lambda: widget._task is None)
+    assert widget.primary_collection.currentData() == "Зима"
+    widget.primary_collection.setCurrentIndex(0)
+    widget.save_button.click()
+    wait(lambda: widget._task is None)
+    assert load_rules(path).primary_collection is None
+
+
+def test_removing_primary_requires_explicit_choice_without_silent_fallback(rules_widget):
+    widget, path, _, _ = rules_widget
+    widget.kinds.set_checked(True)
+    widget.collections.set_checked(True)
+    widget.primary_collection.setCurrentIndex(widget.primary_collection.findData("Зима"))
+    widget.save()
+    wait(lambda: widget._task is None)
+    previous = path.read_bytes()
+    for n in range(widget.collections.items.count()):
+        item = widget.collections.items.item(n)
+        if item.text() == "Зима":
+            item.setCheckState(Qt.CheckState.Unchecked)
+    assert [widget.primary_collection.itemData(i) for i in range(widget.primary_collection.count())] == [None, "NOS"]
+    assert widget._primary_collection == "Зима" and widget.primary_collection.currentData() is None
+    widget.save_button.click()
+    assert path.read_bytes() == previous and widget._task is None
+    assert "Выберите другую" in widget.message.text()
+    widget.primary_collection.activated.emit(0)  # Explicitly selecting the displayed "Не задана".
+    widget.save_button.click()
+    wait(lambda: widget._task is None)
+    assert load_rules(path).primary_collection is None and load_rules(path).collections == ("NOS",)
+
+
+def test_deleted_catalog_priority_does_not_silently_change_on_refresh(rules_widget):
+    widget, path, catalog, _ = rules_widget
+    save_rules(RecommendationRules(("Брюки",), ("NOS", "Зима"), 0, "Зима"), path)
+    catalog.path.write_text(catalog.path.read_text(encoding="utf-8-sig").replace("Зима", "Лето"), encoding="utf-8-sig")
+    catalog.load()
+    previous = path.read_bytes()
+    widget.refresh()
+    wait(lambda: widget._task is None)
+    assert widget.primary_collection.findData("Зима") == -1
+    assert widget._primary_collection == "Зима"
+    assert "Основная коллекция" in widget.message.text()
+    widget.save_button.click()
+    assert path.read_bytes() == previous
+
+
+def test_changing_priority_does_not_hide_catalog_failure(rules_widget, monkeypatch):
+    widget, _, _, _ = rules_widget
+    widget.collections.set_checked(True)
+    monkeypatch.setattr(settings, "RecommendationCatalog", Mock(side_effect=OSError()))
+    widget.refresh()
+    wait(lambda: widget._task is None)
+    message = widget.message.text()
+    assert "Не удалось" in message and widget.message.isVisible()
+    widget.primary_collection.setCurrentIndex(widget.primary_collection.findData("NOS"))
+    assert widget.message.text() == message and not widget.save_button.isEnabled()
+
+
+@pytest.mark.parametrize("dark", [False, True])
+@pytest.mark.parametrize("width", [480, 1000])
+def test_rules_layout_icons_messages_and_themes(rules_widget, app, dark, width):
+    widget, _, _, _ = rules_widget
+    apply_app_theme(app, dark)
+    widget.resize(width, 420)
+    QTest.qWait(30)
+    form = widget.layout().itemAt(0).layout()
+    assert form.labelForField(widget.kinds).text() == "Вид номенклатуры:"
+    assert form.labelForField(widget.primary_collection).text() == "Основная коллекция:"
+    assert widget.message.isHidden()
+    assert widget.buttons.itemAt(0).widget() is widget.save_button
+    assert widget.buttons.itemAt(1).spacerItem() is not None
+    assert widget.buttons.itemAt(2).widget() is widget.refresh_button
+    assert widget.save_button.geometry().right() < widget.refresh_button.geometry().left()
+    assert widget.save_button.geometry().center().y() == widget.refresh_button.geometry().center().y()
+    for button, name in ((widget.save_button, "save.png"), (widget.refresh_button, "refresh.png")):
+        assert button.iconSize() == QSize(17, 17)
+        assert not button.icon().isNull()
+        assert button.icon().pixmap(17, 17).toImage() == QIcon(str(ICONS_DIR / name)).pixmap(17, 17).toImage()
+    widget.save_button.click()
+    assert widget.message.isVisible() and "Выберите" in widget.message.text()

@@ -217,7 +217,8 @@ def test_filter_layout_theme_popup(filter_tab, app, monkeypatch, dark, width):
     headings = [label.text() for label in tab.findChildren(QLabel)]
     assert "Отбор для анализа" in headings
     assert "Правила формирования рекомендаций" in headings
-    assert "Вид номенклатуры (В группе):" in headings
+    assert "Вид номенклатуры (В группе):" not in headings
+    assert "Основная коллекция:" in headings
     assert "Актуальные сезоны:" in headings
     assert "Допустимый остаток:" in headings
     section_headers = [label for label in tab.findChildren(QLabel) if label.property("class") == "sectionHeader"]
