@@ -46,6 +46,12 @@ def raw_result(count=1):
         RawBprRecommendation(n + 1, f"source-{n}", float(count - n) - .123456789) for n in range(count)))
 
 
+def checked_purchases(raw=None, purchased=(), uncertain=()):
+    raw = raw_result() if raw is None else raw
+    return PurchaseEvidence("READY", frozenset(purchased), frozenset(uncertain), historical=PurchaseEvidence(
+        "READY", checked_codes=frozenset(rec.model_item_code for rec in raw.recommendations)))
+
+
 @pytest.fixture
 def catalog(tmp_path):
     return write_catalog(tmp_path, [(f"{n:06d}", {"Коллекция": season}) for n, season in enumerate(
@@ -122,32 +128,33 @@ def test_category_ambiguity_cycle_and_hierarchy(tmp_path, catalog):
 
 
 @pytest.mark.parametrize("season", ["Весна-Лето 2025", "Осень-Зима 2025"])
-def test_cross_season_many_targets_and_raw_scores_preserved(catalog, season):
-    raw = raw_result(2)
+def test_cross_season_distinct_sources_and_raw_scores_preserved(catalog, season):
+    raw = raw_result(5)
     metadata = {r.model_item_code: {**BASE, "Коллекция": season} for r in raw.recommendations}
-    result = compose(raw, metadata, catalog, rules(catalog), PurchaseEvidence("READY"))
+    result = compose(raw, metadata, catalog, rules(catalog), checked_purchases(raw))
     assert len(result) == 5
     assert {i.target_collection for i in result} == catalog.collections
-    assert all(len(item.sources) == 2 for item in result)
+    assert all(len(item.sources) == 1 for item in result)
+    assert len({item.sources[0].source_model_item_code for item in result}) == 5
     assert [i.final_rank for i in result] == [1, 2, 3, 4, 5]
     for item in result:
         assert item.final_score == max(s.evidence_score for s in item.sources)
         for source in item.sources:
             original = next(r for r in raw.recommendations if r.model_item_code == source.source_model_item_code)
             assert (source.source_raw_score, source.source_raw_rank) == (original.raw_score, original.rank)
-    assert compose(raw, metadata, catalog, rules(catalog), PurchaseEvidence("READY")) == result
+    assert compose(raw, metadata, catalog, rules(catalog), checked_purchases(raw)) == result
 
 
 @pytest.mark.parametrize("changes", [{"ВидНоменклатуры": "Пиджаки"}, {"ПолНоменклатуры": "Женский"},
                                      {key: "" for key in BASE if key not in ("ВидНоменклатуры", "Коллекция")}])
 def test_incompatible_or_insufficient_evidence_never_random(catalog, changes):
-    assert not compose(raw_result(), {"source-0": {**BASE, **changes}}, catalog, rules(catalog), PurchaseEvidence("READY"))
+    assert not compose(raw_result(), {"source-0": {**BASE, **changes}}, catalog, rules(catalog), checked_purchases())
 
 
 def test_missing_optional_feature_is_zero_not_veto_and_no_current_metadata_substitution(catalog):
     raw = raw_result()
-    assert compose(raw, {"source-0": {**BASE, "СезонНоски": "", "СтилеваяГруппа": ""}}, catalog, rules(catalog), PurchaseEvidence("READY"))
-    assert compose(raw, {}, catalog, rules(catalog), PurchaseEvidence("READY")) == ()
+    assert compose(raw, {"source-0": {**BASE, "СезонНоски": "", "СтилеваяГруппа": ""}}, catalog, rules(catalog), checked_purchases(raw))
+    assert compose(raw, {}, catalog, rules(catalog), checked_purchases(raw)) == ()
     assert similarity(item_from_metadata("source", {}), item_from_metadata("target", {}), catalog) == 0
 
 
@@ -167,31 +174,32 @@ def test_collection_type_is_soft_and_does_not_replace_wearing_season_or_merge_va
 def test_hard_rules(tmp_path, change):
     catalog = write_catalog(tmp_path, [("000001", {"Коллекция": "NOS", **change}), ("000002", {"Коллекция": "NOS"})])
     setting = RecommendationRules(("Брюки",), ("NOS",), 1)
-    result = compose(raw_result(), {"source-0": BASE}, catalog, setting, PurchaseEvidence("READY"))
+    result = compose(raw_result(), {"source-0": BASE}, catalog, setting, checked_purchases())
     assert [item.target_item_code for item in result] == ["000002"]
 
 
 def test_purchased_uncertain_codes_excluded_and_primary_collection_priority(catalog):
     raw = raw_result()
-    evidence = PurchaseEvidence("READY", frozenset(("000001",)), frozenset(("000002",)))
+    evidence = checked_purchases(raw, ("000001",), ("000002",))
     setting = replace(rules(catalog), primary_collection="Всесезонный")
     result = compose(raw, {"source-0": BASE}, catalog, setting, evidence)
-    assert [i.target_item_code for i in result] == ["000004", "000003", "000005"]
+    assert [i.target_item_code for i in result] == ["000004"]
     assert not compose(raw, {"source-0": BASE}, catalog, setting, replace(evidence, status="INCOMPLETE"))
 
 
 def test_broad_pool_uses_next_sources_after_raw_top_ten_and_duplicate_sources_do_not_boost(tmp_path):
     catalog = write_catalog(tmp_path, [(f"{n:06d}", {"Коллекция": "NOS", "Марка": f"M{n}"}) for n in range(12)])
     raw = raw_result(12)
-    metadata = {r.model_item_code: {**BASE, "Марка": f"M{r.rank - 1}"} for r in raw.recommendations}
+    metadata = {r.model_item_code: {**BASE, "Марка": f"M{r.rank - 1}",
+                                   "ВидНоменклатуры": "Пиджаки" if r.rank <= 10 else "Брюки"} for r in raw.recommendations}
     bought = frozenset(f"{n:06d}" for n in range(10))
-    result = compose(raw, metadata, catalog, rules(catalog), PurchaseEvidence("READY", bought))
+    result = compose(raw, metadata, catalog, rules(catalog), checked_purchases(raw, bought))
     assert {i.target_item_code for i in result} == {"000010", "000011"}
     assert {s.source_raw_rank for i in result for s in i.sources} >= {11, 12}
     repeated = replace(raw, recommendations=raw.recommendations + raw.recommendations)
-    again = compose(repeated, metadata, catalog, rules(catalog), PurchaseEvidence("READY", bought))
+    again = compose(repeated, metadata, catalog, rules(catalog), checked_purchases(repeated, bought))
     assert again == result
-    assert all(len(i.sources) == 12 for i in again)
+    assert all(len(i.sources) == 1 for i in again)
     assert all(i.final_score == max(s.evidence_score for s in i.sources) for i in again)
 
 
@@ -249,7 +257,7 @@ def test_unresolved_namespace_never_blindly_slices_and_nonpositive_purchase_unce
 def test_availability_is_strictly_positive_even_without_extra_threshold(tmp_path, minimum, value, allowed):
     catalog = write_catalog(tmp_path, [("000001", {"Коллекция": "NOS", "Остаток": value})])
     result = compose(raw_result(), {"source-0": BASE}, catalog,
-                     RecommendationRules(("Брюки",), ("NOS",), minimum), PurchaseEvidence("READY"))
+                     RecommendationRules(("Брюки",), ("NOS",), minimum), checked_purchases())
     assert bool(result) is allowed
 
 
@@ -263,14 +271,15 @@ def test_legacy_rules_without_priority_are_still_version_one(tmp_path):
 
 def test_primary_bonus_exact_formula_preserves_other_seasons_and_raw_scores(catalog):
     raw = raw_result()
-    plain = compose(raw, {"source-0": BASE}, catalog, rules(catalog), PurchaseEvidence("READY"))
+    plain = compose(raw, {"source-0": BASE}, catalog, rules(catalog), checked_purchases(raw))
     priority = compose(raw, {"source-0": BASE}, catalog,
-                       replace(rules(catalog), primary_collection="Всесезонный"), PurchaseEvidence("READY"))
-    assert {i.target_item_code for i in priority} == {i.target_item_code for i in plain}
+                       replace(rules(catalog), primary_collection="Всесезонный"), checked_purchases(raw))
+    assert len(priority) == len(plain) == 1
     assert priority[0].target_collection == "Всесезонный"
     for item in priority:
-        original = next(i for i in plain if i.target_item_code == item.target_item_code)
-        assert item.final_score == pytest.approx((original.final_score + .05 * (item.target_collection == "Всесезонный")) / 1.05)
+        source = item.sources[0]
+        assert item.final_score == pytest.approx((.30 + .30 + .40 * source.similarity_score
+                                                 + .05 * (item.target_collection == "Всесезонный")) / 1.05)
         assert item.sources[0].source_raw_score == raw.recommendations[0].raw_score
 
 
@@ -351,7 +360,9 @@ def test_old_purchase_outside_catalog_does_not_block_current_purchase_exclusion(
     assert result.diagnostics["historical_out_of_scope_lines"] == 1
     assert result.diagnostics["unsafe_unresolved_identifier_lines"] == 0
     assert result.diagnostics["rows_by_status"] == {"F": 65}
-    targets = compose(raw_result(), {"source-0": BASE}, catalog, rules(catalog), result)
+    raw = replace(raw_result(), recommendations=(RawBprRecommendation(1, "888888", 1.),))
+    checked = service.get("canonical", catalog, raw_root=root, historical_codes={"888888"})
+    targets = compose(raw, {"888888": BASE}, catalog, rules(catalog), checked)
     assert "000001" not in {i.target_item_code for i in targets}
     assert "000002" in {i.target_item_code for i in targets}
 
@@ -431,7 +442,7 @@ def test_hybrid_service_unconfigured_unavailable_and_current_settings(tmp_path, 
     inference.get_candidate_sources.return_value = (raw, {"source-0": BASE})
     identity = SimpleNamespace(model_user_id="model-user", canonical_customer_id="canonical", model_generation="g")
     evidence = Mock()
-    evidence.get.return_value = PurchaseEvidence("READY")
+    evidence.get.return_value = checked_purchases(raw)
     evidence.is_current.return_value = True
     path = tmp_path / "rules.json"
     service = HybridRecommendationService(catalog_path=catalog.path, categories_path=catalog.categories_path,
@@ -441,7 +452,7 @@ def test_hybrid_service_unconfigured_unavailable_and_current_settings(tmp_path, 
     evidence.get.assert_called_once()  # Raw presentation now requires purchase verification even without rules.
     save_rules(rules(catalog), path)
     result = service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path)
-    assert result.status == "READY" and len(result.items) == 5
+    assert result.status == "READY" and len(result.items) == 1
     assert result.raw_bpr == raw
     save_rules(replace(rules(catalog), primary_collection="Всесезонный"), path)
     priority_result = service.get(identity, inference, model_dir=tmp_path, raw_root=tmp_path)

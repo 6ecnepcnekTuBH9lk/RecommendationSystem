@@ -42,7 +42,7 @@ def test_full_ranking_backfill_fewer_empty_and_original_values(card_service, exc
     assert service.hybrid.purchases.get.call_args.kwargs["historical_codes"] == {r.model_item_code for r in raw.recommendations}
 
 
-def test_selected_metadata_after_top10_and_hybrid_unchanged(card_service):
+def test_selected_metadata_after_top10_and_hybrid_uses_only_eligible_sources(card_service):
     service, catalog = card_service
     raw, _ = service.inference.get_candidate_sources.return_value
     metadata = {r.model_item_code: {**BASE, "Номенклатура": f"Исторический {r.rank}"} for r in raw.recommendations}
@@ -58,8 +58,8 @@ def test_selected_metadata_after_top10_and_hybrid_unchanged(card_service):
     assert result.raw_products[0].name == "Исторический 16"
     assert result.raw_products[0].collection == "Осень-Зима 2024"
     assert [r.rank for r in result.hybrid.displayed_raw] == [16, 18, 19, 20]
-    # Purchased source 1 remains the best hybrid evidence, not source 16.
-    assert any(item.sources[0].source_raw_rank == 1 for item in result.hybrid.items)
+    assert {item.sources[0].source_raw_rank for item in result.hybrid.items} == {16, 18, 19, 20}
+    assert [product.display_rank for product in result.raw_products] == [1, 2, 3, 4]
 
 
 @pytest.mark.parametrize("status", ["INDEX_NOT_READY", "INCOMPLETE_COVERAGE", "SOURCE_UNAVAILABLE", "UNRESOLVED_PRODUCTS"])
@@ -73,14 +73,33 @@ def test_unavailable_history_never_displays_unverified_raw(card_service, status)
     assert result.profile is not None
 
 
-def test_historical_unknown_scope_does_not_disable_valid_hybrid(card_service):
+def test_historical_unknown_scope_disables_raw_and_hybrid(card_service):
     service, catalog = card_service
     save_rules(rules(catalog), service.hybrid.rules_path)
     raw, _ = service.inference.get_candidate_sources.return_value
     service.hybrid.purchases.get.return_value = evidence(raw, status="UNRESOLVED_PRODUCTS")
     result = service.load("canonical")
-    assert result.state is ViewState.READY and result.products
+    assert result.state is ViewState.UNAVAILABLE and not result.products
     assert result.raw_state is ViewState.UNAVAILABLE and not result.raw_products
+
+
+@pytest.mark.parametrize("reason", ["all_purchased", "no_analogs"])
+def test_empty_hybrid_distinguishes_missing_sources_from_missing_analogs(card_service, reason):
+    service, catalog = card_service
+    save_rules(rules(catalog), service.hybrid.rules_path)
+    raw, _ = service.inference.get_candidate_sources.return_value
+    service.hybrid.purchases.get.return_value = evidence(
+        raw, purchased=[rec.model_item_code for rec in raw.recommendations] if reason == "all_purchased" else ())
+    if reason == "no_analogs":
+        service.inference.get_candidate_sources.return_value = raw, {"source-0": {**BASE, "ВидНоменклатуры": "Пиджаки"}}
+    result = service.load("canonical")
+    assert result.state is ViewState.EMPTY and not result.products
+    if reason == "all_purchased":
+        assert result.raw_state is ViewState.EMPTY and not result.raw_products
+        assert "нет допустимых исторических источников" in result.message
+    else:
+        assert result.raw_state is ViewState.READY and len(result.raw_products) == 10
+        assert "актуального ассортимента не найдено" in result.message
 
 
 def test_incomplete_identity_scope_is_not_treated_as_no_purchases(card_service):

@@ -75,6 +75,7 @@ class ProductContent:
     reference_message: str = ""
     collection: str = ""
     hybrid_item: "HybridItem | None" = None
+    display_rank: int | None = None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -309,7 +310,8 @@ class CustomerCardService:
             rec, historical[rec.model_item_code].name if rec.model_item_code in historical else "",
             photos.get(rec.model_item_code, ("", ""))[1] if rec.model_item_code not in self._catalog_ambiguous else "",
             collection=historical[rec.model_item_code].collection if rec.model_item_code in historical else "",
-        ) for rec in hybrid.displayed_raw)
+            display_rank=display_rank,
+        ) for display_rank, rec in enumerate(hybrid.displayed_raw, 1))
 
     def load(self, customer_id: str, cancelled=lambda: False) -> CustomerCardResult:
         try:

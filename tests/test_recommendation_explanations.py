@@ -13,20 +13,20 @@ from Application.purchased_products import PurchaseEvidence
 from Application.recommendation_catalog import item_from_metadata
 from Application.recommendation_rules import save_rules
 from Application.model.raw_bpr_inference import RawBprStatus
-from tests.test_hybrid_recommendations import BASE, catalog as catalog, raw_result, rules
+from tests.test_hybrid_recommendations import BASE, catalog as catalog, checked_purchases, raw_result, rules
 
 
 def test_full_ranking_and_best_source_rank_37(catalog):
     raw = raw_result(40)
-    items = compose(raw, {"source-36": BASE, "source-37": BASE}, catalog, rules(catalog), PurchaseEvidence("READY"))
-    assert items
+    items = compose(raw, {"source-36": BASE, "source-37": BASE}, catalog, rules(catalog), checked_purchases(raw))
+    assert len(items) == 2
     for item in items:
         best = item.sources[0]
         c = best.calculation
-        assert best.source_raw_rank == 37 and c.position == 36 and c.source_count == 40
+        assert best.source_raw_rank in (37, 38) and c.position == best.source_raw_rank - 1 and c.source_count == 40
         low, high = raw.recommendations[-1].raw_score, raw.recommendations[0].raw_score
         assert c.minimum_bpr_score == low and c.maximum_bpr_score == high
-        assert c.rank_score == 1 - 36 / 39
+        assert c.rank_score == 1 - c.position / 39
         assert c.normalized_bpr_score == (best.source_raw_score - low) / (high - low)
         assert c.rank_contribution == .30 * c.rank_score
         assert c.bpr_contribution == .30 * c.normalized_bpr_score
@@ -35,7 +35,7 @@ def test_full_ranking_and_best_source_rank_37(catalog):
         assert c.final_score == item.final_score == best.evidence_score == c.before_bonus
         assert c.divisor == 1 and c.bonus == 0 and len(c.features) == 10
         assert sum(f.contribution for f in c.features) == pytest.approx(best.similarity_score)
-        assert len(item.sources) == 2 and item.sources[1].source_raw_rank == 38
+        assert len(item.sources) == 1
         assert item.final_score == max(s.evidence_score for s in item.sources)
 
 
@@ -55,7 +55,7 @@ def test_equal_raw_scores_bonus_and_no_intermediate_rounding(catalog, primary):
     raw = raw_result(3)
     raw = replace(raw, recommendations=tuple(replace(rec, raw_score=-1.12345678912345) for rec in raw.recommendations))
     result = compose(raw, {r.model_item_code: BASE for r in raw.recommendations}, catalog,
-                     replace(rules(catalog), primary_collection=primary), PurchaseEvidence("READY"))
+                     replace(rules(catalog), primary_collection=primary), checked_purchases(raw))
     for item in result:
         c = item.sources[0].calculation
         assert c.normalized_bpr_score == 1

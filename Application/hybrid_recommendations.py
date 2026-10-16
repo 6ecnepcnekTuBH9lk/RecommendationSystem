@@ -3,7 +3,8 @@
 Similarity uses fixed weights (missing evidence earns zero, never a match).
 Final score = .30 rank percentile + .30 min/max Raw BPR + .40 similarity.
 An explicit primary collection receives a .05 bonus, scaled back to [0,1].
-Multiple sources use MAX evidence, not a sum; every retained source is recorded.
+Sources claim one best unused target each, in original BPR rank order.
+The first ten successful pairs are then sorted by their unchanged final scores.
 Scores are ranking utilities, never purchase probabilities.
 """
 
@@ -156,19 +157,39 @@ class HybridResult:
     displayed_raw: tuple[RawBprRecommendation, ...] = ()
 
 
-def select_displayed_raw(raw, purchases):
-    """Presentation Top-10 only; never mutate the ranking used by compose()."""
+def _historical_evidence(raw, purchases):
     checked = purchases.historical if purchases is not None else None
     codes = frozenset(rec.model_item_code for rec in raw.recommendations)
     if checked is None or checked.status != "READY" or not codes <= checked.checked_codes:
+        return None
+    return checked
+
+
+def _ranked_sources(raw):
+    unique = {}
+    for rec in raw.recommendations:
+        unique.setdefault(rec.model_item_code, rec)
+    return tuple(sorted(unique.values(), key=lambda rec: rec.rank))
+
+
+def select_displayed_raw(raw, purchases):
+    """Presentation Top-10; the same purchase evidence gates greedy sources."""
+    checked = _historical_evidence(raw, purchases)
+    if checked is None:
         return ()
     excluded = checked.purchased | checked.uncertain
-    return tuple(rec for rec in raw.recommendations if rec.model_item_code not in excluded)[:10]
+    return tuple(rec for rec in _ranked_sources(raw) if rec.model_item_code not in excluded)[:10]
 
 
 def compose(raw, metadata, catalog, rules, purchases, *, k=10, per_source=10, cancelled=lambda: False):
-    """Pure composition; only reliably checked targets can enter the result."""
-    if purchases.status != "READY":
+    """Greedy matching: one checked historical source claims one free target.
+
+    per_source is retained for call compatibility only; it no longer caps the
+    candidates examined for a source. Normalization uses the full ranking.
+    """
+    historical = _historical_evidence(raw, purchases)
+    limit = min(10, k)
+    if historical is None or purchases.status != "READY" or limit <= 0 or cancelled():
         return ()
     rules.validate_catalog(catalog)
     targets = {}
@@ -177,51 +198,53 @@ def compose(raw, metadata, catalog, rules, purchases, *, k=10, per_source=10, ca
                 and item.stock is not None and item.stock > 0 and item.stock >= rules.minimum_stock
                 and item.code not in purchases.purchased and item.code not in purchases.uncertain):
             targets.setdefault(item.get("ВидНоменклатуры"), []).append(item)
-    unique = {}
-    for rec in raw.recommendations:
-        unique.setdefault(rec.model_item_code, rec)
-    ranked_sources = tuple(unique.values())
+    ranked_sources = _ranked_sources(raw)
     scores = [r.raw_score for r in ranked_sources]
     low, high = (min(scores), max(scores)) if scores else (0., 0.)
-    evidence = {}
+    excluded_sources = historical.purchased | historical.uncertain
+    selected, used_targets = [], set()
     for position, rec in enumerate(ranked_sources):
         if cancelled():
             return ()
+        if rec.model_item_code in excluded_sources:
+            continue
         values = metadata.get(rec.model_item_code)
         if not isinstance(values, dict):
             continue  # Never substitute current attributes for missing training data.
         source = item_from_metadata(rec.model_item_code, values)
         rank_score, raw_score = _normalized_scores(position, len(ranked_sources), rec.raw_score, low, high)
-        candidates = []
+        best = None
         for item in targets.get(source.get("ВидНоменклатуры"), ()):
             if cancelled():
                 return ()
+            if item.code in used_targets:
+                continue
             quality = similarity(source, item, catalog)
             if quality >= MIN_SIMILARITY:
                 final = _rating(rank_score, raw_score, quality, rules.primary_collection is not None,
                                 item.get("Коллекция") == rules.primary_collection)
-                candidates.append((final, quality, item.code, item))
-        candidates.sort(key=lambda x: (-x[0], x[2]))
-        for final, quality, _, target in candidates[:per_source]:
-            source_match = MatchSource(rec.model_item_code, source.name, rec.raw_score, rec.rank,
-                                       quality, MATCH_METHOD, final, source.get("Коллекция"))
-            evidence.setdefault(target.code, []).append(source_match)
-    ranked = sorted(evidence, key=lambda code: (-max(s.evidence_score for s in evidence[code]), code))
+                if best is None or (-final, item.code) < (-best[0], best[2].code):
+                    best = (final, quality, item)
+        if best is None:
+            continue
+        selected.append((*best, rec, position, source))
+        used_targets.add(best[2].code)
+        if len(selected) == limit:
+            break  # Later sources cannot displace an already assigned pair.
+    selected.sort(key=lambda pair: (-pair[0], pair[2].code))
     result = []
-    positions = {r.model_item_code: i for i, r in enumerate(ranked_sources)}
-    for rank, code in enumerate(ranked[:k], 1):
-        item = catalog.items[code]
-        sources = tuple(sorted(evidence[code], key=lambda s: (-s.evidence_score, s.source_raw_rank, s.source_model_item_code)))
-        best = sources[0]
-        position = positions[best.source_model_item_code]
-        r, b = _normalized_scores(position, len(ranked_sources), best.source_raw_score, low, high)
-        terms = _rating(r, b, best.similarity_score, rules.primary_collection is not None,
+    for rank, (final, quality, item, rec, position, source) in enumerate(selected, 1):
+        if cancelled():
+            return ()
+        r, b = _normalized_scores(position, len(ranked_sources), rec.raw_score, low, high)
+        terms = _rating(r, b, quality, rules.primary_collection is not None,
                         item.get("Коллекция") == rules.primary_collection, explain=True)
-        features = similarity_breakdown(item_from_metadata(best.source_model_item_code, metadata[best.source_model_item_code]), item, catalog)
+        features = similarity_breakdown(source, item, catalog)
         explanation = ScoreExplanation(position, len(ranked_sources), low, high, r, b, *terms, rules.primary_collection, features)
-        sources = (replace(best, calculation=explanation), *sources[1:])
-        result.append(HybridItem(code, item.name, item.get("ВидНоменклатуры"), item.get("Коллекция"),
-                                 item.stock, item.get("ТитульнаяФотография"), rank, sources[0].evidence_score, sources))
+        match = MatchSource(rec.model_item_code, source.name, rec.raw_score, rec.rank, quality, MATCH_METHOD,
+                            final, source.get("Коллекция"), explanation)
+        result.append(HybridItem(item.code, item.name, item.get("ВидНоменклатуры"), item.get("Коллекция"),
+                                 item.stock, item.get("ТитульнаяФотография"), rank, final, (match,)))
     return tuple(result)
 
 
@@ -280,12 +303,15 @@ class HybridRecommendationService:
                 return make_result("RULES_NOT_READY", "Виды или сезоны изменились в каталоге. Обновите правила рекомендаций.")
             if not isinstance(metadata, dict) or not metadata:
                 return make_result("METADATA_NOT_READY", "Исторические метаданные модели недоступны.")
-            if checked.status != "READY":
+            if checked.status != "READY" or _historical_evidence(raw, checked) is None:
                 return make_result("PURCHASES_NOT_READY", "Проверка покупок недоступна или неполна. Рекомендации не сформированы.")
             items = compose(raw, metadata, catalog, rules, checked, cancelled=cancelled)
             if cancelled():
                 return make_result("CANCELLED", "Поиск отменён.")
-            result = make_result("READY" if items else "EMPTY", "Рекомендации из актуального ассортимента",
+            message = ("Рекомендации из актуального ассортимента" if items else
+                       "После проверки покупок нет допустимых исторических источников." if not displayed else
+                       "Подходящих товаров актуального ассортимента не найдено.")
+            result = make_result("READY" if items else "EMPTY", message,
                                  items, catalog_key=catalog._key, rules_key=rules_key, diagnostics=dict(catalog.diagnostics))
             return result if self.is_current(result, raw_root=raw_root) else replace(
                 result, status="STALE", items=(), message="Источники или настройки изменились. Повторите поиск.")
@@ -294,9 +320,8 @@ class HybridRecommendationService:
             return make_result("UNAVAILABLE", "Не удалось проверить условия рекомендаций. Повторите поиск.")
 
     def raw_is_current(self, result, *, raw_root):
-        checked = result.purchases.historical if result.purchases is not None else None
-        return (checked is not None and checked.status == "READY" and result.raw_bpr is not None
-                and all(rec.model_item_code in checked.checked_codes for rec in result.raw_bpr.recommendations)
+        checked = _historical_evidence(result.raw_bpr, result.purchases) if result.raw_bpr is not None else None
+        return (checked is not None
                 and self.purchases.is_current(checked, raw_root=raw_root))
 
     def is_current(self, result, *, raw_root):

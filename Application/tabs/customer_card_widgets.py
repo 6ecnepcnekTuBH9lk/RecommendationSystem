@@ -206,7 +206,9 @@ class ProductCard(QFrame):
         box.setSpacing(BLOCK_SPACING)
         rec = content.recommendation
         hybrid = content.hybrid_item
-        self.rank = text_label(f"№{hybrid.final_rank if hybrid is not None else rec.rank}", style="resultsCardRank")
+        display_rank = getattr(content, "display_rank", None)
+        self.rank = text_label(f"№{hybrid.final_rank if hybrid is not None else display_rank or rec.rank}", style="resultsCardRank")
+        self.rank.setToolTip(f"Исходный ранг BPR: {rec.rank}")
         self.photo = PhotoLabel("Загрузка фото…")
         self.photo.setTextFormat(Qt.TextFormat.PlainText)
         self.photo.setMinimumWidth(0)

@@ -121,7 +121,7 @@ class HybridCalculationSection(StateSection):
         self.box.addWidget(self.features)
         self.final_details = text_label("")
         self.box.addWidget(self.final_details)
-        self.merge_note = text_label("Итоговый рейтинг использует максимальную оценку одного источника, а не сумму оценок.")
+        self.merge_note = text_label("")
         self.box.addWidget(self.merge_note)
         self.other_sources = QToolButton()
         self.other_sources.setText("Другие исходные соответствия")
@@ -212,5 +212,11 @@ class HybridCalculationSection(StateSection):
         self.other_sources.setEnabled(len(item.sources) > 1)
         self.other_sources.setChecked(False)
         self.alternatives.hide()
-        for widget in (self.summary, self.bpr_details, self.features, self.final_details, self.merge_note, self.other_sources):
+        self.merge_note.setText(
+            "Источники рассматриваются по исходному рангу BPR. Каждый выбирает один лучший свободный актуальный аналог; "
+            "назначенные пары не пересматриваются. После добора товары сортируются по итоговому рейтингу."
+            if len(item.sources) == 1 else
+            "Сохранённый результат с несколькими источниками: использована максимальная оценка одного источника, а не сумма оценок.")
+        self.other_sources.setVisible(len(item.sources) > 1)
+        for widget in (self.summary, self.bpr_details, self.features, self.final_details, self.merge_note):
             widget.show()

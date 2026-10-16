@@ -14,21 +14,21 @@ from Application.hybrid_recommendations import HistoricalItem, HybridRecommendat
 from Application.purchased_products import PurchaseEvidence
 from Application.recommendation_rules import save_rules
 from Application.theme.apply_theme import apply_app_theme
-from tests.test_hybrid_recommendations import BASE, raw_result, rules, write_catalog
+from tests.test_hybrid_recommendations import BASE, checked_purchases, raw_result, rules, write_catalog
 from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search
 
 
 @pytest.fixture
 def explained(card, tmp_path):
     catalog = write_catalog(tmp_path, [(f"{n:06d}", {"Коллекция": "NOS", "НазваниеНаСайте": f"Брюки хлопок {n}"}) for n in range(1, 13)])
-    raw = replace(raw_result(40), model_user_id="A")
+    raw = replace(raw_result(50), model_user_id="A")
     historical = tuple(HistoricalItem(r.model_item_code, f"Историческое имя {r.rank}", "Весна-Лето 2025") for r in raw.recommendations[:10])
     hybrid = Mock()
     hybrid.is_current.return_value = True
     threads = []
     def load(identity, *args, **kwargs):
         threads.append(get_ident())
-        items = compose(raw, {"source-36": BASE, "source-37": BASE}, catalog, rules(catalog), PurchaseEvidence("READY"))
+        items = compose(raw, {f"source-{n}": BASE for n in range(36, 46)}, catalog, rules(catalog), checked_purchases(raw))
         purchases = PurchaseEvidence("READY", historical=PurchaseEvidence(
             "READY", checked_codes=frozenset(r.model_item_code for r in raw.recommendations)))
         return HybridResult("READY", "Готово", items, raw_bpr=raw, purchases=purchases,
@@ -64,15 +64,16 @@ def test_three_sections_real_components_top10_and_row_selection(explained):
     assert c.feature_model.rowCount() == 10
     for row, item in enumerate(tab.result.hybrid.items):
         assert c.model.rows[row][-1] == item.final_score
-        assert c.model.rows[row][3] == 37
-        assert c.model.rows[row][5] == 1 - 36 / 39
+        source, = item.sources
+        assert c.model.rows[row][3] == source.source_raw_rank
+        assert c.model.rows[row][5] == 1 - (source.source_raw_rank - 1) / 49
         assert tab.product_grid.cards[row].content.hybrid_item.sources[0].calculation.final_score == item.final_score
         assert tab.product_grid.cards[row].score.text() == f"Итоговый рейтинг: {item.final_score:.3f}"
         assert repr(item.final_score) in tab.product_grid.cards[row].score.toolTip()
-    assert "40 товаров" in c.bpr_details.text() and "source-36" in c.summary.text()
-    assert c.alternative_model.rows[0][0] == 38
-    c.other_sources.click()
-    assert c.alternatives.isVisible()
+    assert "50 товаров" in c.bpr_details.text() and "source-36" in c.summary.text()
+    assert c.alternative_model.rowCount() == 0
+    assert not c.other_sources.isVisible() and not c.alternatives.isVisible()
+    assert "не пересматриваются" in c.merge_note.text()
     c.table.setCurrentIndex(c.model.index(1, 0))
     assert tab.result.hybrid.items[1].target_item_code in c.summary.text()
     assert not c.alternatives.isVisible()
@@ -142,14 +143,16 @@ def test_shared_photo_cache_and_cancel_clear_all_sections(explained):
     assert not card.tab._img_targets
 
 
-def test_production_service_filters_raw_in_worker_and_keeps_full_hybrid_sources(card, tmp_path):
+@pytest.mark.parametrize("purchased_count,uncertain_code", [(5, None), (12, "source-12")])
+def test_production_service_filters_raw_in_worker_and_matches_eligible_sources(card, tmp_path, purchased_count, uncertain_code):
     catalog = write_catalog(tmp_path, [("000001", {"Коллекция": "NOS"})])
     raw = replace(raw_result(40), model_user_id="A")
     metadata = {r.model_item_code: {**BASE, "НазваниеНаСайте": f"Исторический товар {r.rank}"}
                 for r in raw.recommendations}
     card.service.inference.get_candidate_sources.return_value = raw, metadata
-    scope = PurchaseEvidence("READY", frozenset(r.model_item_code for r in raw.recommendations[:12]),
-                             frozenset(("source-12",)), checked_codes=frozenset(r.model_item_code for r in raw.recommendations))
+    scope = PurchaseEvidence("READY", frozenset(r.model_item_code for r in raw.recommendations[:purchased_count]),
+                             frozenset((uncertain_code,)) if uncertain_code else frozenset(),
+                             checked_codes=frozenset(r.model_item_code for r in raw.recommendations))
     purchases = Mock()
     purchases.get.return_value = PurchaseEvidence("READY", historical=scope)
     purchase_threads = []
@@ -163,12 +166,15 @@ def test_production_service_filters_raw_in_worker_and_keeps_full_hybrid_sources(
                                                       rules_path=rules_path, purchases=purchases)
     search(card)
     tab = card.tab
-    assert [w.content.recommendation.rank for w in tab.raw_grid.cards] == list(range(14, 24))
-    assert tab.raw_grid.cards[0].name.text() == "Исторический товар 14"
+    first_rank = purchased_count + int(uncertain_code is not None) + 1
+    assert [w.content.recommendation.rank for w in tab.raw_grid.cards] == list(range(first_rank, first_rank + 10))
+    assert tab.raw_grid.cards[0].name.text() == f"Исторический товар {first_rank}"
     assert all(w.content.recommendation is raw.recommendations[w.content.recommendation.rank - 1] for w in tab.raw_grid.cards)
     assert tab.result.hybrid.items == compose(raw, metadata, catalog, rules(catalog), purchases.get.return_value)
-    assert tab.result.hybrid.items[0].sources[0].source_raw_rank == 1
-    assert tab.calculations.model.rows[0][3] == 1
+    assert tab.result.hybrid.items[0].sources[0].source_raw_rank == first_rank
+    assert tab.calculations.model.rows[0][3] == first_rank
+    assert [w.rank.text() for w in tab.raw_grid.cards] == [f"№{rank}" for rank in range(1, 11)]
+    assert [w.content.display_rank for w in tab.raw_grid.cards] == list(range(1, 11))
     assert tab.result.hybrid.raw_bpr is raw
     assert purchase_threads and all(t != get_ident() for t in purchase_threads)
     purchases.get.assert_called_once()
@@ -188,3 +194,31 @@ def test_history_change_during_worker_handoff_clears_raw_without_erasing_profile
     assert tab.result.profile is not None and tab.profile.content.state.value == "ready"
     assert tab.history.customer_id == "C"
     assert calls and all(t != get_ident() for t in calls)
+
+
+def test_saved_multi_source_result_still_displays_supplied_alternatives(explained):
+    card, _, _, _ = explained
+    search(card)
+    first, second = card.tab.result.hybrid.items[:2]
+    legacy = replace(first, sources=(*first.sources, *second.sources))
+    section = card.tab.calculations
+    section.set_items((legacy,))
+    assert section.other_sources.isVisible()
+    assert section.alternative_model.rowCount() == 1
+    assert "Сохранённый результат" in section.merge_note.text()
+    section.other_sources.click()
+    assert section.alternatives.isVisible()
+    section.set_items((first,))
+    assert not section.other_sources.isVisible() and not section.alternatives.isVisible()
+    assert section.alternative_model.rowCount() == 0
+
+
+def test_saved_result_without_explanation_never_fabricates_calculations(explained):
+    card, _, _, _ = explained
+    search(card)
+    item = card.tab.result.hybrid.items[0]
+    section = card.tab.calculations
+    section.set_items((replace(item, sources=(replace(item.sources[0], calculation=None),)),))
+    assert section.content.state.value == "unavailable"
+    assert section.model.rowCount() == section.feature_model.rowCount() == 0
+    assert not section.table.isVisible() and not section.other_sources.isVisible()

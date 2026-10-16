@@ -417,7 +417,7 @@ class CustomerResultsTab(QWidget):
         self.recommendations.set_content(SectionContent(raw_state, raw_message))
         self.recommendations.message.setVisible(raw_state is not ViewState.READY)
         if raw_state is ViewState.READY:
-            self.raw_grid.set_cards([ProductCard(p) for p in raw_products[:10]])
+            self.raw_grid.set_cards([ProductCard(replace(p, display_rank=rank)) for rank, p in enumerate(raw_products[:10], 1)])
         if result.hybrid is not None:
             state, message = result.state, result.message
         else:
