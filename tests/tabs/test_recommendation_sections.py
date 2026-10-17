@@ -1,7 +1,7 @@
 """Real synthetic composition shown through the existing customer Qt worker."""
 
 from dataclasses import replace
-from threading import get_ident
+from threading import Event, get_ident
 from unittest.mock import Mock
 
 import pytest
@@ -10,12 +10,14 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QComboBox
 
+from Application.customer_card_data import SectionContent, ViewState
 from Application.hybrid_recommendations import HistoricalItem, HybridRecommendationService, HybridResult, compose
 from Application.purchased_products import PurchaseEvidence
 from Application.recommendation_rules import save_rules
 from Application.theme.apply_theme import apply_app_theme
+from Application.tabs.customer_card_widgets import StateSection
 from tests.test_hybrid_recommendations import BASE, checked_purchases, raw_result, rules, write_catalog
-from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search
+from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search, wait
 
 
 @pytest.fixture
@@ -45,7 +47,8 @@ def test_three_sections_real_components_top10_and_row_selection(explained):
     assert threads and all(t != get_ident() for t in threads)
     names = [tab.page_layout.itemAt(i).widget().objectName() for i in range(tab.page_layout.count())]
     assert names == ["customerSearch", "customerProfile", "customerKpis", "customerPropensity",
-                     "customerRecommendations", "customerHybridRecommendations", "customerHistory", "hybridCalculations"]
+                     "customerRecommendations", "hybridCalculations", "customerHybridRecommendations", "customerHistory"]
+    assert all(section.message.isHidden() for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations))
     assert len(tab.raw_grid.cards) == len(tab.product_grid.cards) == tab.calculations.model.rowCount() == 10
     assert tuple(c.content.recommendation for c in tab.raw_grid.cards) == raw.recommendations[:10]
     assert tab.raw_grid.cards[0].name.text() == "Историческое имя 1"
@@ -70,12 +73,13 @@ def test_three_sections_real_components_top10_and_row_selection(explained):
         assert tab.product_grid.cards[row].content.hybrid_item.sources[0].calculation.final_score == item.final_score
         assert tab.product_grid.cards[row].score.text() == f"Итоговый рейтинг: {item.final_score:.3f}"
         assert repr(item.final_score) in tab.product_grid.cards[row].score.toolTip()
-    assert "50 товаров" in c.bpr_details.text() and "source-36" in c.summary.text()
+    assert c.items[0].sources[0].calculation.source_count == 50
+    assert c.model.rows[0][2].startswith("source-36\n")
     assert c.alternative_model.rowCount() == 0
     assert not c.other_sources.isVisible() and not c.alternatives.isVisible()
-    assert "не пересматриваются" in c.merge_note.text()
     c.table.setCurrentIndex(c.model.index(1, 0))
-    assert tab.result.hybrid.items[1].target_item_code in c.summary.text()
+    assert c.table.currentIndex().row() == 1
+    assert c.feature_model.rows[0][1] == c.items[1].sources[0].calculation.features[2].historical_value
     assert not c.alternatives.isVisible()
     hybrid.get.assert_called_once()
     card.service.inference.get_recommendations.assert_not_called()
@@ -113,8 +117,9 @@ def test_both_grids_and_tables_adapt_to_theme_and_width(explained, app, width, d
     assert 1 <= tab.raw_grid.columns <= 5
     if width == 1600:
         assert tab.raw_grid.columns == 5
-    if width == 480:
-        assert tab.calculations.table.horizontalScrollBar().maximum() > 0
+    assert tab.calculations.table.horizontalScrollBar().maximum() == 0, (
+        tab.calculations.table.viewport().width(), tab.calculations.table.horizontalHeader().length(),
+        [tab.calculations.table.columnWidth(n) for n in range(10)])
     assert tab.calculations.table.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     for table in (tab.calculations.table, tab.calculations.features):
         last = table.model().rowCount() - 1
@@ -139,7 +144,7 @@ def test_shared_photo_cache_and_cancel_clear_all_sections(explained):
     card.tab.cancel_search()
     assert not card.tab.raw_grid.cards and not card.tab.product_grid.cards
     assert card.tab.calculations.model.rowCount() == 0
-    assert card.tab.calculations.summary.text() == ""
+    assert card.tab.calculations.feature_model.rowCount() == 0
     assert not card.tab._img_targets
 
 
@@ -205,7 +210,7 @@ def test_saved_multi_source_result_still_displays_supplied_alternatives(explaine
     section.set_items((legacy,))
     assert section.other_sources.isVisible()
     assert section.alternative_model.rowCount() == 1
-    assert "Сохранённый результат" in section.merge_note.text()
+    assert section.alternative_model.rows[0][0] == second.sources[0].source_raw_rank
     section.other_sources.click()
     assert section.alternatives.isVisible()
     section.set_items((first,))
@@ -222,3 +227,83 @@ def test_saved_result_without_explanation_never_fabricates_calculations(explaine
     assert section.content.state.value == "unavailable"
     assert section.model.rowCount() == section.feature_model.rowCount() == 0
     assert not section.table.isVisible() and not section.other_sources.isVisible()
+
+
+def test_initial_messages_hidden_without_layout_gaps_or_global_state_change(explained):
+    card, _, _, _ = explained
+    tab = card.tab
+    for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations):
+        assert section.content.state is ViewState.INITIAL
+        assert section.content.message and section.message.text() == section.content.message
+        assert section.heading.isVisible() and section.message.isHidden()
+        assert section.box.itemAt(section.box.indexOf(section.message)).isEmpty()
+    assert tab.search_status.isVisible() and tab.search_status.text()
+    ordinary = StateSection("Другой раздел", SectionContent(ViewState.LOADING, "Обычное сообщение"), name="ordinary")
+    assert not ordinary.message.isHidden()  # Base behavior for profile/history is unchanged.
+    ordinary.deleteLater()
+
+
+@pytest.mark.parametrize("state", [ViewState.INITIAL, ViewState.LOADING, ViewState.READY, ViewState.CANCELLED,
+                                 ViewState.EMPTY, ViewState.UNAVAILABLE, ViewState.ERROR, ViewState.STALE])
+def test_search_state_controls_only_message_visibility(explained, state):
+    card, _, _, _ = explained
+    tab = card.tab
+    message = "Причина состояния или общий статус поиска"
+    tab._display_state(state, message)
+    informative = state in (ViewState.EMPTY, ViewState.UNAVAILABLE, ViewState.ERROR, ViewState.STALE)
+    for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations):
+        assert section.content.state is state and section.content.message == message
+        assert section.message.text() == message
+        assert section.message.isVisible() is informative
+        assert section.box.itemAt(section.box.indexOf(section.message)).isEmpty() is not informative
+    assert tab.search_status.isVisible() and tab.search_status.text() == message
+    assert tab.progress.isVisible() is (state is ViewState.LOADING)
+
+
+@pytest.mark.parametrize("state", [ViewState.EMPTY, ViewState.UNAVAILABLE, ViewState.ERROR, ViewState.STALE])
+def test_result_diagnostics_survive_after_successful_recommendations(explained, state):
+    card, _, _, _ = explained
+    search(card)
+    tab = card.tab
+    message = "Проверка покупок или источник рекомендаций недоступны"
+    result = replace(tab.result, state=state, raw_state=state, message=message, raw_message=message,
+                     products=(), raw_products=(), hybrid=replace(tab.result.hybrid, items=()))
+    tab.apply_result(result)
+    for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations):
+        assert section.content.state is state and section.message.isVisible() and section.message.text()
+    assert tab.recommendations.message.text() == tab.hybrid_recommendations.message.text() == message
+    assert not tab.raw_grid.cards and not tab.product_grid.cards and not tab.calculations.items
+
+
+def test_new_search_and_cancel_clear_results_without_duplicate_statuses(explained):
+    card, _, hybrid, _ = explained
+    search(card)
+    tab = card.tab
+    original = hybrid.get.side_effect
+    started, release = Event(), Event()
+    def delayed(identity, *args, **kwargs):
+        started.set()
+        release.wait(3)
+        return original(identity, *args, **kwargs)
+    hybrid.get.side_effect = delayed
+    try:
+        tab.search_type.setCurrentIndex(tab.search_type.findData(None))
+        tab.customer_input.setText("NEXT")
+        tab.search_button.click()
+        wait(started.is_set)
+        assert tab.search_status.isVisible() and tab.progress.isVisible()
+        for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations):
+            assert section.content.state is ViewState.LOADING and section.message.isHidden()
+        assert not tab.raw_grid.cards and not tab.product_grid.cards and not tab.calculations.items
+        tab.cancel_search()
+        for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations):
+            assert section.content.state is ViewState.CANCELLED and section.message.isHidden()
+        assert "отмен" in tab.search_status.text()
+    finally:
+        release.set()
+    wait(lambda: tab._active is None)
+    assert tab.result is None and not tab.calculations.items
+    hybrid.get.side_effect = original
+    search(card, kind=None)
+    assert tab.calculations.model.rowCount() == 10
+    assert all(section.message.isHidden() for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations))

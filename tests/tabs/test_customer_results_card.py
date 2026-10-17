@@ -74,7 +74,7 @@ def wait_for(predicate, timeout=4000):
 def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card, monkeypatch):
     _, tab, service = card
     assert [tab.page_layout.itemAt(i).widget().objectName() for i in range(tab.page_layout.count())] == [
-        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "customerHybridRecommendations", "customerHistory", "hybridCalculations"]
+        "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "hybridCalculations", "customerHybridRecommendations", "customerHistory"]
     assert tab.recommendations.content.state is ViewState.INITIAL
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.NOT_CONNECTED

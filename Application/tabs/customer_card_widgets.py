@@ -127,6 +127,15 @@ class StateSection(QWidget):
         self.message.setText(content.message)
 
 
+class RecommendationSection(StateSection):
+    """Keep recommendation diagnostics; progress belongs to the search block."""
+
+    def set_content(self, content: SectionContent):
+        super().set_content(content)
+        self.message.setVisible(bool(content.message) and content.state in (
+            ViewState.EMPTY, ViewState.UNAVAILABLE, ViewState.ERROR, ViewState.STALE))
+
+
 def card_frame():
     card = QFrame()
     card.setProperty("class", "statisticsCard")
