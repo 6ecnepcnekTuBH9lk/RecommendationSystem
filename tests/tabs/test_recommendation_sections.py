@@ -7,7 +7,6 @@ from unittest.mock import Mock
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QComboBox
 
 from Application.customer_card_data import SectionContent, ViewState
@@ -34,7 +33,7 @@ def explained(card, tmp_path):
         purchases = PurchaseEvidence("READY", historical=PurchaseEvidence(
             "READY", checked_codes=frozenset(r.model_item_code for r in raw.recommendations)))
         return HybridResult("READY", "Готово", items, raw_bpr=raw, purchases=purchases,
-                            historical_items=historical, displayed_raw=raw.recommendations[:10])
+                            historical_items=historical, displayed_raw=raw.recommendations[:10], raw_status="READY")
     hybrid.get.side_effect = load
     card.service.hybrid = hybrid
     return card, raw, hybrid, threads
@@ -85,7 +84,7 @@ def test_three_sections_real_components_top10_and_row_selection(explained):
     card.service.inference.get_recommendations.assert_not_called()
 
 
-@pytest.mark.parametrize("failure", ["RULES_NOT_READY", "PURCHASES_NOT_READY", "UNAVAILABLE", "EMPTY"])
+@pytest.mark.parametrize("failure", ["PURCHASES_NOT_READY", "UNAVAILABLE", "EMPTY"])
 def test_raw_section_stays_ready_when_hybrid_unavailable(explained, failure):
     card, raw, hybrid, _ = explained
     original = hybrid.get.side_effect
@@ -110,8 +109,9 @@ def test_both_grids_and_tables_adapt_to_theme_and_width(explained, app, width, d
     search(card)
     apply_app_theme(app, dark)
     card.host.resize(width, 900)
-    QTest.qWait(50)
     tab = card.tab
+    wait(lambda: all(view.horizontalHeader().length() == view.viewport().width() and not view._fit_timer.isActive()
+                     for view in (tab.calculations.table, tab.calculations.features)))
     assert tab.scroll.horizontalScrollBar().maximum() == 0
     assert tab.raw_grid.columns == tab.product_grid.columns
     assert 1 <= tab.raw_grid.columns <= 5
@@ -307,3 +307,55 @@ def test_new_search_and_cancel_clear_results_without_duplicate_statuses(explaine
     search(card, kind=None)
     assert tab.calculations.model.rowCount() == 10
     assert all(section.message.isHidden() for section in (tab.recommendations, tab.calculations, tab.hybrid_recommendations))
+
+
+def test_filtered_kind_top10_and_rule_change_at_worker_handoff(card, tmp_path, monkeypatch):
+    catalog = write_catalog(tmp_path, [(f"{n:06d}", {"Коллекция": "NOS"}) for n in range(12)])
+    raw = replace(raw_result(30), model_user_id="A")
+    metadata = {rec.model_item_code: {**BASE, "НазваниеНаСайте": f"Исторический товар {rec.rank}",
+                                     "Коллекция": "Весна-Лето 2024",
+                                     "ВидНоменклатуры": "Носки" if rec.rank <= 10 else "Брюки"}
+                for rec in raw.recommendations}
+    card.service.inference.get_candidate_sources.return_value = raw, metadata
+    purchases = Mock()
+    purchases.get.return_value = checked_purchases(raw)
+    purchases.is_current.return_value = True
+    path = tmp_path / "rules.json"
+    save_rules(rules(catalog), path)
+    service = HybridRecommendationService(catalog_path=catalog.path, categories_path=catalog.categories_path,
+                                          rules_path=path, purchases=purchases)
+    card.service.hybrid = service
+    from Application import hybrid_recommendations as backend
+    load_rules = backend.load_rules
+    load_threads = []
+    def loaded(path):
+        load_threads.append(get_ident())
+        return load_rules(path)
+    monkeypatch.setattr(backend, "load_rules", loaded)
+    search(card)
+    tab = card.tab
+    assert [w.content.recommendation.rank for w in tab.raw_grid.cards] == list(range(11, 21))
+    assert [w.rank.text() for w in tab.raw_grid.cards] == [f"№{n}" for n in range(1, 11)]
+    assert all(metadata[w.content.recommendation.model_item_code]["ВидНоменклатуры"] == "Брюки" for w in tab.raw_grid.cards)
+    assert tab.raw_grid.cards[0].name.text() == "Исторический товар 11"
+    assert tab.raw_grid.cards[0].collection.text() == "Коллекция: Весна-Лето 2024"
+    assert tab.raw_grid.cards[0].score.text() == f"Исходный BPR-score: {raw.recommendations[10].raw_score:.3f}"
+    assert tab.calculations.model.rows[0][3] == 11
+    assert tab.result.hybrid.items[0].sources[0].calculation.source_count == 30
+    purchases.get.assert_called_once()
+    card.service.inference.get_candidate_sources.assert_called_once()
+    assert load_threads and all(t != get_ident() for t in load_threads)
+    # load(), worker.run(), then validate_delivery(): change rules at the final handoff.
+    original = service.raw_is_current
+    changed, checks = [], []
+    def at_handoff(result, **kwargs):
+        checks.append(get_ident())
+        if len(checks) == 3:
+            save_rules(replace(rules(catalog), kinds=("Носки",)), path)
+            changed.append(get_ident())
+        return original(result, **kwargs)
+    service.raw_is_current = at_handoff
+    search(card)
+    assert tab.result.raw_state is ViewState.STALE and not tab.raw_grid.cards and not tab.product_grid.cards
+    assert tab.profile.content.state is ViewState.READY and tab.history.customer_id == "C"
+    assert changed and all(t != get_ident() for t in changed)

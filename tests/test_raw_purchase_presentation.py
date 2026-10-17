@@ -62,14 +62,19 @@ def test_selected_metadata_after_top10_and_hybrid_uses_only_eligible_sources(car
     assert [product.display_rank for product in result.raw_products] == [1, 2, 3, 4]
 
 
-@pytest.mark.parametrize("status", ["INDEX_NOT_READY", "INCOMPLETE_COVERAGE", "SOURCE_UNAVAILABLE", "UNRESOLVED_PRODUCTS"])
-def test_unavailable_history_never_displays_unverified_raw(card_service, status):
+@pytest.mark.parametrize("status,reason", [
+    ("INDEX_NOT_READY", "индекс истории отсутствует или требует обновления"),
+    ("INCOMPLETE_COVERAGE", "покрытие истории заказов неполное"),
+    ("SOURCE_UNAVAILABLE", "источники истории недоступны"),
+    ("UNRESOLVED_PRODUCTS", "часть товарных идентификаторов не удалось достоверно проверить"),
+])
+def test_unavailable_history_never_displays_unverified_raw(card_service, status, reason):
     service, catalog = card_service
     save_rules(rules(catalog), service.hybrid.rules_path)
     service.hybrid.purchases.get.return_value = PurchaseEvidence(status)
     result = service.load("canonical")
     assert result.raw_state is ViewState.UNAVAILABLE and not result.raw_products
-    assert "историю покупок" in result.raw_message
+    assert reason in result.raw_message and reason in result.message
     assert result.profile is not None
 
 
@@ -91,7 +96,8 @@ def test_empty_hybrid_distinguishes_missing_sources_from_missing_analogs(card_se
     service.hybrid.purchases.get.return_value = evidence(
         raw, purchased=[rec.model_item_code for rec in raw.recommendations] if reason == "all_purchased" else ())
     if reason == "no_analogs":
-        service.inference.get_candidate_sources.return_value = raw, {"source-0": {**BASE, "ВидНоменклатуры": "Пиджаки"}}
+        service.inference.get_candidate_sources.return_value = raw, {
+            rec.model_item_code: {**BASE, "ПолНоменклатуры": "Женский"} for rec in raw.recommendations}
     result = service.load("canonical")
     assert result.state is ViewState.EMPTY and not result.products
     if reason == "all_purchased":
@@ -110,11 +116,17 @@ def test_incomplete_identity_scope_is_not_treated_as_no_purchases(card_service):
 
 
 @pytest.mark.parametrize("rules_ready", [False, True])
-def test_history_freshness_at_delivery_even_without_hybrid_rules(card_service, rules_ready):
+def test_history_freshness_at_delivery_requires_rules(card_service, rules_ready):
     service, catalog = card_service
     if rules_ready:
         save_rules(rules(catalog), service.hybrid.rules_path)
+    else:
+        service.hybrid.rules_path.unlink()
     result = service.load("canonical")
+    if not rules_ready:
+        assert result.raw_state is ViewState.UNAVAILABLE and not result.raw_products
+        assert "Настройте правила" in result.raw_message
+        return
     assert result.raw_state is ViewState.READY
     service.hybrid.purchases.is_current.return_value = False
     result = service.validate_result(result)
@@ -122,14 +134,14 @@ def test_history_freshness_at_delivery_even_without_hybrid_rules(card_service, r
     assert result.profile is not None
 
 
-def test_rules_change_does_not_invalidate_checked_historical_presentation(card_service):
+def test_rules_change_invalidates_checked_historical_presentation(card_service):
     service, catalog = card_service
     save_rules(rules(catalog), service.hybrid.rules_path)
     result = service.load("canonical")
     service.hybrid.rules_path.unlink()
     stale = service.validate_result(result)
     assert stale.state is ViewState.STALE and not stale.products
-    assert stale.raw_products == result.raw_products and stale.raw_state is ViewState.READY
+    assert not stale.raw_products and stale.raw_state is ViewState.STALE
 
 
 @pytest.mark.parametrize("status,excluded", [("F", True), ("CP", True), ("delivering", True),
@@ -263,7 +275,7 @@ def test_source_change_at_delivery_clears_historical_cards(card_service, sqlite_
     # Valid normalized historical codes, independent of today's CSV.
     raw = replace(raw, recommendations=tuple(replace(rec, model_item_code=f"{700000+n}")
                                              for n, rec in enumerate(raw.recommendations)))
-    service.inference.get_candidate_sources.return_value = raw, {}
+    service.inference.get_candidate_sources.return_value = raw, {rec.model_item_code: BASE for rec in raw.recommendations}
     result = service.load("canonical")
     assert result.raw_state is ViewState.READY
     sources.version = "replaced"

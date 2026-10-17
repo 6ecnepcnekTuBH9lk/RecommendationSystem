@@ -30,7 +30,8 @@ def hybrid_result(customer="C", status="READY"):
     raw = RawBprResult("g", "A", RawBprStatus.OK, (RawBprRecommendation(37, "original-source", -1.123456789),))
     purchases = PurchaseEvidence("READY", historical=PurchaseEvidence("READY", checked_codes=frozenset(("original-source",))))
     return HybridResult(status, "Рекомендации из актуального ассортимента", (item,) if status == "READY" else (),
-                        raw_bpr=raw, purchases=purchases, displayed_raw=raw.recommendations)
+                        raw_bpr=raw, purchases=purchases, displayed_raw=raw.recommendations if status != "RULES_NOT_READY" else (),
+                        raw_status="READY" if status != "RULES_NOT_READY" else "RULES_NOT_READY")
 
 
 @pytest.mark.parametrize("state", ["RULES_NOT_READY", "PURCHASES_NOT_READY", "EMPTY", "READY"])
@@ -87,7 +88,7 @@ def test_switch_client_during_hybrid_cancels_old_and_drops_stale_result(card):
     assert card.tab.result.profile == found("NEW")
 
 
-def test_rules_change_at_handoff_blocks_hybrid_without_erasing_profile(card):
+def test_catalog_change_at_handoff_blocks_hybrid_without_erasing_profile(card):
     hybrid = Mock()
     hybrid.get.return_value = hybrid_result()
     checks = []

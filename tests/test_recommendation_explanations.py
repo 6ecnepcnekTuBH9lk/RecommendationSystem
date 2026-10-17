@@ -69,13 +69,15 @@ def test_equal_raw_scores_bonus_and_no_intermediate_rounding(catalog, primary):
 @pytest.fixture
 def card_service(tmp_path, catalog):
     inference = Mock()
-    inference.get_candidate_sources.return_value = (raw_result(20), {"source-0": BASE})
+    raw = raw_result(20)
+    inference.get_candidate_sources.return_value = (raw, {rec.model_item_code: BASE for rec in raw.recommendations})
     purchases = Mock()
     purchases.get.return_value = PurchaseEvidence("READY", historical=PurchaseEvidence(
         "READY", checked_codes=frozenset(r.model_item_code for r in raw_result(20).recommendations)))
     purchases.is_current.return_value = True
     hybrid = HybridRecommendationService(catalog_path=catalog.path, categories_path=catalog.categories_path,
                                          rules_path=tmp_path / "rules.json", purchases=purchases)
+    save_rules(rules(catalog), hybrid.rules_path)
     identity = SimpleNamespace(is_matched=True, model_user_id="model-user", canonical_customer_id="canonical", model_generation="g")
     bridge = Mock()
     bridge.resolve.return_value = identity
@@ -88,11 +90,10 @@ def card_service(tmp_path, catalog):
     return service, catalog
 
 
-@pytest.mark.parametrize("failure", ["rules", "empty", "catalog", "matching"])
+@pytest.mark.parametrize("failure", ["empty", "catalog", "matching"])
 def test_raw_top10_survives_later_failure_with_historical_metadata(card_service, monkeypatch, failure):
     service, catalog = card_service
-    if failure != "rules":
-        save_rules(rules(catalog), service.hybrid.rules_path)
+    save_rules(rules(catalog), service.hybrid.rules_path)
     if failure == "empty":
         save_rules(replace(rules(catalog), minimum_stock=99999), service.hybrid.rules_path)
     elif failure == "catalog":
@@ -105,7 +106,7 @@ def test_raw_top10_survives_later_failure_with_historical_metadata(card_service,
     assert tuple(p.recommendation for p in result.raw_products) == raw.recommendations[:10]
     assert result.raw_products[0].name == BASE["НазваниеНаСайте"]
     assert result.raw_products[0].collection == "Весна-Лето 2025"
-    assert result.raw_products[1].name == result.raw_products[1].collection == ""
+    assert all(p.name == BASE["НазваниеНаСайте"] and p.collection == "Весна-Лето 2025" for p in result.raw_products)
     service.inference.get_candidate_sources.assert_called_once()
     service.inference.get_recommendations.assert_not_called()
     service.inference.get_source_metadata.assert_not_called()

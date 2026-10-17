@@ -155,6 +155,7 @@ class HybridResult:
     diagnostics: dict | None = None
     historical_items: tuple[HistoricalItem, ...] = ()
     displayed_raw: tuple[RawBprRecommendation, ...] = ()
+    raw_status: str = "UNAVAILABLE"
 
 
 def _historical_evidence(raw, purchases):
@@ -172,13 +173,31 @@ def _ranked_sources(raw):
     return tuple(sorted(unique.values(), key=lambda rec: rec.rank))
 
 
-def select_displayed_raw(raw, purchases):
-    """Presentation Top-10; the same purchase evidence gates greedy sources."""
+def _historical_source(code, metadata, rules):
+    """Use only snapshot metadata and exact allowed kinds, never current CSV."""
+    values = metadata.get(code) if isinstance(metadata, dict) else None
+    if not isinstance(values, dict) or rules is None:
+        return None
+    kind = values.get("ВидНоменклатуры")
+    if not isinstance(kind, str) or kind not in rules.kinds:
+        return None
+    source = item_from_metadata(code, values)
+    return source if source.get("ВидНоменклатуры") else None
+
+
+def select_displayed_raw(raw, purchases, *, metadata=None, rules=None):
+    """Up to ten checked historical sources of permitted, known kinds."""
     checked = _historical_evidence(raw, purchases)
     if checked is None:
         return ()
     excluded = checked.purchased | checked.uncertain
-    return tuple(rec for rec in _ranked_sources(raw) if rec.model_item_code not in excluded)[:10]
+    selected = []
+    for rec in _ranked_sources(raw):
+        if rec.model_item_code not in excluded and _historical_source(rec.model_item_code, metadata, rules) is not None:
+            selected.append(rec)
+            if len(selected) == 10:
+                break
+    return tuple(selected)
 
 
 def compose(raw, metadata, catalog, rules, purchases, *, k=10, per_source=10, cancelled=lambda: False):
@@ -208,10 +227,9 @@ def compose(raw, metadata, catalog, rules, purchases, *, k=10, per_source=10, ca
             return ()
         if rec.model_item_code in excluded_sources:
             continue
-        values = metadata.get(rec.model_item_code)
-        if not isinstance(values, dict):
-            continue  # Never substitute current attributes for missing training data.
-        source = item_from_metadata(rec.model_item_code, values)
+        source = _historical_source(rec.model_item_code, metadata, rules)
+        if source is None:
+            continue
         rank_score, raw_score = _normalized_scores(position, len(ranked_sources), rec.raw_score, low, high)
         best = None
         for item in targets.get(source.get("ВидНоменклатуры"), ()):
@@ -248,6 +266,45 @@ def compose(raw, metadata, catalog, rules, purchases, *, k=10, per_source=10, ca
     return tuple(result)
 
 
+def _purchase_failure_message(evidence, *, scope):
+    reason = {
+        "INDEX_NOT_READY": "индекс истории отсутствует или требует обновления",
+        "SOURCE_UNAVAILABLE": "источники истории недоступны",
+        "SOURCE_INCONSISTENT": "источники истории несогласованы",
+        "INCOMPLETE_COVERAGE": "покрытие истории заказов неполное",
+        "UNRESOLVED_PRODUCTS": "часть товарных идентификаторов не удалось достоверно проверить",
+        "CANCELLED": "проверка отменена",
+    }.get(evidence.status if evidence is not None else None, "полнота проверки не подтверждена")
+    if evidence is not None and evidence.diagnostics.get("failure_reason") == "sources_changed":
+        reason = "данные истории изменились во время поиска; повторите поиск"
+    return f"Проверка покупок {scope}: {reason}. Рекомендации не сформированы."
+
+
+def _log_purchase_checks(checked, raw):
+    historical = checked.historical
+    for scope, evidence in (("current", checked), ("historical", historical)):
+        # Explicit numeric/boolean whitelist; no IDs, raw statuses or object dumps.
+        metrics = {name: evidence.diagnostics.get(name) if evidence is not None else None for name in (
+            "coverage_complete", "unresolved_non_cancelled_products", "unsafe_unresolved_identifier_lines",
+            "conflicting_orders", "unknown_status_lines", "uncertain_codes", "purchased_codes",
+            "historical_out_of_scope_codes", "historical_out_of_scope_lines", "normalized_suffix_space_lines",
+        )}
+        reasons = evidence.diagnostics.get("unresolved_identifier_reasons", {}) if evidence is not None else {}
+        reasons = {name: reasons.get(name, 0) for name in (
+            "missing_reference", "unsupported_namespace", "invalid_identifier", "incomplete_identifier",
+            "damaged_identity_prefix", "nonprintable_identifier", "ambiguous_prefix",
+        )}
+        failure = evidence.diagnostics.get("failure_reason") if evidence is not None else None
+        failure = failure if failure in ("missing_index", "sources_changed", "source_unavailable", "stale_index", "index_error") else "none"
+        logger.info("purchase_check scope=%s status=%s metrics=%s reasons=%s failure=%s", scope,
+                    evidence.status if evidence is not None else "ABSENT", metrics, reasons, failure)
+    logger.info("purchase_check stage=scopes historical_present=%s historical_codes_complete=%s generation_equal=%s source_version_equal=%s",
+                historical is not None,
+                historical is not None and all(r.model_item_code in historical.checked_codes for r in raw.recommendations),
+                historical is not None and checked.generation == historical.generation,
+                historical is not None and checked.source_version == historical.source_version)
+
+
 class HybridRecommendationService:
     def __init__(self, *, catalog_path=INPUT_DATA_DIR / "nomenclature.csv",
                  categories_path=INPUT_DATA_DIR / "site_categories.csv", rules_path=RULES_PATH, purchases=None):
@@ -260,9 +317,15 @@ class HybridRecommendationService:
         historical = ()
         displayed = ()
         checked = None
+        rules_key = None
+        raw_status = "UNAVAILABLE"
         def make_result(*args, **kwargs):
-            return HybridResult(*args, raw_bpr=raw, purchases=checked, historical_items=historical,
-                                displayed_raw=displayed, **kwargs)
+            result = HybridResult(*args, raw_bpr=raw, purchases=checked, historical_items=historical,
+                                  displayed_raw=displayed, raw_status=raw_status, rules_key=rules_key, **kwargs)
+            if result.status != "CANCELLED" and raw_status in ("READY", "EMPTY") and not self._rules_current(rules_key):
+                return replace(result, status="STALE", raw_status="STALE", items=(), displayed_raw=(), historical_items=(),
+                               message="Правила рекомендаций изменились. Повторите поиск.")
+            return result
         try:
             # Rank the complete small model item universe; never stop at Raw Top-10.
             raw, metadata = inference.get_candidate_sources(identity.model_user_id, model_dir=model_dir)
@@ -282,46 +345,61 @@ class HybridRecommendationService:
                 logger.warning("hybrid_catalog error=%s", type(exc).__name__)
             checked = self.purchases.get(identity.canonical_customer_id, catalog, raw_root=raw_root, cancelled=cancelled,
                                          historical_codes=frozenset(rec.model_item_code for rec in raw.recommendations))
+            _log_purchase_checks(checked, raw)
             if cancelled():
                 return make_result("CANCELLED", "Поиск отменён.")
-            displayed = select_displayed_raw(raw, checked)
-            if isinstance(metadata, dict):
-                historical = tuple(HistoricalItem(rec.model_item_code, item.name, item.get("Коллекция"))
-                                   for rec in displayed
-                                   for item in (item_from_metadata(rec.model_item_code, metadata.get(rec.model_item_code)
-                                                if isinstance(metadata.get(rec.model_item_code), dict) else {}),))
             try:
-                rules_key = signature(self.rules_path)
+                before_rules = signature(self.rules_path)
                 rules = load_rules(self.rules_path)
+                if before_rules != signature(self.rules_path):
+                    raw_status = "STALE"
+                    return make_result("STALE", "Правила рекомендаций изменились. Повторите поиск.")
+                rules_key = before_rules
             except (OSError, ValueError, TypeError, KeyError):
+                raw_status = "RULES_NOT_READY"
                 return make_result("RULES_NOT_READY", "Настройте правила формирования рекомендаций в пользовательских настройках.")
+            if not isinstance(metadata, dict) or not metadata:
+                raw_status = "METADATA_NOT_READY"
+                return make_result("METADATA_NOT_READY", "Исторические метаданные модели недоступны.")
+            if _historical_evidence(raw, checked) is None:
+                raw_status = "PURCHASES_NOT_READY"
+                return make_result("PURCHASES_NOT_READY", _purchase_failure_message(
+                    checked.historical if checked.historical is not None else checked, scope="исторических товаров BPR-MF"))
+            displayed = select_displayed_raw(raw, checked, metadata=metadata, rules=rules)
+            historical = tuple(HistoricalItem(rec.model_item_code, item.name, item.get("Коллекция"))
+                               for rec in displayed for item in (_historical_source(rec.model_item_code, metadata, rules),))
+            raw_status = "READY" if displayed else "EMPTY"
             if catalog is None:
                 return make_result("UNAVAILABLE", "Актуальный каталог недоступен. Повторите поиск.")
             try:
                 rules.validate_catalog(catalog)
             except ValueError:
                 return make_result("RULES_NOT_READY", "Виды или сезоны изменились в каталоге. Обновите правила рекомендаций.")
-            if not isinstance(metadata, dict) or not metadata:
-                return make_result("METADATA_NOT_READY", "Исторические метаданные модели недоступны.")
-            if checked.status != "READY" or _historical_evidence(raw, checked) is None:
-                return make_result("PURCHASES_NOT_READY", "Проверка покупок недоступна или неполна. Рекомендации не сформированы.")
+            if checked.status != "READY":
+                return make_result("PURCHASES_NOT_READY", _purchase_failure_message(checked, scope="актуальных товаров"))
             items = compose(raw, metadata, catalog, rules, checked, cancelled=cancelled)
             if cancelled():
                 return make_result("CANCELLED", "Поиск отменён.")
             message = ("Рекомендации из актуального ассортимента" if items else
-                       "После проверки покупок нет допустимых исторических источников." if not displayed else
+                       "После проверки покупок и разрешенных видов нет допустимых исторических источников." if not displayed else
                        "Подходящих товаров актуального ассортимента не найдено.")
             result = make_result("READY" if items else "EMPTY", message,
-                                 items, catalog_key=catalog._key, rules_key=rules_key, diagnostics=dict(catalog.diagnostics))
+                                 items, catalog_key=catalog._key, diagnostics=dict(catalog.diagnostics))
             return result if self.is_current(result, raw_root=raw_root) else replace(
                 result, status="STALE", items=(), message="Источники или настройки изменились. Повторите поиск.")
         except Exception as exc:
             logger.warning("hybrid_recommendations error=%s", type(exc).__name__)
             return make_result("UNAVAILABLE", "Не удалось проверить условия рекомендаций. Повторите поиск.")
 
+    def _rules_current(self, rules_key):
+        try:
+            return rules_key is not None and rules_key == signature(self.rules_path)
+        except OSError:
+            return False
+
     def raw_is_current(self, result, *, raw_root):
         checked = _historical_evidence(result.raw_bpr, result.purchases) if result.raw_bpr is not None else None
-        return (checked is not None
+        return (result.raw_status in ("READY", "EMPTY") and self._rules_current(result.rules_key) and checked is not None
                 and self.purchases.is_current(checked, raw_root=raw_root))
 
     def is_current(self, result, *, raw_root):

@@ -269,7 +269,7 @@ class CustomerCardService:
                         raw_current = False
                     if not raw_current:
                         result = replace(result, raw_products=(), raw_state=ViewState.STALE,
-                                         raw_message="История покупок изменилась или недоступна. Повторите поиск.")
+                                         raw_message="История покупок или правила рекомендаций изменились или недоступны. Повторите поиск.")
                 try:
                     hybrid_current = (result.state not in (ViewState.READY, ViewState.EMPTY)
                                       or self.hybrid is not None and self.hybrid.is_current(result.hybrid, raw_root=self.raw_root))
@@ -354,22 +354,27 @@ class CustomerCardService:
             if raw is not None and raw.status is RawBprStatus.OK and state is not ViewState.CANCELLED:
                 if raw.model_generation == identity.model_generation and raw.model_user_id == identity.model_user_id:
                     evidence = hybrid.purchases.historical if hybrid.purchases is not None else None
-                    if (evidence is not None and evidence.status == "READY"
+                    if (hybrid.raw_status in ("READY", "EMPTY") and evidence is not None and evidence.status == "READY"
                             and all(rec.model_item_code in evidence.checked_codes for rec in raw.recommendations)):
                         raw_products = self._historical_products(hybrid)
                         raw_state = ViewState.READY if raw_products else ViewState.EMPTY
+                    elif hybrid.raw_status == "STALE":
+                        raw_state = ViewState.STALE
                 else:
                     raw_state = ViewState.STALE
             if raw_state is ViewState.STALE:
                 state, products = ViewState.STALE, ()
             raw_message = ""
             if raw_state is ViewState.EMPTY:
-                raw_message = "После исключения покупок и неопределённых соответствий допустимых рекомендаций нет."
+                raw_message = "После проверки покупок и разрешенных видов номенклатуры допустимых рекомендаций нет."
             elif raw_state is ViewState.STALE:
-                raw_message = "Модель изменилась. Повторите поиск."
+                raw_message = "Модель, история покупок или правила рекомендаций изменились. Повторите поиск."
             elif raw_state is ViewState.UNAVAILABLE:
-                raw_message = ("Рекомендации BPR-MF недоступны: не удалось достоверно проверить историю покупок."
-                               if raw is not None and raw.status is RawBprStatus.OK else "Исходные рекомендации BPR-MF недоступны.")
+                raw_message = {
+                    "RULES_NOT_READY": "Настройте правила формирования рекомендаций в пользовательских настройках.",
+                    "METADATA_NOT_READY": "Исторические метаданные модели недоступны: невозможно проверить вид номенклатуры.",
+                    "PURCHASES_NOT_READY": "Рекомендации BPR-MF недоступны. " + hybrid.message,
+                }.get(hybrid.raw_status, "Исходные рекомендации BPR-MF недоступны.")
             return CustomerCardResult(state, hybrid.message, identity, identity.model_generation,
                                       products, hybrid=hybrid, raw_products=raw_products, raw_state=raw_state,
                                       raw_message=raw_message)

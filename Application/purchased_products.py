@@ -69,16 +69,37 @@ def assess_order(snapshots, resolver, *, owner_conflict=False, diagnostics=None,
             if match is not None and match.status is ResolutionStatus.UNKNOWN_CANDIDATE:
                 normalized = normalize_product_key(key)
                 # Only a complete, well-formed legacy prefix proves disjointness.
-                # Keep short unknown IDs and damaged/unsupported references unsafe.
+                # Printable size suffixes may contain spaces: the established
+                # resolver uses ONLY the first six characters for identity.
+                # Keep short IDs, damaged prefixes and control characters unsafe.
                 if (normalized.item_id is not None and len(normalized.item_id) == 6
                         and normalized.item_id not in ambiguous_catalog_prefixes
-                        and all(c.isprintable() and not c.isspace() for c in key.value)):
+                        and all(c.isprintable() and not c.isspace() for c in normalized.item_id)
+                        and all(c.isprintable() for c in key.value)):
                     code = normalized.item_id
                     diagnostics.setdefault("historical_out_of_scope_codes", set()).add(code)
                     diagnostics["historical_out_of_scope_lines"] = diagnostics.get("historical_out_of_scope_lines", 0) + 1
+                    if " " in key.value[6:]:
+                        diagnostics["normalized_suffix_space_lines"] = diagnostics.get("normalized_suffix_space_lines", 0) + 1
             if code is None and state != "CANCELLED":
                 unresolved = True
                 diagnostics["unsafe_unresolved_identifier_lines"] = diagnostics.get("unsafe_unresolved_identifier_lines", 0) + 1
+                # Fixed categories only; never put raw keys/namespaces in diagnostics.
+                if match is None:
+                    reason = "missing_reference"
+                elif match.status is ResolutionStatus.UNSUPPORTED_NAMESPACE:
+                    reason = "unsupported_namespace"
+                elif match.status is ResolutionStatus.INVALID_ID:
+                    reason = "invalid_identifier"
+                elif len(key.value) < 6:
+                    reason = "incomplete_identifier"
+                elif any(not c.isprintable() or c.isspace() for c in key.value[:6]):
+                    reason = "damaged_identity_prefix"
+                elif any(not c.isprintable() for c in key.value):
+                    reason = "nonprintable_identifier"
+                else:
+                    reason = "ambiguous_prefix"
+                diagnostics.setdefault("unresolved_identifier_reasons", Counter())[reason] += 1
             identity = row["source_line_key"]
             # A single snapshot needs no cross-snapshot line alignment.
             identity = identity or ("local", snapshot_no, row["ordinal"])
@@ -141,6 +162,8 @@ class _PurchaseScope:
                        "historical_out_of_scope_codes": len(self.identities.get("historical_out_of_scope_codes", ())),
                        "historical_out_of_scope_lines": self.identities.get("historical_out_of_scope_lines", 0),
                        "unsafe_unresolved_identifier_lines": self.identities.get("unsafe_unresolved_identifier_lines", 0),
+                       "normalized_suffix_space_lines": self.identities.get("normalized_suffix_space_lines", 0),
+                       "unresolved_identifier_reasons": dict(self.identities.get("unresolved_identifier_reasons", {})),
                        "coverage_complete": True}
         return PurchaseEvidence("UNRESOLVED_PRODUCTS" if self.unresolved else "READY", purchased, uncertain,
                                 diagnostics, ready.generation, ready.source_version, ready.coverage,
@@ -162,7 +185,7 @@ class PurchasedProductsService:
         path = self._index.index_path(raw_root=root)
         try:
             if not path.exists():
-                return PurchaseEvidence("INDEX_NOT_READY")
+                return PurchaseEvidence("INDEX_NOT_READY", diagnostics={"failure_reason": "missing_index"})
             with index._reader_lock(root):
                 sources = index._capture_sources(root)
                 version = index._database_version(path)
@@ -198,7 +221,7 @@ class PurchasedProductsService:
                         if historical is not None:
                             historical.add(snapshots, bool(event["owner_conflict"]))
                 if version != index._database_version(path) or index._capture_sources(root).version != sources.version:
-                    return PurchaseEvidence("INDEX_NOT_READY")
+                    return PurchaseEvidence("INDEX_NOT_READY", diagnostics={"failure_reason": "sources_changed"})
                 result = current.evidence(ready)
                 if historical is not None:
                     result = replace(result, historical=historical.evidence(ready))
@@ -206,7 +229,9 @@ class PurchasedProductsService:
         except Exception as exc:
             if cancelled():
                 return PurchaseEvidence("CANCELLED")
-            return PurchaseEvidence("SOURCE_UNAVAILABLE" if index._unavailable(exc) else "INDEX_NOT_READY")
+            unavailable = index._unavailable(exc)
+            reason = "source_unavailable" if unavailable else "stale_index" if isinstance(exc, index._Stale) else "index_error"
+            return PurchaseEvidence("SOURCE_UNAVAILABLE" if unavailable else "INDEX_NOT_READY", diagnostics={"failure_reason": reason})
 
     def is_current(self, evidence, *, raw_root=index.DEFAULT_RAW_ROOT):
         status = self._index.get_status(raw_root=raw_root)  # Metadata only.
