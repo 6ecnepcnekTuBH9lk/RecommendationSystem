@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 from Application import customer_contact_search as contact_backend
 from Application.customer_profile_service import CustomerProfileResult, CustomerProfileService, ProfileStatus
+from Application.customer_activity_service import ActivityStatus, CustomerActivity
 
 from Application.model.customer_identity_bridge import (
     CustomerIdentityBridge, CustomerModelIdentityResult, CustomerModelIdentityStatus,
@@ -91,6 +92,7 @@ class CustomerCardResult:
     raw_products: tuple[ProductContent, ...] = ()
     raw_state: ViewState | None = None
     raw_message: str = ""
+    activity: CustomerActivity | None = None
 
 
 def contact_search_failure(result):
@@ -164,12 +166,14 @@ class CustomerCardService:
     """Owned by a single worker; backend caches and catalog are reused there."""
 
     def __init__(self, *, bridge=None, inference=None, profile_service=None, model_dir=PROJECT_ROOT / "model",
-                 raw_root=INPUT_DATA_DIR / "MindboxRaw", catalog_path=INPUT_DATA_DIR / "nomenclature.csv", hybrid=None):
+                 raw_root=INPUT_DATA_DIR / "MindboxRaw", catalog_path=INPUT_DATA_DIR / "nomenclature.csv", hybrid=None,
+                 activity_service=None):
         self.bridge = bridge if bridge is not None else CustomerIdentityBridge()
         self.inference = inference if inference is not None else RawBprInferenceService()
         self.profile_service = profile_service if profile_service is not None else CustomerProfileService()
         self.profile_observer = None
         self.hybrid = hybrid
+        self.activity_service = activity_service
         self.model_dir, self.raw_root, self.catalog_path = Path(model_dir), Path(raw_root), Path(catalog_path)
         self._catalog_key = None
         self._catalog = {}
@@ -287,7 +291,42 @@ class CustomerCardService:
                   and profile.canonical_customer_id != result.identity.canonical_customer_id):
                 result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
                                  message="Идентификация источников изменилась. Повторите поиск.")
+        if result.activity is not None and self.activity_service is not None:
+            try:
+                confirmed = {value for value in (
+                    result.contact_search.canonical_customer_id if result.contact_search is not None else None,
+                    result.profile.canonical_customer_id if result.profile is not None else None,
+                    result.identity.canonical_customer_id if result.identity is not None else None,
+                ) if value is not None}
+                if result.activity.canonical_customer_id is not None and confirmed != {result.activity.canonical_customer_id}:
+                    activity = CustomerActivity(ActivityStatus.STALE)
+                else:
+                    activity = self.activity_service.validate(result.activity, raw_root=self.raw_root)
+            except Exception:
+                activity = CustomerActivity(ActivityStatus.STALE)
+            result = replace(result, activity=activity)
         return result
+
+    def load_activity(self, result, cancelled=lambda: False):
+        """Independent worker stage; model membership never gates activity."""
+        if self.activity_service is None:
+            return result
+        candidates = []
+        if result.contact_search is not None and result.contact_search.status is contact_backend.ContactSearchStatus.MATCHED:
+            candidates.append(result.contact_search.canonical_customer_id)
+        if result.profile is not None and result.profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
+            candidates.append(result.profile.canonical_customer_id)
+        if result.identity is not None:
+            candidates.append(result.identity.canonical_customer_id)
+        candidates = {c for c in candidates if isinstance(c, str) and c and c == c.strip()}
+        activity = CustomerActivity(ActivityStatus.STALE if len(candidates) > 1 else ActivityStatus.UNAVAILABLE)
+        if len(candidates) == 1:
+            try:
+                activity = self.activity_service.get(next(iter(candidates)), raw_root=self.raw_root, cancelled=cancelled)
+            except Exception as exc:
+                logger.warning("customer_activity stage=lookup error=%s", type(exc).__name__)
+                activity = CustomerActivity(ActivityStatus.ERROR)
+        return replace(result, activity=activity)
 
     def validate_profile(self, profile):
         if profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):

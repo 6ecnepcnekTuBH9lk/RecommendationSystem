@@ -43,6 +43,7 @@ def card(app):
     host._status_reset_timer.setSingleShot(True)
     service = Mock()
     service.load.return_value = ready()
+    service.load_activity.side_effect = lambda result, cancelled: result
     service.is_current.return_value = True
     def validate(result):
         if result.state in (ViewState.READY, ViewState.EMPTY) and not service.is_current(result):
@@ -77,7 +78,7 @@ def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card,
         "customerSearch", "customerProfile", "customerKpis", "customerPropensity", "customerRecommendations", "hybridCalculations", "customerHybridRecommendations", "customerHistory"]
     assert tab.recommendations.content.state is ViewState.INITIAL
     assert tab.profile.content.state is ViewState.INITIAL
-    assert tab.kpis.content.state is ViewState.NOT_CONNECTED
+    assert tab.kpis.content.state is ViewState.INITIAL
     assert tab.history.content.state is ViewState.INITIAL
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert not tab.export_button.isEnabled()
@@ -86,7 +87,7 @@ def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card,
     assert tab._thread is None
     assert not tab.raw_grid.cards
     service.load.assert_not_called()
-    assert all(c.value.text() == "Не подключено" for c in tab.kpi_grid.cards)
+    assert all(c.value.text() == "Клиент не выбран" for c in tab.kpi_grid.cards)
     assert all(c.value.text() == "Клиент не выбран" for c in tab.profile_fields.cards)
 
 
@@ -135,7 +136,7 @@ def test_independent_future_sections_survive_recommendation_failures(card, state
     tab.apply_result(CustomerCardResult(state, "Синтетическое состояние"))
     assert not tab.raw_grid.cards
     assert tab.profile.content.state is ViewState.INITIAL
-    assert tab.kpis.content.state is ViewState.NOT_CONNECTED
+    assert tab.kpis.content.state is ViewState.UNAVAILABLE
     assert tab.history.content.state is ViewState.INITIAL
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert all(c.value.text() != "0" for c in tab.kpi_grid.cards)

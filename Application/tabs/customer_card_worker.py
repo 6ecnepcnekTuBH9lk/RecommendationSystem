@@ -9,6 +9,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 from Application.customer_card_data import CustomerCardResult, ViewState, contact_search_failure
 from Application.customer_contact_search import ContactSearchResult, ContactSearchStatus, ContactType, search_customers_by_contact
 from Application.customer_profile_service import CustomerProfileResult, ProfileStatus
+from Application.customer_activity_service import ActivityStatus, CustomerActivity
 from Application.customer_history_service import HistoryPage, HistoryStatus, get_customer_history
 from Application.customer_history_records import HistoryKind
 from Application.customer_history_presentation import present_history
@@ -61,6 +62,7 @@ class CustomerCardWorker(QObject):
                 else:
                     result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
                                      profile=CustomerProfileResult(ProfileStatus.STALE),
+                                     activity=CustomerActivity(ActivityStatus.STALE) if result.activity is not None else None,
                                      message="Источники изменились до показа данных. Повторите поиск.")
         self.validated.emit(request.request_id, result)
 
@@ -129,6 +131,19 @@ class CustomerCardWorker(QObject):
                     result = replace(result, contact_search=match)
             else:
                 result = self.service.load(request.customer_id, request.cancelled.is_set)
+            if not request.cancelled.is_set():
+                # Legacy injected card services need not implement analytics.
+                # Failure of this optional stage must not replace other sections.
+                load_activity = getattr(self.service, "load_activity", None)
+                if callable(load_activity):
+                    try:
+                        activity_result = load_activity(result, request.cancelled.is_set)
+                        if not isinstance(activity_result, CustomerCardResult):
+                            raise TypeError("Invalid activity delivery")
+                        result = activity_result
+                    except Exception as exc:
+                        logger.warning("customer_activity stage=worker error=%s", type(exc).__name__)
+                        result = replace(result, activity=CustomerActivity(ActivityStatus.ERROR))
             result = self.service.validate_result(result)
         except Exception as exc:
             logger.warning("customer_contact stage=worker error=%s", type(exc).__name__)

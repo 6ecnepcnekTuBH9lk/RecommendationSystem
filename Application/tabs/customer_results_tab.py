@@ -5,7 +5,7 @@ from dataclasses import replace
 import logging
 
 from PyQt6.QtCore import QEvent, QThread, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QFontMetrics, QIcon
 from PyQt6.QtNetwork import QNetworkAccessManager
 from PyQt6.QtWidgets import QApplication, QComboBox, QHBoxLayout, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -16,6 +16,8 @@ from Application.paths import ICONS_DIR
 from Application.customer_profile_service import CustomerProfileResult, ProfileStatus
 from Application.customer_contact_search import ContactSearchStatus, ContactType
 from Application.customer_profile_presentation import PROFILE_FIELDS, profile_content
+from Application.customer_activity_service import CustomerActivityService
+from Application.customer_activity_presentation import activity_content
 from Application.photo.photo_processing import _invalidate_photo_targets, _set_photo_label
 from Application.settings.set_status import schedule_status_reset, set_status_error, set_status_ok, set_status_processing
 from Application.theme.layout_metrics import BLOCK_SPACING, CONTROL_SPACING, PAGE_MARGIN, SECTION_SPACING
@@ -40,7 +42,7 @@ class CustomerResultsTab(QWidget):
         self.window = window
         if service is None:
             from Application.hybrid_recommendations import HybridRecommendationService
-            service = CustomerCardService(hybrid=HybridRecommendationService())
+            service = CustomerCardService(hybrid=HybridRecommendationService(), activity_service=CustomerActivityService())
         self.service = service
         self._history_lookup = history_lookup
         self._deferred_history = None
@@ -163,15 +165,24 @@ class CustomerResultsTab(QWidget):
 
     def _build_kpis(self):
         self.kpis = StateSection("Показатели активности", SectionContent(
-            ViewState.NOT_CONNECTED, ""),
+            ViewState.INITIAL, ""),
             name="customerKpis")
         self.kpis.message.hide()
         self.kpi_grid = AdaptiveCardGrid()
-        self.kpi_grid.set_cards([FieldCard(DisplayField(title), numeric=True) for title in (
-            "Заказы", "Приобретённые единицы", "Сумма покупок", "Средний чек", "Просмотры", "Избранное",
-            "Дней с последней покупки", "Уникальные просмотренные товары")])
+        self._render_activity()
         self.kpis.box.addWidget(self.kpi_grid)
         self.page_layout.addWidget(self.kpis)
+
+    def _render_activity(self, result=None, *, state=ViewState.INITIAL):
+        content = activity_content(result, state=state)
+        self.kpis.set_content(content)
+        self.kpis.message.setVisible(bool(content.message))
+        self.kpi_grid.set_cards([FieldCard(field, numeric=True) for field in content.fields])
+        for card in self.kpi_grid.cards:
+            # Some bundled fonts lack U+20B8. Keep the existing typography and
+            # display the unambiguous currency code instead of a missing glyph.
+            if "₸" in card.value.text() and not QFontMetrics(card.value.font()).inFontUcs4(0x20B8):
+                card.value.setText(card.value.text().replace("₸", "KZT"))
 
     def _build_recommendations(self):
         self.recommendations = RecommendationSection("Рекомендации нейросетевой модели BPR-MF", SectionContent(
@@ -265,6 +276,7 @@ class CustomerResultsTab(QWidget):
         if clear_history:
             self.history.set_customer(None)
         self.result = None
+        self._render_activity()
         _invalidate_photo_targets(self)
         self.raw_grid.set_cards([])
         self.product_grid.set_cards([])
@@ -290,6 +302,7 @@ class CustomerResultsTab(QWidget):
             self._display_state(ViewState.ERROR, message)
             return
         request = CustomerCardRequest(self._request_id, value, contact_type=kind)
+        self._render_activity(state=ViewState.LOADING)
         self.profile.set_content(SectionContent(ViewState.LOADING, "Загрузка профиля клиента…"))
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.LOADING), framed=False)
                                       for title in PROFILE_FIELDS])
@@ -405,6 +418,10 @@ class CustomerResultsTab(QWidget):
         elif identity is not None and result.state is not ViewState.STALE:
             customer_id = identity.canonical_customer_id
         self.history.set_customer(customer_id)
+        if result.activity is not None and result.activity.canonical_customer_id not in (None, customer_id):
+            self._render_activity(state=ViewState.STALE)
+        else:
+            self._render_activity(result.activity, state=ViewState.CANCELLED if result.state is ViewState.CANCELLED else ViewState.UNAVAILABLE)
         raw_state = result.raw_state if result.raw_state is not None else result.state
         raw_products = result.raw_products if result.raw_state is not None else (
             result.products if result.hybrid is None else ())
@@ -433,6 +450,7 @@ class CustomerResultsTab(QWidget):
         self._pending = None
         self._clear_result()
         self._render_profile(CustomerProfileResult(ProfileStatus.CANCELLED))
+        self._render_activity(state=ViewState.CANCELLED)
         self._display_state(ViewState.CANCELLED, "Поиск отменён. Можно начать новый запрос.")
 
     def shutdown(self):
