@@ -30,6 +30,9 @@ from Application.model.customer_propensity_history import PropensityCancelled, P
 from Application.model.customer_propensity_storage import (
     FILES, PropensityStorage, digest as _digest, iter_validated_file, open_writer,
 )
+from Application.model.customer_propensity_resources import (
+    MIN_FREE_BYTES, check_disk_space, make_sqlite_temp_locator, validate_reserve,
+)
 from Application.paths import PROJECT_ROOT
 
 
@@ -112,6 +115,8 @@ class _RunGuard:
         self.started, self.probe = started, probe
         self.written = self.last_bytes = 0
         self.last_disk = float("-inf")
+        self.temp_locator = None
+        self.temp_directory = None
 
     def poll(self, force=False):
         if self.user_cancelled():
@@ -120,7 +125,13 @@ class _RunGuard:
         if self.probe and now - self.started >= self.probe.max_seconds:
             raise PropensityDataError("PROBE_TIME_LIMIT")
         if force or now - self.last_disk >= 1 or self.written - self.last_bytes >= 8 * 1024**2:
-            self.builder._guard(self.user_cancelled, self.reserve)
+            if self.temp_locator is None:
+                raise PropensityDataError("SQLITE_TEMP_UNVERIFIED")
+            directory = self.temp_locator()
+            if self.temp_directory is not None and directory != self.temp_directory:
+                raise PropensityDataError("SQLITE_TEMP_CHANGED")
+            self.temp_directory = directory
+            self.builder._guard(self.user_cancelled, self.reserve, directory)
             self.last_disk, self.last_bytes = now, self.written
         return False
 
@@ -173,6 +184,7 @@ class PropensityDatasetBuilder:
             "prediction_dates": [iso(t) for t in plan.dates], "possible_slices": len(plan.dates),
             "slices_by_split": dict(Counter(plan.split(t) for t in plan.dates)),
             "validation_start": iso(plan.validation_start), "test_start": iso(plan.test_start),
+            "minimum_free_bytes": MIN_FREE_BYTES, "disk_safety": "NOT_CHECKED_BY_METADATA_INSPECT",
             "row_estimate": None, "row_estimate_note": "Requires event scan; metadata cannot establish historical cohort size.",
             "fully_covered_target_slices": (sum(covered(status.coverage, "orders", index._micros(t),
                                                         index._micros(t) + HORIZON * DAY) for t in plan.dates)
@@ -199,20 +211,17 @@ class PropensityDatasetBuilder:
     def build(self, config: PropensityDatasetConfig, *, pseudonym_key: bytes,
               allow_retrospective: bool = False, cancelled: Callable[[], bool] = lambda: False,
               progress: Callable[[PropensityProgress], None] = lambda value: None,
-              min_free_bytes: int = 1024**3, storage: PropensityStorage = PropensityStorage(),
+              min_free_bytes: int = MIN_FREE_BYTES, storage: PropensityStorage = PropensityStorage(),
               probe: PropensityProbeConfig | None = None) -> PropensityDatasetSummary:
         if not allow_retrospective:
             raise ValueError("Explicit retrospective research opt-in required")
         if not isinstance(pseudonym_key, bytes) or len(pseudonym_key) < 32:
             raise ValueError("Supply a stable secret pseudonym key of at least 32 bytes")
-        if type(min_free_bytes) is not int or min_free_bytes < 0:
-            raise ValueError("Invalid free-space reserve")
+        validate_reserve(min_free_bytes)
         if not isinstance(storage, PropensityStorage) or (probe is not None and not isinstance(probe, PropensityProbeConfig)):
             raise ValueError("Invalid storage or probe configuration")
         if probe and config.purpose != "training":
             raise ValueError("Probe supports historical training slices only")
-        if probe:
-            min_free_bytes = max(min_free_bytes, 20 * 1024**3)
         # Keep generated artifacts away from source/cache trees even for explicit custom destinations.
         if any(self.output_dir == p or self.output_dir.is_relative_to(p) for p in (self.raw_root, self.cache_dir)):
             raise ValueError("Output must be separate from canonical data and index cache")
@@ -224,10 +233,13 @@ class PropensityDatasetBuilder:
         guard = _RunGuard(self, cancelled, min_free_bytes, started, probe)
         try:
             with _writer_lock(parent), index._reader_lock(self.raw_root):
-                guard.poll(force=True)
+                if cancelled():
+                    raise PropensityCancelled
                 sources = index._capture_sources(self.raw_root)
                 path = self._path()
                 version = index._database_version(path)
+                guard.temp_locator = make_sqlite_temp_locator(path)
+                guard.poll(force=True)
                 with index._read_index(path) as connection:
                     status = index._inspect_connection(connection, sources)
                     plan = make_plan(config, status.coverage)
@@ -324,9 +336,9 @@ class PropensityDatasetBuilder:
                     pointer = self.output_dir / (".current-" + uuid.uuid4().hex + ".tmp")
                     try:
                         self._save(pointer, {"version": dataset_version, "status": verdict,
-                                             "manifest_sha256": _digest(destination / "manifest.json", cancelled)})
+                                             "manifest_sha256": _digest(destination / "manifest.json", guard.poll)})
                         self._fresh(status.source_version, status.generation, version)
-                        self._guard(cancelled, min_free_bytes)
+                        guard.poll(force=True)
                         current = "CURRENT_INFERENCE.json" if config.purpose == "inference" else "CURRENT.json"
                         os.replace(pointer, self.output_dir / current)
                     finally:
@@ -345,7 +357,7 @@ class PropensityDatasetBuilder:
     @staticmethod
     def _implementation() -> str:
         digest = hashlib.sha256()
-        for name in ("customer_propensity_build.py", "customer_propensity_dataset.py", "customer_propensity_history.py", "customer_propensity_storage.py"):
+        for name in ("customer_propensity_build.py", "customer_propensity_dataset.py", "customer_propensity_history.py", "customer_propensity_storage.py", "customer_propensity_resources.py"):
             digest.update(Path(__file__).with_name(name).read_bytes())
         for module in (customer_activity_service, purchased_products, product_resolution, selection):
             digest.update(Path(module.__file__).read_bytes())
@@ -358,11 +370,10 @@ class PropensityDatasetBuilder:
             stream.flush()
             os.fsync(stream.fileno())
 
-    def _guard(self, cancelled: Callable[[], bool], min_free_bytes: int) -> None:
+    def _guard(self, cancelled: Callable[[], bool], min_free_bytes: int, temp_directory: Path | None = None) -> None:
         if cancelled():
             raise PropensityCancelled
-        if shutil.disk_usage(self.output_dir).free < min_free_bytes:
-            raise PropensityDataError("INSUFFICIENT_FREE_SPACE")
+        check_disk_space(self.output_dir, temp_directory, min_free_bytes)
 
     def _write(self, stage, connection, plan, status, publication, secret, guard, progress, started, storage, probe):
         counts = {"customers": 0, "customers_processed": 0, "rows": 0, "positive": 0, "negative": 0,

@@ -1,3 +1,93 @@
+# CUSTOMER-PROPENSITY-SAFETY-01 — дисковый резерв и SQLite temp
+
+Полный build и probe теперь имеют единый обязательный минимум **20 ГиБ**
+(`MIN_FREE_BYTES`, default `build(min_free_bytes=...)`). Явные значения ниже
+минимума отклоняются, а не молча повышаются. CLI `--min-free-gib 1`/`0`/`19`
+завершается до создания builder/чтения ключа/тяжёлого SQL. Можно увеличить резерв.
+Это намеренное ужесточение прежнего API с default 1 ГиБ; output/schema v2 не меняются.
+
+## Где SQLite создаёт временные файлы
+
+Новый `Application/model/customer_propensity_resources.py` определяет расположение
+через **SQLITE_FCNTL_TEMPFILENAME** работающего SQLite VFS. `TEMP`/`TMP`, системный
+`tempfile.gettempdir()` и выходной каталог не используются как предположение.
+
+Для поддерживаемого Windows runtime проверяется:
+
+1. PE import table стандартного `_sqlite3` действительно импортирует `sqlite3.dll`.
+2. В процессе есть единственная такая уже загруженная DLL; новую копию через PATH
+   не загружаем. Её version/source_id совпадают с Python-linked SQLite.
+3. Отдельный краткоживущий native handle открывает индекс **READONLY**, без CREATE.
+4. VFSNAME должен быть `win32`/`win32-longpath`. TEMPFILENAME запрашивается у VFS;
+   извлекается существующий абсолютный parent, строка освобождается sqlite3_free,
+   собственный native handle закрывается в finally. Сам temp-файл не создаётся.
+
+Не используются private pointers/ABI структуры Python sqlite3.Connection,
+`PRAGMA temp_store_directory`, запись sqlite3_temp_directory или изменение ENV.
+`Application/customer_history_index.py` и его **temp_store=FILE** остаются прежними.
+SQLite-соединение `:memory:` внутри проверки служит только для чтения source_id,
+не содержит историю и не заменяет FILE storage реального reader.
+
+Binding выполняется один раз на build, текущий parent от VFS проверяется при
+каждом дисковом poll. Если расположение изменилось, запуск останавливается с
+`SQLITE_TEMP_CHANGED`, чтобы не потерять контроль старых temp-файлов. Неизвестный
+runtime, static/custom extension, несколько DLL, неподдержанный VFS/платформа,
+ошибка определения каталога — `SQLITE_TEMP_UNVERIFIED`, до тяжёлого history SQL.
+Отсутствие native Windows поддержки не блокирует metadata inspect, но блокирует build/probe.
+
+## Какие тома контролируются
+
+Output и подтверждённый SQLite temp проверяются по реальной Windows volume GUID:
+`Path.resolve` → `GetVolumePathNameW` → `GetVolumeNameForVolumeMountPointW`.
+Это учитывает junction/mounted-volume пути; текстовые префиксы букв дисков не
+являются идентичностью. Если GUID одинаковы, disk_usage выполняется один раз и
+нужен один общий резерв 20 ГиБ, а не два по 20. Если тома разные — каждый должен
+сохранять свой минимум. Ошибка определения тома/free bytes — `DISK_INFO_UNAVAILABLE`;
+недостаток места — `INSUFFICIENT_FREE_SPACE`. Неизвестное temp-расположение не заменяется output.
+
+Free bytes уже отражают занятые текущими output/temp файлами объёмы. После их роста
+должно оставаться не менее floor; проверка не предсказывает точный будущий peak и
+не гарантирует, что вся сборка поместится. До отдельного full запуска нужно учесть
+ожидаемый output и запас на SQL, чей точный peak по одному EXPLAIN неизвестен.
+
+`_RunGuard` сохраняет проверки отмены каждого события/строки, периодический disk
+poll раз в секунду или каждые 8 МиБ физической записи, принудительный poll до
+history SQL и перед публикацией. SQL progress handler вызывается через 10 000
+VM-инструкций, возвращает прерывание и сохраняет диагностическую категорию.
+Не вызывает системные disk API на каждой строке. Проверки действуют и при
+валидации/SHA256, включая checksum manifest перед переключением указателя.
+
+Прерывание закрывает Python/native readers и gzip writers, удаляет только свой
+UUID staging и сохраняет прежний CURRENT/CURRENT_INFERENCE. Ошибка после rename
+может оставить **завершённую проверенную версию без указателя**, как и раньше;
+это не публикация неполного gzip. Старые версии не удаляются.
+
+Границы: это периодический кооперативный контроль, а не эксклюзивная резервация
+диска. Внешний процесс может записать между poll, а отдельная SQLite VM-операция
+или блокирующий I/O могут задержать callback. Автотаймера для полного build нет;
+probe сохраняет свои отдельные ограничения. Глобальные настройки других частей
+приложения и других процессов не меняются.
+
+Metadata `inspect()` остаётся лёгким: `minimum_free_bytes` сообщает политику,
+`disk_safety=NOT_CHECKED_BY_METADATA_INSPECT` прямо указывает, что native temp/disk
+preflight выполняется при build/probe, а не подтверждён одним index READY.
+
+## SQL-планы и проверка
+
+FACTS_SQL/ORIGINS_SQL не изменялись. На реальном read-only индексе выполнены только
+EXPLAIN QUERY PLAN и metadata/VFS diagnostics; глобальные SELECT не исполнялись.
+FACTS использует covering scan event_customers_customer, lookup по PK/UNIQUE и
+TEMP B-TREE FOR RIGHT PART OF ORDER BY. ORIGINS использует тот же covering scan,
+record_origins_variant и TEMP B-TREE FOR GROUP BY. SCAN ожидаем для полной истории;
+стоимость и temp peak по нему точно не определяются. Переписывание SQL — отдельная задача.
+
+Отчёт SAFETY-01: `filtered_data/.propensity-safety01-20261020/REPORT.md`.
+Математика, 22 features, UNKNOWN, split/embargo, HMAC и storage contract не менялись.
+Ни полного build, ни inference, ни обучения/повторного реального probe в SAFETY-01 не было.
+Ниже сохранены предыдущие этапы; минимальный резерв 1 ГиБ в старых описаниях больше не действует.
+
+---
+
 # CUSTOMER-PROPENSITY-OPT-01 — потоковый gzip и bounded probe
 
 Для будущих сборок формат по умолчанию — **JSONL.gz** (`PropensityStorage()`),

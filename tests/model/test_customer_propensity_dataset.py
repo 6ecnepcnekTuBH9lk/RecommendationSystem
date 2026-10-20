@@ -18,6 +18,7 @@ from Application import customer_history_index as index
 from Application.customer_history_normalization import history_event_key
 from Application.customer_history_records import HistorySource
 from Application.model import customer_propensity_build as build
+from Application.model import customer_propensity_resources as resources
 from Application.model.customer_propensity_dataset import (
     AS_OF_LEVEL, DAY, SCHEMA_VERSION, TARGET, PropensityDatasetConfig, PropensityInferenceRow,
     PropensityLabel, PropensityPlan, PropensitySourceSpan, covered, customer_rows, feature_schema,
@@ -217,6 +218,8 @@ class SyntheticIndex:
             name=c.component, since=c.since_utc, until=c.until_utc, source_kind=c.source_kind) for c in COVERAGE))
         monkeypatch.setattr(index, "_reader_lock", lambda _: nullcontext())
         monkeypatch.setattr(index, "_capture_sources", lambda _: self.sources)
+        monkeypatch.setattr(build, "make_sqlite_temp_locator", lambda _: lambda: tmp_path)
+        monkeypatch.setattr(resources.shutil, "disk_usage", lambda _: SimpleNamespace(free=64 * 1024**3))
         self.db = sqlite3.connect(self.path)
         self.db.executescript(index._SCHEMA)
         self.db.executemany("INSERT INTO metadata VALUES (?,?)", [
@@ -265,7 +268,7 @@ class SyntheticIndex:
             self.db.commit()
 
     def run(self, **kwargs):
-        return self.builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=0, **kwargs)
+        return self.builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES, **kwargs)
 
 
 @pytest.fixture
@@ -342,7 +345,7 @@ def test_deterministic_reordered_variants_repeated_runs_and_distinct_key(tiny):
     again = tiny.run()
     assert again.version == result.version and again.reused
     assert rows([order(first, second)])[0].features == rows([order(second, first)])[0].features
-    other = tiny.builder.build(CONFIG, pseudonym_key=b"other secret" * 4, allow_retrospective=True, min_free_bytes=0)
+    other = tiny.builder.build(CONFIG, pseudonym_key=b"other secret" * 4, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
     assert other.version != result.version
     assert load_rows(other, "train")[0]["customer_key"] != load_rows(result, "train")[0]["customer_key"]
 
@@ -463,7 +466,7 @@ def test_cli_inspect_build_opt_in_safe_errors_and_no_import_build(tiny, monkeypa
     secret = tmp_path / "key.bin"
     secret.write_bytes(SECRET)
     tiny.add(action(), "a")
-    assert cli.main(arguments + ["--build", "--allow-retrospective", "--key-file", str(secret), "--min-free-gib", "0"]) == 0
+    assert cli.main(arguments + ["--build", "--allow-retrospective", "--key-file", str(secret), "--min-free-gib", "20"]) == 0
     monkeypatch.setattr(tiny.builder, "inspect", Mock(side_effect=ValueError("private-data")))
     assert cli.main(arguments) == 2
     assert "private-data" not in capsys.readouterr().out
@@ -544,7 +547,7 @@ def test_canonical_json_to_v2_to_dataset_with_late_identity_merges(tmp_path):
     paths = tuple(root.rglob("*.json"))
     before = {str(p): p.read_bytes() for p in paths}
     builder = build.PropensityDatasetBuilder(raw_root=root, cache_dir=cache, output_dir=tmp_path / "dataset")
-    artifact = builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=0)
+    artifact = builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
     assert artifact.counts["customers"] == 1 and artifact.counts["rows"] == 3
     assert artifact.counts["positive"] == 1 and artifact.counts["negative"] == 2
     training_row = load_rows(artifact, "train")[0]
@@ -696,7 +699,7 @@ def test_inference_artifact_is_separate_from_training_and_filters_future_events(
             yield customer, event
 
     monkeypatch.setattr(build, "iter_facts", only_past)
-    result = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=0)
+    result = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
     manifest = json.loads((result.artifact_dir / "manifest.json").read_text())
     inference = load_rows(result, "inference")
     assert len(inference) == 1 and calls == [index._micros(T + timedelta(days=500))]
@@ -720,7 +723,7 @@ def test_changing_wall_clock_cannot_change_inference_cutoff_or_version(tiny, mon
             return T.replace(year=2035)
 
     monkeypatch.setattr(build, "datetime", Clock)
-    first = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=0)
+    first = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
 
     class LaterClock(Clock):
         @classmethod
@@ -728,7 +731,7 @@ def test_changing_wall_clock_cannot_change_inference_cutoff_or_version(tiny, mon
             return T.replace(year=2045)
 
     monkeypatch.setattr(build, "datetime", LaterClock)
-    second = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=0)
+    second = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
     assert first.version == second.version and second.reused
     assert load_rows(first, "inference")[0]["prediction_utc"] == (T + timedelta(days=500)).isoformat().replace("+00:00", "Z")
 
@@ -757,7 +760,7 @@ def test_purchase_policy_is_unchanged_and_retrospective_opt_in_remains_required(
     assert classify("otmenen") == "CANCELLED" and classify("Return") == "RETURN"
     assert rows([action(), order(day=1, status="CD")])[0].target == 1
     with pytest.raises(ValueError, match="opt-in"):
-        tiny.builder.build(CONFIG, pseudonym_key=SECRET, min_free_bytes=0)
+        tiny.builder.build(CONFIG, pseudonym_key=SECRET, min_free_bytes=resources.MIN_FREE_BYTES)
     with pytest.raises(PropensityDataError, match="POINT_IN_TIME_IDENTITY_UNVERIFIED"):
         PropensityDatasetConfig(as_of_level="POINT_IN_TIME_VERIFIED")
     assert not tiny.builder.output_dir.exists()
@@ -769,7 +772,7 @@ def test_cli_prepares_inference_only_and_explains_strict_rejection(tiny, monkeyp
     key = tmp_path / "key.bin"
     key.write_bytes(SECRET)
     assert cli.main(["--purpose", "inference", "--build", "--allow-retrospective", "--key-file", str(key),
-                     "--min-free-gib", "0"]) == 0
+                     "--min-free-gib", "20"]) == 0
     assert (tiny.builder.output_dir / "CURRENT_INFERENCE.json").exists()
     assert not (tiny.builder.output_dir / "CURRENT.json").exists()
     assert cli.main(["--as-of-level", "POINT_IN_TIME_VERIFIED"]) == 2
@@ -993,7 +996,8 @@ def test_periodic_disk_guard_retains_fast_cancellation(tiny, monkeypatch):
     check = Mock()
     monkeypatch.setattr(tiny.builder, "_guard", check)
     stop = [False]
-    guard = build._RunGuard(tiny.builder, lambda: stop[0], 20, 0, None)
+    guard = build._RunGuard(tiny.builder, lambda: stop[0], resources.MIN_FREE_BYTES, 0, None)
+    guard.temp_locator = lambda: tiny.builder.output_dir
     for _ in range(100):
         guard.poll()
     assert check.call_count == 1
@@ -1079,3 +1083,326 @@ def test_valid_container_with_missing_rows_reaches_final_count_check(tiny, fmt):
     reseal_file(result, "train", gzip.compress(b"") if fmt == "jsonl.gz" else b"")
     with pytest.raises(PropensityDataError, match="OUTPUT_COUNT_MISMATCH"):
         load_rows(result, "train")
+
+# SAFETY-01: mocked disks/native APIs, no actual disk-filling or large queries.
+@pytest.mark.parametrize("probe", [False, True])
+@pytest.mark.parametrize("reserve", [0, 1, 1024**3, resources.MIN_FREE_BYTES - 1, True])
+def test_safe_floor_rejects_unsafe_reserve_before_any_read(tiny, monkeypatch, probe, reserve):
+    read = Mock(side_effect=AssertionError("No source read"))
+    monkeypatch.setattr(index, "_capture_sources", read)
+    with pytest.raises(ValueError, match="20 GiB"):
+        tiny.builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=reserve,
+                           probe=probe_config() if probe else None)
+    assert not read.called and not tiny.builder.output_dir.exists()
+
+
+@pytest.mark.parametrize("probe", [False, True])
+def test_safe_floor_default_and_larger_reserve(tiny, monkeypatch, probe):
+    tiny.add(action(), "a")
+    original = tiny.builder._guard
+    seen = []
+    def guard(cancelled, reserve, directory=None):
+        seen.append(reserve)
+        return original(cancelled, reserve, directory)
+    monkeypatch.setattr(tiny.builder, "_guard", guard)
+    kwargs = {"probe": probe_config()} if probe else {}
+    tiny.builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, **kwargs)
+    assert seen and set(seen) == {resources.MIN_FREE_BYTES}
+    seen.clear()
+    tiny.builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=25 * 1024**3, **kwargs)
+    assert seen and set(seen) == {25 * 1024**3}
+
+
+@pytest.mark.parametrize("same_volume", [False, True])
+def test_disk_monitor_uses_volume_identity_and_deduplicates(tiny, monkeypatch, same_volume):
+    output, temp = tiny.builder.output_dir, tiny.builder.output_dir.parent
+    calls = []
+    monkeypatch.setattr(resources, "volume_identity", lambda p: "volume-a" if p == output or same_volume else "volume-b")
+    def usage(directory):
+        calls.append(directory)
+        return SimpleNamespace(free=resources.MIN_FREE_BYTES)
+    monkeypatch.setattr(resources.shutil, "disk_usage", usage)
+    resources.check_disk_space(output, temp, resources.MIN_FREE_BYTES)
+    assert calls == ([output] if same_volume else [output, temp])
+
+
+@pytest.mark.parametrize("which", ["output", "temp"])
+def test_either_volume_can_stop_the_build(tiny, monkeypatch, which):
+    output, temp = tiny.builder.output_dir, tiny.builder.output_dir.parent
+    monkeypatch.setattr(resources, "volume_identity", lambda p: "volume-a" if p == output else "volume-b")
+    monkeypatch.setattr(resources.shutil, "disk_usage", lambda p: SimpleNamespace(
+        free=resources.MIN_FREE_BYTES - 1 if p == (output if which == "output" else temp) else 64 * 1024**3))
+    with pytest.raises(PropensityDataError, match="INSUFFICIENT_FREE_SPACE"):
+        resources.check_disk_space(output, temp, resources.MIN_FREE_BYTES)
+
+
+@pytest.mark.parametrize("part", ["identity", "usage"])
+def test_disk_information_errors_are_safe_categories(tiny, monkeypatch, part):
+    if part == "identity":
+        monkeypatch.setattr(resources, "volume_identity", Mock(side_effect=OSError("private location")))
+    else:
+        monkeypatch.setattr(resources, "volume_identity", lambda _: "volume")
+        monkeypatch.setattr(resources.shutil, "disk_usage", Mock(side_effect=OSError("private location")))
+    with pytest.raises(PropensityDataError, match="^DISK_INFO_UNAVAILABLE$"):
+        resources.check_disk_space(tiny.builder.output_dir, tiny.builder.output_dir.parent, resources.MIN_FREE_BYTES)
+
+
+def test_unknown_temp_blocks_before_heavy_sql(tiny, monkeypatch):
+    tiny.add(action(), "a")
+    monkeypatch.setattr(build, "make_sqlite_temp_locator", Mock(side_effect=PropensityDataError("SQLITE_TEMP_UNVERIFIED")))
+    facts = Mock(side_effect=AssertionError("No heavy SELECT"))
+    monkeypatch.setattr(build, "iter_facts", facts)
+    with pytest.raises(PropensityDataError, match="SQLITE_TEMP_UNVERIFIED"):
+        tiny.run()
+    assert not facts.called and not list(tiny.builder.output_dir.rglob(".building-*"))
+    assert not list(tiny.builder.output_dir.rglob("CURRENT*.json"))
+
+
+def test_changed_temp_location_stops_instead_of_losing_old_volume(tiny, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(build, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(tiny.builder, "_guard", Mock())
+    locations = iter((tiny.path.parent, tiny.path.parent.parent))
+    guard = build._RunGuard(tiny.builder, lambda: False, resources.MIN_FREE_BYTES, 0, None)
+    guard.temp_locator = lambda: next(locations)
+    guard.poll()
+    clock[0] = 2
+    with pytest.raises(PropensityDataError, match="SQLITE_TEMP_CHANGED"):
+        guard.poll()
+
+
+@pytest.mark.parametrize("purpose", ["training", "inference"])
+@pytest.mark.parametrize("phase", ["sql", "gzip", "sha", "pointer"])
+def test_disk_drop_at_each_phase_preserves_previous_current_and_unlocks(tiny, monkeypatch, purpose, phase):
+    from Application.customer_profile_service import _reader_lock as real_reader_lock
+    canonical = tiny.builder.raw_root / "canonical"
+    canonical.mkdir(parents=True)
+    (canonical / ".writer.lock").write_bytes(b"0")
+    monkeypatch.setattr(index, "_reader_lock", real_reader_lock)
+    tiny.add(action(), "a")
+    config = CONFIG if purpose == "training" else PropensityDatasetConfig(purpose="inference")
+    # An event immediately before inference boundary supplies its cohort.
+    if purpose == "inference":
+        tiny.add(action(day=499), "inference-cohort")
+    previous = tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True)
+    pointer_name = "CURRENT.json" if purpose == "training" else "CURRENT_INFERENCE.json"
+    pointer = (tiny.builder.output_dir / pointer_name).read_bytes()
+    old_files = {p.name: p.read_bytes() for p in previous.artifact_dir.iterdir()}
+    tiny.add(action(day=498 if purpose == "inference" else -2), "new-event")
+    clock, free = [0.0], [64 * 1024**3]
+    monkeypatch.setattr(build, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(resources.shutil, "disk_usage", lambda _: SimpleNamespace(free=free[0]))
+    def drop():
+        free[0] = 19 * 1024**3
+        clock[0] = 2
+    if phase == "sql":
+        actual = build.iter_facts
+        def sql(connection, cancelled, **kwargs):
+            drop()
+            connection.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n").fetchone()
+            yield from actual(connection, cancelled, **kwargs)
+        monkeypatch.setattr(build, "iter_facts", sql)
+    elif phase == "gzip":
+        actual = build.open_writer
+        @contextmanager
+        def writer(*args, **kwargs):
+            with actual(*args, **kwargs) as stream:
+                class DroppingWriter:
+                    def write(self, value):
+                        stream.write(value)
+                        stream.flush()  # Physical gzip data exists before the drop.
+                        drop()
+                yield DroppingWriter()
+        monkeypatch.setattr(build, "open_writer", writer)
+    elif phase == "sha":
+        actual = build._digest
+        def digest(path, cancelled=lambda: False):
+            if path.name.endswith(".jsonl.gz"):
+                drop()
+            return actual(path, cancelled)
+        monkeypatch.setattr(build, "_digest", digest)
+    else:
+        actual = tiny.builder._fresh
+        n = [0]
+        def fresh(*args):
+            n[0] += 1
+            actual(*args)
+            if n[0] == 2:
+                drop()
+        monkeypatch.setattr(tiny.builder, "_fresh", fresh)
+    with pytest.raises(PropensityDataError, match="INSUFFICIENT_FREE_SPACE"):
+        tiny.builder.build(config, pseudonym_key=SECRET, allow_retrospective=True)
+    assert (tiny.builder.output_dir / pointer_name).read_bytes() == pointer
+    assert {p.name: p.read_bytes() for p in previous.artifact_dir.iterdir()} == old_files
+    assert not list(tiny.builder.output_dir.rglob(".building-*"))
+    assert not list(tiny.builder.output_dir.glob(".current-*"))
+    # Both OS-level coordination locks can be acquired again; gzip handles are closed.
+    with real_reader_lock(tiny.builder.raw_root), build._writer_lock(tiny.builder.output_dir):
+        pass
+    for directory in tiny.builder.output_dir.iterdir():
+        if directory.is_dir() and (directory / "manifest.json").exists():
+            manifest = json.loads((directory / "manifest.json").read_text())
+            for name in build.FILES:
+                list(iter_propensity_rows(directory, name, purpose=manifest["purpose"]))
+
+
+@pytest.mark.parametrize("extra", [["--build"], ["--probe"], []])
+@pytest.mark.parametrize("reserve", ["0", "1", "19"])
+def test_cli_cannot_select_unsafe_reserve(tiny, monkeypatch, capsys, extra, reserve):
+    builder = Mock(side_effect=AssertionError("Must reject before builder"))
+    monkeypatch.setattr(cli, "PropensityDatasetBuilder", builder)
+    with pytest.raises(SystemExit):
+        valid = (["--allow-retrospective", "--key-file", "not-read.bin"] if "--build" in extra else
+                 ["--allow-retrospective", "--ephemeral-probe-key", "--probe-date", "2024-01-01T00:00:00Z"]
+                 if "--probe" in extra else [])
+        cli.main(extra + valid + ["--min-free-gib", reserve])
+    assert "Disk reserve must be at least 20 GiB" in capsys.readouterr().err
+    assert not builder.called
+
+
+@pytest.mark.parametrize("mode", ["ok", "open", "vfs_rc", "temp_rc", "vfs_name", "relative", "missing", "close"])
+def test_native_temp_discovery_frees_allocations_and_closes_handles(tmp_path, monkeypatch, mode):
+    import ctypes
+    allocated, freed, closed, opened = [], [], [], []
+    directory = tmp_path / "native-temp"
+    directory.mkdir()
+    class Native:
+        def sqlite3_open_v2(self, path, out, flags, vfs):
+            opened.append(flags)
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p)).contents.value = 1
+            return 1 if mode == "open" else 0
+        def sqlite3_file_control(self, db, name, opcode, out):
+            if opcode == 12:
+                value = b"custom-vfs" if mode == "vfs_name" else b"win32"
+            else:
+                value = ("relative/tempfile" if mode == "relative" else str(tmp_path / "missing" / "tempfile")
+                         if mode == "missing" else str(directory / "tempfile")).encode("utf8")
+            buffer = ctypes.create_string_buffer(value)
+            allocated.append(buffer)
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p)).contents.value = ctypes.addressof(buffer)
+            return int((opcode == 12 and mode == "vfs_rc") or (opcode == 16 and mode == "temp_rc"))
+        def sqlite3_free(self, pointer):
+            freed.append(pointer.value)
+        def sqlite3_close(self, db):
+            closed.append(db.value)
+            return int(mode == "close")
+    native = Native()
+    monkeypatch.setattr(resources, "_bind_sqlite", lambda: native)
+    locator = resources.make_sqlite_temp_locator(tmp_path / "database.sqlite")
+    if mode == "ok":
+        assert locator() == directory.resolve()
+    else:
+        with pytest.raises(PropensityDataError, match="SQLITE_TEMP_UNVERIFIED"):
+            locator()
+    assert freed == [ctypes.addressof(x) for x in allocated] and closed == [1]
+    assert opened == [1 | 0x10000]  # Strict READONLY, never CREATE/READWRITE.
+    assert not list(directory.iterdir())
+
+
+def test_native_runtime_mismatch_and_missing_api_fail_closed(monkeypatch):
+    native = Mock()
+    native.sqlite3_sourceid.return_value = b"different library"
+    native.sqlite3_libversion.return_value = sqlite3.sqlite_version.encode()
+    monkeypatch.setattr(resources, "_loaded_sqlite_dll", lambda: native)
+    with pytest.raises(PropensityDataError, match="SQLITE_TEMP_UNVERIFIED"):
+        resources.make_sqlite_temp_locator(Path("unused"))
+    monkeypatch.setattr(resources, "_loaded_sqlite_dll", Mock(side_effect=OSError("private DLL path")))
+    with pytest.raises(PropensityDataError, match="^SQLITE_TEMP_UNVERIFIED$"):
+        resources.make_sqlite_temp_locator(Path("unused"))
+
+@pytest.mark.parametrize("magic", [0x10B, 0x20B])
+@pytest.mark.parametrize("damage", ["none", "static", "truncated", "magic", "rva", "no_import", "short_optional", "sections"])
+def test_runtime_extension_import_check_is_bounded(tmp_path, monkeypatch, magic, damage):
+    import struct
+    data = bytearray(0x800)
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, 0x80)
+    data[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", data, 0x86, 1)
+    size = 0xE0 if magic == 0x10B else 0xF0
+    struct.pack_into("<H", data, 0x94, size)
+    optional = 0x98
+    struct.pack_into("<H", data, optional, magic)
+    directory = optional + (96 if magic == 0x10B else 112) + 8
+    struct.pack_into("<II", data, directory, 0x1000, 40)
+    struct.pack_into("<IIII", data, optional + size + 8, 0x200, 0x1000, 0x200, 0x400)
+    struct.pack_into("<IIIII", data, 0x400, 0, 0, 0, 0x1040, 0)
+    name = b"python312.dll\0" if damage == "static" else b"sqlite3.dll\0"
+    data[0x440:0x440 + len(name)] = name
+    if damage == "truncated":
+        data = data[:64]
+    elif damage == "magic":
+        struct.pack_into("<H", data, optional, 0)
+    elif damage == "rva":
+        struct.pack_into("<I", data, 0x40C, 0xFFFFFFFF)
+    elif damage == "no_import":
+        struct.pack_into("<II", data, directory, 0, 0)
+    elif damage == "short_optional":
+        struct.pack_into("<H", data, 0x94, 16)
+    elif damage == "sections":
+        struct.pack_into("<H", data, 0x86, 97)
+    extension = tmp_path / "fake.pyd"
+    extension.write_bytes(data)
+    monkeypatch.setattr(resources._sqlite3, "__file__", str(extension))
+    assert resources._extension_imports_sqlite_dll() is (damage == "none")
+
+
+def test_unknown_extension_linkage_is_not_guessed_from_version(monkeypatch):
+    monkeypatch.setattr(resources, "_extension_imports_sqlite_dll", lambda: False)
+    with pytest.raises(PropensityDataError, match="SQLITE_TEMP_UNVERIFIED"):
+        resources.make_sqlite_temp_locator(Path("unused"))
+
+
+def test_sql_temp_disk_drop_interrupts_while_output_disk_is_healthy(tiny, monkeypatch):
+    tiny.add(action(), "a")
+    clock, free_temp = [0.0], [64 * 1024**3]
+    monkeypatch.setattr(build, "perf_counter", lambda: clock[0])
+    output = tiny.builder.output_dir
+    monkeypatch.setattr(resources, "volume_identity", lambda p: "output-volume" if p == output else "temp-volume")
+    monkeypatch.setattr(resources.shutil, "disk_usage", lambda p: SimpleNamespace(free=64 * 1024**3 if p == output else free_temp[0]))
+    original = build.iter_facts
+    def sql(connection, cancelled, **kwargs):
+        clock[0], free_temp[0] = 2, 19 * 1024**3
+        connection.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n").fetchone()
+        yield from original(connection, cancelled, **kwargs)
+    monkeypatch.setattr(build, "iter_facts", sql)
+    with pytest.raises(PropensityDataError, match="INSUFFICIENT_FREE_SPACE"):
+        tiny.run()
+    assert not list(tiny.builder.output_dir.rglob(".building-*"))
+    assert not list(tiny.builder.output_dir.rglob("CURRENT*.json"))
+
+def test_initial_low_space_does_not_start_history_queries(tiny, monkeypatch):
+    tiny.add(action(), "a")
+    monkeypatch.setattr(resources.shutil, "disk_usage", lambda _: SimpleNamespace(free=resources.MIN_FREE_BYTES - 1))
+    facts = Mock(side_effect=AssertionError("Must not start history queries"))
+    monkeypatch.setattr(build, "iter_facts", facts)
+    with pytest.raises(PropensityDataError, match="INSUFFICIENT_FREE_SPACE"):
+        tiny.run()
+    assert not facts.called and not list(tiny.builder.output_dir.rglob(".building-*"))
+
+
+def test_unverified_temp_never_falls_back_to_output_directory(tiny, monkeypatch):
+    usage = Mock(side_effect=AssertionError("No disk guess"))
+    monkeypatch.setattr(resources.shutil, "disk_usage", usage)
+    with pytest.raises(PropensityDataError, match="SQLITE_TEMP_UNVERIFIED"):
+        resources.check_disk_space(tiny.builder.output_dir, None, resources.MIN_FREE_BYTES)
+    assert not usage.called
+
+
+@pytest.mark.skipif(resources.os.name != "nt", reason="Native Windows VFS integration")
+def test_native_temp_locator_is_safe_inside_sql_progress_handler(tiny):
+    tiny.builder.output_dir.mkdir()
+    before = index._database_version(tiny.path)
+    locator = resources.make_sqlite_temp_locator(tiny.path)
+    guard = build._RunGuard(tiny.builder, lambda: False, resources.MIN_FREE_BYTES, build.perf_counter(), None)
+    guard.temp_locator = locator
+    calls = []
+    with index._read_index(tiny.path) as con:
+        def progress():
+            calls.append(1)
+            guard.poll(force=True)
+            return 0
+        con.set_progress_handler(progress, 1000)
+        assert con.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<3000) SELECT sum(x) FROM n").fetchone()[0] == 4501500
+        con.set_progress_handler(None, 0)
+    assert calls and index._database_version(tiny.path) == before

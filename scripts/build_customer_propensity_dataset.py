@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validation-start", type=_date)
     parser.add_argument("--test-start", type=_date)
     parser.add_argument("--step-days", type=int, default=30)
-    parser.add_argument("--min-free-gib", type=int, help="Default 1 for full build; probe enforces at least 20")
+    parser.add_argument("--min-free-gib", type=int, help="Minimum/default 20 GiB for both full build and probe")
     parser.add_argument("--storage-format", choices=("jsonl.gz", "jsonl"), default="jsonl.gz")
     parser.add_argument("--gzip-level", type=int, default=6)
     parser.add_argument("--probe-date", type=_date, action="append")
@@ -71,8 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Choose an existing key file or an ephemeral probe key")
     if (args.build or args.probe) and (not args.allow_retrospective or not (args.key_file or args.ephemeral_probe_key)):
         parser.error("Writing requires --allow-retrospective and a key (ephemeral only for probe)")
-    if args.min_free_gib is not None and args.min_free_gib < 0:
-        parser.error("Invalid disk reserve")
+    if args.min_free_gib is not None and args.min_free_gib < 20:
+        parser.error("Disk reserve must be at least 20 GiB")
     stop = Event()
     previous = signal.signal(signal.SIGINT, lambda *unused: stop.set())
     try:
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.build or args.probe:
             key = secrets.token_bytes(32) if args.ephemeral_probe_key else args.key_file.read_bytes()
             result = builder.build(config, pseudonym_key=key, allow_retrospective=True, storage=storage, probe=probe,
-                                   cancelled=stop.is_set, min_free_bytes=(args.min_free_gib if args.min_free_gib is not None else 20 if probe else 1) * 1024**3,
+                                   cancelled=stop.is_set, min_free_bytes=(args.min_free_gib if args.min_free_gib is not None else 20) * 1024**3,
                                    progress=lambda p: _print(asdict(p)))
             # Aggregate only: no customer IDs, raw records, secret or data paths.
             _print({"status": result.status, "version": result.version, "counts": result.counts,
