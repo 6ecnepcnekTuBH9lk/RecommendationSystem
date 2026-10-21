@@ -80,8 +80,8 @@ def test_sections_vertical_order_initial_states_and_no_legacy_dependencies(card,
     assert tab.profile.content.state is ViewState.INITIAL
     assert tab.kpis.content.state is ViewState.INITIAL
     assert tab.history.content.state is ViewState.INITIAL
-    assert tab.propensity.content.state is ViewState.UNAVAILABLE
-    assert not tab.export_button.isEnabled()
+    assert tab.propensity.content.state is ViewState.INITIAL
+    assert tab.export_button.isEnabled()
     assert not tab.history_filter.isEnabled()
     assert [button.text().strip() for button in tab.history.buttons.values()] == ["Заказы", "Просмотры", "Избранное"]
     assert tab._thread is None
@@ -141,7 +141,7 @@ def test_independent_future_sections_survive_recommendation_failures(card, state
     assert tab.propensity.content.state is ViewState.UNAVAILABLE
     assert all(c.value.text() != "0" for c in tab.kpi_grid.cards)
     assert "недоступен" in tab.propensity.message.text()
-    assert tab.propensity.message.isHidden()
+    assert not tab.propensity.message.isHidden()
 
 
 def test_fixed_top10_without_selector(card):
@@ -271,6 +271,9 @@ def test_close_during_search_waits_cooperatively_without_thread_destruction(card
 
 
 def test_new_factory_never_connects_legacy_export_or_search(app, monkeypatch):
+    from Application.tabs import recommendation_export_controller
+    calls = []
+    monkeypatch.setattr(recommendation_export_controller, "start_recommendation_export", calls.append)
     from Application.tabs import create_results_tab as legacy
     for name in ("_resolve_mindbox_ids", "_load_client_info", "_load_client_interactions",
                  "_load_recommendations_from_excel", "export_recommendations_to_excel"):
@@ -281,6 +284,7 @@ def test_new_factory_never_connects_legacy_export_or_search(app, monkeypatch):
     assert isinstance(host.results_tab, CustomerResultsTab)
     assert host.tabs.widget(0) is host.results_tab
     host.results_tab.export_button.click()
+    assert calls == [host.results_tab]
     assert host.results_tab._thread is None
     host.close()
     host.deleteLater()

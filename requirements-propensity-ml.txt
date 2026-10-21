@@ -1,0 +1,6 @@
+# Optional research trainer, Python 3.12; existing NumPy 2.2.6 remains unchanged.
+# Install into the project venv with: python -m pip install -r requirements-propensity-ml.txt
+scikit-learn==1.7.2
+scipy==1.15.3
+joblib==1.5.2
+threadpoolctl==3.6.0

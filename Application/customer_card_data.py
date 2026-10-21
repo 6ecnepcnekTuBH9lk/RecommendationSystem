@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 from Application import customer_contact_search as contact_backend
 from Application.customer_profile_service import CustomerProfileResult, CustomerProfileService, ProfileStatus
 from Application.customer_activity_service import ActivityStatus, CustomerActivity
+from Application.customer_propensity_service import CustomerPropensity, PropensityStatus
 
 from Application.model.customer_identity_bridge import (
     CustomerIdentityBridge, CustomerModelIdentityResult, CustomerModelIdentityStatus,
@@ -93,6 +94,7 @@ class CustomerCardResult:
     raw_state: ViewState | None = None
     raw_message: str = ""
     activity: CustomerActivity | None = None
+    propensity: CustomerPropensity | None = None
 
 
 def contact_search_failure(result):
@@ -108,7 +110,8 @@ def contact_search_failure(result):
         status.SOURCE_INCONSISTENT: (ViewState.ERROR, "Источники поиска клиентов несогласованы. Карточка недоступна."),
     }
     state, message = messages[result.status]
-    return CustomerCardResult(state, message, contact_search=result)
+    return CustomerCardResult(state, message, contact_search=result,
+                              propensity=CustomerPropensity(PropensityStatus.IDENTITY_NOT_CONFIRMED))
 
 
 def validate_contact_match(result, *, raw_root):
@@ -167,13 +170,14 @@ class CustomerCardService:
 
     def __init__(self, *, bridge=None, inference=None, profile_service=None, model_dir=PROJECT_ROOT / "model",
                  raw_root=INPUT_DATA_DIR / "MindboxRaw", catalog_path=INPUT_DATA_DIR / "nomenclature.csv", hybrid=None,
-                 activity_service=None):
+                 activity_service=None, propensity_service=None):
         self.bridge = bridge if bridge is not None else CustomerIdentityBridge()
         self.inference = inference if inference is not None else RawBprInferenceService()
         self.profile_service = profile_service if profile_service is not None else CustomerProfileService()
         self.profile_observer = None
         self.hybrid = hybrid
         self.activity_service = activity_service
+        self.propensity_service = propensity_service
         self.model_dir, self.raw_root, self.catalog_path = Path(model_dir), Path(raw_root), Path(catalog_path)
         self._catalog_key = None
         self._catalog = {}
@@ -305,7 +309,56 @@ class CustomerCardService:
             except Exception:
                 activity = CustomerActivity(ActivityStatus.STALE)
             result = replace(result, activity=activity)
+        if (result.propensity is not None and self.propensity_service is not None
+                and result.propensity.status in (PropensityStatus.READY, PropensityStatus.WARNING, PropensityStatus.NOT_FOUND)):
+            try:
+                if self._propensity_customer(result) != result.propensity.canonical_customer_id:
+                    checked = CustomerPropensity(PropensityStatus.STALE)
+                else:
+                    checked = self.propensity_service.validate(result.propensity, raw_root=self.raw_root)
+            except Exception:
+                checked = CustomerPropensity(PropensityStatus.STALE)
+            result = replace(result, propensity=checked)
         return result
+
+    @staticmethod
+    def _propensity_customer(result):
+        confirmed = set()
+        if result.profile is not None and result.profile.status in (ProfileStatus.FOUND, ProfileStatus.NOT_FOUND):
+            confirmed.add(result.profile.canonical_customer_id)
+        if result.contact_search is not None:
+            if result.contact_search.status is not contact_backend.ContactSearchStatus.MATCHED:
+                return None
+            confirmed.add(result.contact_search.canonical_customer_id)
+        if len(confirmed) != 1 or None in confirmed:
+            return None
+        customer = next(iter(confirmed))
+        if result.identity is not None and result.identity.canonical_customer_id not in (None, customer):
+            return None
+        return customer
+
+    def load_propensity(self, result, cancelled=lambda: False):
+        """Optional worker stage, independent of BPR membership and its scores."""
+        if self.propensity_service is None:
+            return result
+        if cancelled():
+            return replace(result, propensity=CustomerPropensity(PropensityStatus.CANCELLED))
+        try:
+            checked = result
+            if result.profile is not None:
+                checked = replace(checked, profile=self.validate_profile(result.profile))
+            if result.contact_search is not None:
+                if result.contact_search.status is not contact_backend.ContactSearchStatus.MATCHED:
+                    return replace(result, propensity=CustomerPropensity(PropensityStatus.IDENTITY_NOT_CONFIRMED))
+                match = validate_contact_match(result.contact_search, raw_root=self.raw_root)
+                checked = replace(checked, contact_search=match)
+            customer = self._propensity_customer(checked)
+            prediction = (self.propensity_service.get(customer, raw_root=self.raw_root, cancelled=cancelled)
+                          if customer is not None else CustomerPropensity(PropensityStatus.IDENTITY_NOT_CONFIRMED))
+        except Exception as exc:
+            logger.warning("customer_propensity stage=lookup error=%s", type(exc).__name__)
+            prediction = CustomerPropensity(PropensityStatus.ERROR)
+        return replace(result, propensity=prediction)
 
     def load_activity(self, result, cancelled=lambda: False):
         """Independent worker stage; model membership never gates activity."""

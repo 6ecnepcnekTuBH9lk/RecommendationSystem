@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from threading import Thread
 
 import pytest
 
@@ -65,3 +66,45 @@ def test_long_chain_is_iterative():
     resolver = CustomerIdResolver(merge(str(index), str(index + 1)) for index in range(3000))
     assert resolver.resolve("0") == "3000"
     assert resolver.alias_count == 3000
+
+
+def test_worker_yields_without_changing_canonical_results(monkeypatch):
+    from Application.mindbox import identity
+    records = [merge(str(i), str(i+1)) for i in range(1025)]
+    expected = CustomerIdResolver(records)
+    pauses, results = [], []
+    monkeypatch.setattr(identity, "sleep", lambda seconds: pauses.append(seconds), raising=False)
+    def build():
+        resolver = CustomerIdResolver(records)
+        results.append((resolver._parents, resolver._canonical, resolver.alias_count, resolver.resolve("unknown")))
+    thread = Thread(target=build)
+    thread.start()
+    thread.join(3)
+    assert not thread.is_alive()
+    assert results == [(expected._parents, expected._canonical, expected.alias_count, "unknown")]
+    assert pauses and all(0 < seconds <= .001 for seconds in pauses)
+
+
+def test_main_thread_never_sleeps_during_identity_build(monkeypatch):
+    from Application.mindbox import identity
+    monkeypatch.setattr(identity, "sleep", lambda *a: pytest.fail("No sleep on GUI/main thread"), raising=False)
+    resolver = CustomerIdResolver(merge(str(i), str(i+1)) for i in range(1025))
+    assert resolver.resolve("0") == "1025"
+
+
+@pytest.mark.parametrize("tail", [[merge("0", "different")], [merge("1025", "0")]])
+def test_worker_still_rejects_conflicts_and_cycles_after_yield(monkeypatch, tail):
+    from Application.mindbox import identity
+    pauses, errors = [], []
+    records = [merge(str(i), str(i+1)) for i in range(1025)] + tail
+    monkeypatch.setattr(identity, "sleep", lambda seconds: pauses.append(seconds), raising=False)
+    def build():
+        try:
+            CustomerIdResolver(records)
+        except CustomerIdentityError as exc:
+            errors.append(type(exc))
+    thread = Thread(target=build)
+    thread.start()
+    thread.join(3)
+    assert not thread.is_alive()
+    assert errors == [CustomerIdentityError] and pauses

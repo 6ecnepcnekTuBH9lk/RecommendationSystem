@@ -10,6 +10,7 @@ from Application.customer_card_data import CustomerCardResult, ViewState, contac
 from Application.customer_contact_search import ContactSearchResult, ContactSearchStatus, ContactType, search_customers_by_contact
 from Application.customer_profile_service import CustomerProfileResult, ProfileStatus
 from Application.customer_activity_service import ActivityStatus, CustomerActivity
+from Application.customer_propensity_service import CustomerPropensity, PropensityStatus
 from Application.customer_history_service import HistoryPage, HistoryStatus, get_customer_history
 from Application.customer_history_records import HistoryKind
 from Application.customer_history_presentation import present_history
@@ -63,6 +64,7 @@ class CustomerCardWorker(QObject):
                     result = replace(result, state=ViewState.STALE, products=(), raw_products=(), raw_state=ViewState.STALE,
                                      profile=CustomerProfileResult(ProfileStatus.STALE),
                                      activity=CustomerActivity(ActivityStatus.STALE) if result.activity is not None else None,
+                                     propensity=CustomerPropensity(PropensityStatus.STALE) if result.propensity is not None else None,
                                      message="Источники изменились до показа данных. Повторите поиск.")
         self.validated.emit(request.request_id, result)
 
@@ -151,6 +153,17 @@ class CustomerCardWorker(QObject):
                                         profile=profile, contact_search=match)
         finally:
             self.service.profile_observer = None
+        if not request.cancelled.is_set():
+            load_propensity = getattr(self.service, "load_propensity", None)
+            if callable(load_propensity):
+                try:
+                    delivered = load_propensity(result, request.cancelled.is_set)
+                    if not isinstance(delivered, CustomerCardResult):
+                        raise TypeError("Invalid propensity delivery")
+                    result = delivered
+                except Exception as exc:
+                    logger.warning("customer_propensity stage=worker error=%s", type(exc).__name__)
+                    result = replace(result, propensity=CustomerPropensity(PropensityStatus.ERROR))
         if request.cancelled.is_set():
             result = CustomerCardResult(ViewState.CANCELLED, "Поиск отменён.")
         self.finished.emit(request.request_id, result)

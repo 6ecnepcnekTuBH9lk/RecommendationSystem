@@ -129,7 +129,7 @@ def test_four_modes_button_enter_background_and_original_topk(card, kind, enter)
     assert card.tab.raw_grid.visible_count == 10
     assert card.service.inference.get_recommendations.call_count == 1
     assert card.tab.profile.content.state is ViewState.READY
-    assert not card.tab.export_button.isEnabled()
+    assert card.tab.export_button.isEnabled()
 
 
 @pytest.mark.parametrize("status,state,message", [

@@ -18,6 +18,8 @@ from Application.customer_contact_search import ContactSearchStatus, ContactType
 from Application.customer_profile_presentation import PROFILE_FIELDS, profile_content
 from Application.customer_activity_service import CustomerActivityService
 from Application.customer_activity_presentation import activity_content
+from Application.customer_propensity_service import CustomerPropensityService, CustomerPropensity, PropensityStatus
+from Application.customer_propensity_presentation import propensity_content
 from Application.photo.photo_processing import _invalidate_photo_targets, _set_photo_label
 from Application.settings.set_status import schedule_status_reset, set_status_error, set_status_ok, set_status_processing
 from Application.theme.layout_metrics import BLOCK_SPACING, CONTROL_SPACING, PAGE_MARGIN, SECTION_SPACING
@@ -42,7 +44,8 @@ class CustomerResultsTab(QWidget):
         self.window = window
         if service is None:
             from Application.hybrid_recommendations import HybridRecommendationService
-            service = CustomerCardService(hybrid=HybridRecommendationService(), activity_service=CustomerActivityService())
+            service = CustomerCardService(hybrid=HybridRecommendationService(), activity_service=CustomerActivityService(),
+                                          propensity_service=CustomerPropensityService())
         self.service = service
         self._history_lookup = history_lookup
         self._deferred_history = None
@@ -112,8 +115,8 @@ class CustomerResultsTab(QWidget):
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_search)
         self.export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт рекомендаций")
-        self.export_button.setEnabled(False)
-        self.export_button.setToolTip("Единый Excel-файл будет доступен после согласования его структуры.")
+        self.export_button.setToolTip("Recommendations.zip: Online Store, Mindbox и аналитический Excel.")
+        self.export_button.clicked.connect(self._start_export)
         for button in (self.search_button, self.cancel_button, self.export_button):
             self.search_row.addWidget(button)
         box.addLayout(self.search_row)
@@ -224,18 +227,20 @@ class CustomerResultsTab(QWidget):
             self._load_history(request)
 
     def _build_propensity(self):
-        self.propensity = StateSection("Вероятность покупки в следующие 30 дней", SectionContent(
-            ViewState.UNAVAILABLE, "Прогноз пока недоступен. Для расчёта нужна отдельная модель вероятности покупки."),
+        self.propensity = StateSection("Вероятность следующего оформления заказа", propensity_content(),
             name="customerPropensity")
-        self.propensity.message.hide()
-        fields = AdaptiveCardGrid()
-        fields.set_cards([FieldCard(field) for field in (
-            DisplayField("Горизонт прогноза", "30 дней", ViewState.READY),
-            DisplayField("Дата расчёта", state=ViewState.UNAVAILABLE),
-            DisplayField("Сегмент клиента", state=ViewState.UNAVAILABLE),
-            DisplayField("Версия прогнозной модели", state=ViewState.UNAVAILABLE))])
-        self.propensity.box.addWidget(fields)
+        # Keep the three wrapping field cards in one equally stretched row.
+        self.propensity_grid = AdaptiveCardGrid(minimum_card_width=0, maximum_columns=3)
+        self.propensity.box.addWidget(self.propensity_grid)
+        self._render_propensity()
         self.page_layout.addWidget(self.propensity)
+
+    def _render_propensity(self, result=None, *, state=ViewState.INITIAL):
+        content = propensity_content(result, state=state)
+        self.propensity.set_content(content)
+        self.propensity.message.setVisible(bool(content.message))
+        self.propensity.setProperty("researchWarning", bool(result is not None and result.warnings))
+        self.propensity_grid.set_cards([FieldCard(field) for field in content.fields])
 
     def _ensure_worker(self):
         if self._thread is not None:
@@ -277,6 +282,7 @@ class CustomerResultsTab(QWidget):
             self.history.set_customer(None)
         self.result = None
         self._render_activity()
+        self._render_propensity()
         _invalidate_photo_targets(self)
         self.raw_grid.set_cards([])
         self.product_grid.set_cards([])
@@ -285,6 +291,10 @@ class CustomerResultsTab(QWidget):
         self.profile.set_content(SectionContent(ViewState.INITIAL, "Введите MindboxID клиента."))
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.INITIAL), framed=False)
                                       for title in PROFILE_FIELDS])
+
+    def _start_export(self):
+        from Application.tabs.recommendation_export_controller import start_recommendation_export
+        start_recommendation_export(self)
 
     def search(self):
         if self._closing:
@@ -303,6 +313,7 @@ class CustomerResultsTab(QWidget):
             return
         request = CustomerCardRequest(self._request_id, value, contact_type=kind)
         self._render_activity(state=ViewState.LOADING)
+        self._render_propensity(state=ViewState.LOADING)
         self.profile.set_content(SectionContent(ViewState.LOADING, "Загрузка профиля клиента…"))
         self.profile_fields.set_cards([FieldCard(DisplayField(title, state=ViewState.LOADING), framed=False)
                                       for title in PROFILE_FIELDS])
@@ -418,6 +429,10 @@ class CustomerResultsTab(QWidget):
         elif identity is not None and result.state is not ViewState.STALE:
             customer_id = identity.canonical_customer_id
         self.history.set_customer(customer_id)
+        propensity = result.propensity
+        if propensity is not None and propensity.canonical_customer_id not in (None, customer_id):
+            propensity = CustomerPropensity(PropensityStatus.STALE)
+        self._render_propensity(propensity or CustomerPropensity(PropensityStatus.NOT_READY))
         if result.activity is not None and result.activity.canonical_customer_id not in (None, customer_id):
             self._render_activity(state=ViewState.STALE)
         else:
@@ -451,10 +466,12 @@ class CustomerResultsTab(QWidget):
         self._clear_result()
         self._render_profile(CustomerProfileResult(ProfileStatus.CANCELLED))
         self._render_activity(state=ViewState.CANCELLED)
+        self._render_propensity(state=ViewState.CANCELLED)
         self._display_state(ViewState.CANCELLED, "Поиск отменён. Можно начать новый запрос.")
 
     def shutdown(self):
         self._closing = True
+        self._render_propensity()
         self._deferred_history = None
         self.history.shutdown()
         if self._active is not None:
