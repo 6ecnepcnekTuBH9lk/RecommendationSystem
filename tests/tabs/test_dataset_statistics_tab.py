@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 import json
 import os
 import re
@@ -148,10 +149,70 @@ def canonical_process(monkeypatch, tmp_path):
 
     class Process(QProcess):
         def start(self, program, arguments):
-            super().start(program, arguments + ["--raw-root", str(tmp_path), "--catalog", str(catalog)])
+            super().start(program, arguments + ["--raw-root", str(tmp_path), "--catalog", str(catalog),
+                                               "--slice-cache", str(tmp_path / "slices")])
 
     monkeypatch.setattr(ui, "QProcess", Process)
     return catalog
+
+
+def test_real_indexed_cli_in_existing_qprocess_then_error_preserves_display(window, monkeypatch, tmp_path):
+    from tests.test_dataset_statistics import dataset as fixture
+    from Application import statistics_index as index
+    from Application.dataset_statistics import calculate_statistics
+    _, tab = window
+    dataset = fixture.__wrapped__(tmp_path / "fixture")
+    root, reference, data = dataset
+    monkeypatch.setattr(index, "protect_directory", lambda p: p.chmod(0o700))
+    directory = tmp_path / "analytics"
+    directory.mkdir()
+    monkeypatch.setattr(index, "validate_storage_root", lambda p, **kw: index.path_identity(p))
+    # This is a synthetic GUI/CLI fixture under pytest's shared workspace. ACL
+    # policy has dedicated tests; give the child the same explicit fixture mock.
+    cli = Path(ui.__file__).resolve().parents[2]/"scripts/dataset_statistics.py"
+    bootstrap = tmp_path/"synthetic_statistics_cli.py"
+    bootstrap.write_text(
+        "import sys, runpy\n"
+        f"sys.path.insert(0, {str(cli.parent.parent)!r})\n"
+        "from Application import statistics_index as index\n"
+        "index.validate_storage_root=lambda p, **kw: index.path_identity(p)\n"
+        f"runpy.run_path({str(cli)!r}, run_name='__main__')\n", encoding="utf-8")
+    # Build on an earlier controlled local day; the actual child QProcess must
+    # still use INDEXED today, computing today's demographics from the snapshot.
+    original_capture = index.capture_sources
+
+    def earlier_capture(*args, **kwargs):
+        return original_capture(*args, **kwargs, calculated_at=datetime.fromisoformat("2000-01-01T12:00:00+00:00"))
+
+    with monkeypatch.context() as context:
+        context.setattr(index, "capture_sources", earlier_capture)
+        index.build_statistics_index(raw_root=root, catalog_path=reference, index_dir=directory, expected_bytes=1024**2)
+    expected = asdict(calculate_statistics(raw_root=root, catalog_path=reference))
+
+    class Process(QProcess):
+        def start(self, program, arguments):
+            arguments = [str(bootstrap) if Path(a).name == "dataset_statistics.py" else a for a in arguments]
+            super().start(program, arguments + ["--raw-root", str(root), "--catalog", str(reference),
+                "--slice-cache", str(tmp_path / "slices"), "--index-dir", str(directory), "--backend", "INDEXED"])
+
+    monkeypatch.setattr(ui, "QProcess", Process)
+    tab.start()
+    wait_until(lambda: tab.process is None)
+    assert tab.failure is None
+    displayed = cache.load_result(tab.cache_path)
+    assert displayed is not None
+    actual = deepcopy(displayed)
+    actual.pop("calculated_at")
+    expected.pop("calculated_at")
+    assert actual == json.loads(json.dumps(expected))
+    assert tab.export_button.isEnabled()
+    data["revision"] = "updated"
+    (root / "canonical/catalog.json").write_text(json.dumps(data))
+    tab.start()
+    wait_until(lambda: tab.process is None)
+    assert tab.failure
+    assert cache.load_result(tab.cache_path) == displayed
+    assert tab.export_button.isEnabled()
 
 
 def test_success_theme_switch_and_error_preserves_previous_result(window, monkeypatch, tmp_path):

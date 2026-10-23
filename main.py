@@ -90,10 +90,21 @@ class MainWindow(QMainWindow):
         create_data_loading_widgets_tab(self)
         create_analysis_filter_tab(self)
         create_dataset_statistics_tab(self)
+
         # Вкладка с обучением модели
         create_train_model_widgets_tab(self)
+
         # Вкладка с выгрузкой результатов
         create_result_widgets_tab(self)
+
+        # Перемещаем пользовательские настройки в самый конец
+        settings_index = self.tabs.indexOf(self.analysis_filter_tab)
+
+        if settings_index != -1:
+            self.tabs.tabBar().moveTab(
+                settings_index,
+                self.tabs.count() - 1
+            )
 
         # --- Кастомный нижний бар ---
         bottom_bar = QHBoxLayout()

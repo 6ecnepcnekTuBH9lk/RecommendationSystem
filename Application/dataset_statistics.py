@@ -354,7 +354,8 @@ def load_analysis_options(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CAT
 
 
 def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATALOG_PATH,
-                         progress=None, cancelled=None, analysis_filter=AnalysisFilter()):
+                         progress=None, cancelled=None, analysis_filter=AnalysisFilter(),
+                         backend="REFERENCE", index_dir=None, calculated_at=None):
     """Scan published canonical data once. No legacy fallback or silent skipping.
 
     Source Actions are date-scoped, independent of product selection; item totals
@@ -363,6 +364,17 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
     business orders/statuses use matching lines of unique first snapshots.
     Source dedup diagnostics remain independent of product selection.
     """
+    # One instant/local calendar date for the complete operation, including
+    # provenance/cache callers that already captured it before expensive work.
+    calculated_at = calculated_at or datetime.now(timezone.utc)
+    if backend != "REFERENCE":
+        if backend != "INDEXED":
+            raise ValueError("Unknown statistics backend")
+        from Application.statistics_query import calculate_indexed_statistics
+        return calculate_indexed_statistics(
+            raw_root=raw_root, catalog_path=catalog_path, index_dir=index_dir,
+            analysis_filter=analysis_filter, progress=progress, cancelled=cancelled,
+            calculated_at=calculated_at)
     root = Path(raw_root)
     if not (root / "canonical/catalog.json").is_file():
         raise ValueError("Нет canonical dataset. Сначала загрузите данные Mindbox.")
@@ -372,227 +384,247 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
             raise InterruptedError("Расчёт статистики отменён")
 
     with storage_lock(root):
-        check()
-        data, entries = _statistics_sources(root)
-        selection = MindboxSelectionConfig(**data["selection"])
-        merge = data["customer_merges"]
-        warnings = []
-        if merge and any(datetime.fromisoformat(e["since"]) < datetime.fromisoformat(merge["since"])
-                         or datetime.fromisoformat(e["until"]) > datetime.fromisoformat(merge["until"])
-                         for group in entries.values() for e in group):
-            warnings.append("CustomerMerges не покрывает весь период: canonical identity может быть неполной.")
+        return _calculate_statistics(root, catalog_path, progress, check, analysis_filter,
+                                     calculated_at=calculated_at)
 
-        def records(name, sources):
-            count = 0
-            for entry in sources:
+
+def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, input_source=None, *, calculated_at=None):
+    """One shared calculation driver. Indexed inputs preserve occurrence order.
+
+    The reference path retains the raw reader/adapters. The optional input source
+    supplies validated projections, never an alternative implementation of metrics.
+    Caller owns source locking/attestation and the lifetime of its connection.
+    """
+    calculated_at = calculated_at or datetime.now(timezone.utc)
+    as_of = calculated_at.astimezone().date()
+    check()
+    data, entries = _statistics_sources(root)
+    selection = MindboxSelectionConfig(**data["selection"])
+    merge = data["customer_merges"]
+    warnings = []
+    if merge and any(datetime.fromisoformat(e["since"]) < datetime.fromisoformat(merge["since"])
+                     or datetime.fromisoformat(e["until"]) > datetime.fromisoformat(merge["until"])
+                     for group in entries.values() for e in group):
+        warnings.append("CustomerMerges не покрывает весь период: canonical identity может быть неполной.")
+
+    def raw_records(name, sources):
+        count = 0
+        for entry in sources:
+            check()
+            directory = _source_directory(root, name, entry)
+            for raw in iter_export(name, input_dir=directory):
                 check()
-                directory = _source_directory(root, name, entry)
-                for raw in iter_export(name, input_dir=directory):
-                    check()
-                    count += 1
-                    if progress and (count == 1 or count % 10000 == 0):
-                        progress(f"{name}: {count:,}".replace(",", " "))
-                    yield raw
+                count += 1
+                if progress and (count == 1 or count % 10000 == 0):
+                    progress(f"{name}: {count:,}".replace(",", " "))
+                yield raw
 
-        identities = CustomerIdResolver(adapt_customer_merge(raw)
-                                        for raw in records("customer_merges", [merge] if merge else []))
-        builder = InteractionBuilder(selection.interaction_rules())
-        product_catalog, metadata, categories = _catalog_snapshot(catalog_path)
-        period = shared_intervals(*[[(entry["since"], entry["until"]) for entry in entries[name]]
-                                    for name in ("actions", "orders")])
-        if period:
-            analysis_filter = options_from_snapshot(metadata, period).normalize(analysis_filter)
-        products = ProductResolver(product_catalog)
+    records = input_source.records if input_source is not None else raw_records
+    identities = input_source.identities if input_source is not None else CustomerIdResolver(adapt_customer_merge(raw)
+                                    for raw in records("customer_merges", [merge] if merge else []))
+    builder = InteractionBuilder(selection.interaction_rules())
+    product_catalog, metadata, categories = _catalog_snapshot(catalog_path)
+    period = shared_intervals(*[[(entry["since"], entry["until"]) for entry in entries[name]]
+                                for name in ("actions", "orders")])
+    if period:
+        analysis_filter = options_from_snapshot(metadata, period).normalize(analysis_filter)
+    products = ProductResolver(product_catalog)
 
-        def matches(product):
-            if not analysis_filter.product_restricted:
-                return True
-            item = products.resolve(product, strict=False)
-            return analysis_filter.matches(metadata.get(item.item_id))
+    def matches(product):
+        if not analysis_filter.product_restricted:
+            return True
+        item = products.resolve(product, strict=False)
+        if input_source is not None:
+            return item.item_id in input_source.selected_items
+        return analysis_filter.matches(metadata.get(item.item_id))
 
-        product_aggregates = ProductAggregates(metadata, categories)
-        collected = _Interactions(products)
-        accepted_counts = Counter()
-        business_orders = business_lines = 0
-        action_types, statuses = Counter(), Counter()
-        action_users, order_users = set(), set()
-        accepted_action_users, accepted_order_users = set(), set()
-        with_product = missing_action_customer = raw_lines = 0
-        action_aggregates = ActionAggregates()
-        for raw in records("actions", entries["actions"]):
-            if analysis_filter.start_date is not None:
-                # Unmapped technical actions may have no timestamp; do not invent one.
-                occurred_at = timestamp(raw, "dateTimeUtc", required=False)
-                if occurred_at is None or not analysis_filter.contains(occurred_at):
-                    continue
-            name = adapt_action_system_name(raw)
-            action_types[name] += 1
-            with_product += bool(objects(raw, "products"))
-            source = identifier(raw, "customer.ids.mindboxId", required=False)
-            if source is not None:
-                action_users.add(identities.resolve(source))
-            else:
-                missing_action_customer += 1
-            if classify_action_system_name(name, builder.rules) is None:
-                builder.record_unmapped_action(name)
+    product_aggregates = ProductAggregates(metadata, categories)
+    collected = _Interactions(products)
+    accepted_counts = Counter()
+    business_orders = business_lines = 0
+    action_types, statuses = Counter(), Counter()
+    action_users, order_users = set(), set()
+    accepted_action_users, accepted_order_users = set(), set()
+    with_product = missing_action_customer = raw_lines = 0
+    action_aggregates = ActionAggregates()
+    for raw in records("actions", entries["actions"]):
+        if analysis_filter.start_date is not None:
+            # Unmapped technical actions may have no timestamp; do not invent one.
+            occurred_at = timestamp(raw, "dateTimeUtc", required=False)
+            if occurred_at is None or not analysis_filter.contains(occurred_at):
                 continue
-            action = adapt_action(raw, identities, product_namespaces=selection.action_product_namespaces)
-            try:
-                interactions = builder.from_action(action)
-            except InteractionBuildError:
-                # Valid mapped event with no products: not an import error.
+        name = adapt_action_system_name(raw)
+        action_types[name] += 1
+        with_product += bool(objects(raw, "products"))
+        source = identifier(raw, "customer.ids.mindboxId", required=False)
+        if source is not None:
+            action_users.add(identities.resolve(source))
+        else:
+            missing_action_customer += 1
+        if classify_action_system_name(name, builder.rules) is None:
+            builder.record_unmapped_action(name)
+            continue
+        action = (input_source.action(raw) if input_source is not None else
+                  adapt_action(raw, identities, product_namespaces=selection.action_product_namespaces))
+        try:
+            interactions = builder.from_action(action)
+        except InteractionBuildError:
+            # Valid mapped event with no products: not an import error.
+            continue
+        interactions = tuple(item for item in interactions if matches(item.product))
+        if not interactions:
+            continue
+        action_aggregates.add(action, interactions)
+        for interaction in interactions:
+            accepted_action_users.add(interaction.customer_id)
+            accepted_counts[interaction.interaction_type.value] += 1
+            resolved = collected.add(interaction)
+            if resolved is not None:
+                product_aggregates.add(resolved)
+
+    snapshots = input_source.snapshots() if input_source is not None else OrderSnapshots()
+    order_aggregates = OrderAggregates()
+    outside_period = fractional_lines = 0
+    for raw in records("orders", entries["orders"]):
+        ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
+        if not any(start <= ordered_at < end for start, end in period):
+            outside_period += 1
+            continue
+        if not analysis_filter.contains(ordered_at):
+            continue
+        eligible_lines = []
+        for line in objects(raw, "lines", required=True):
+            quantity = number(line, "quantity")
+            if quantity != quantity.to_integral_value():
+                fractional_lines += 1
                 continue
-            interactions = tuple(item for item in interactions if matches(item.product))
-            if not interactions:
-                continue
-            action_aggregates.add(action, interactions)
-            for interaction in interactions:
-                accepted_action_users.add(interaction.customer_id)
+            eligible_lines.append(line)
+        order_users.add(identities.resolve(identifier(raw, "customer.ids.mindboxId")))
+        for line in eligible_lines:
+            raw_lines += 1
+            if not analysis_filter.active:
+                statuses[identifier(line, "status.ids.externalId")] += 1
+        if not snapshots.accept(raw, diagnose=True):
+            continue
+        buyer = None
+        purchases = []
+        eligible_order = {**raw, "lines": eligible_lines}
+        lines = (input_source.order(raw) if input_source is not None else
+                 adapt_order(order_for_adapter(eligible_order), identities, product_namespaces=selection.order_product_namespaces))
+        lines = tuple(line for line in lines if matches(line.product))
+        if analysis_filter.product_restricted and not lines:
+            continue
+        business_orders += 1
+        business_lines += len(lines)
+        accepted_order_users.add(identities.resolve(identifier(raw, "customer.ids.mindboxId")))
+        for line in lines:
+            if analysis_filter.active:
+                statuses[line.line_status] += 1
+            interaction = builder.from_order_line(line)
+            if interaction is not None:
                 accepted_counts[interaction.interaction_type.value] += 1
                 resolved = collected.add(interaction)
                 if resolved is not None:
                     product_aggregates.add(resolved)
-
-        snapshots = OrderSnapshots()
-        order_aggregates = OrderAggregates()
-        outside_period = fractional_lines = 0
-        for raw in records("orders", entries["orders"]):
-            ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
-            if not any(start <= ordered_at < end for start, end in period):
-                outside_period += 1
-                continue
-            if not analysis_filter.contains(ordered_at):
-                continue
-            eligible_lines = []
-            for line in objects(raw, "lines", required=True):
-                quantity = number(line, "quantity")
-                if quantity != quantity.to_integral_value():
-                    fractional_lines += 1
-                    continue
-                eligible_lines.append(line)
-            order_users.add(identities.resolve(identifier(raw, "customer.ids.mindboxId")))
-            for line in eligible_lines:
-                raw_lines += 1
-                if not analysis_filter.active:
-                    statuses[identifier(line, "status.ids.externalId")] += 1
-            if not snapshots.accept(raw, diagnose=True):
-                continue
-            buyer = None
-            purchases = []
-            eligible_order = {**raw, "lines": eligible_lines}
-            lines = adapt_order(order_for_adapter(eligible_order), identities, product_namespaces=selection.order_product_namespaces)
-            lines = tuple(line for line in lines if matches(line.product))
-            if analysis_filter.product_restricted and not lines:
-                continue
-            business_orders += 1
-            business_lines += len(lines)
-            accepted_order_users.add(identities.resolve(identifier(raw, "customer.ids.mindboxId")))
-            for line in lines:
-                if analysis_filter.active:
-                    statuses[line.line_status] += 1
-                interaction = builder.from_order_line(line)
-                if interaction is not None:
-                    accepted_counts[interaction.interaction_type.value] += 1
-                    resolved = collected.add(interaction)
-                    if resolved is not None:
-                        product_aggregates.add(resolved)
-                    buyer = interaction.customer_id
-                    purchases.append(line)
-            if buyer is not None:
-                collected.purchase_orders[buyer] += 1
+                buyer = interaction.customer_id
+                purchases.append(line)
+        if buyer is not None:
+            collected.purchase_orders[buyer] += 1
+        if input_source is not None:
+            input_source.add_order(order_aggregates, raw, purchases)
+        else:
             order_aggregates.add(raw, purchases)
 
-        check()
-        calculated_at = datetime.now(timezone.utc)
-        customers, customer_coverage, genders, ages, mean_age, median_age = _customer_snapshot(
-            root, calculated_at.astimezone().date(), check, progress,
-            cohort=set(collected.users) if analysis_filter.active else None, identities=identities)
-        user_types = Counter(collected.user_types.values())
-        view_users = sum(n for mask, n in user_types.items() if mask & 1)
-        favorite_users = sum(n for mask, n in user_types.items() if mask & 2)
-        purchase_users = len(collected.purchase_orders)
-        repeat_buyers = sum(n >= 2 for n in collected.purchase_orders.values())
-        activity_labels = ("1", "2–5", "6–10", "11–25", "26–50", "51–100", "101+")
-        order_labels = ("1 заказ", "2 заказа", "3–5 заказов", "6–10 заказов", "11+ заказов")
-        activity = Counter(_bucket(n, (1, 5, 10, 25, 50, 100), activity_labels) for n in collected.users.values())
-        order_counts = Counter(_bucket(n, (1, 2, 5, 10), order_labels) for n in collected.purchase_orders.values())
-        interactions, resolution = builder.diagnostics, products.diagnostics
-        product_result = product_aggregates.result()
-        if any(product_result[f"resolved_{kind.value.lower()}_interactions"] != counts.resolved
-               for kind, counts in resolution.by_type.items()):
-            raise ValueError("Product aggregates disagree with resolution diagnostics")
-        if snapshots.conflicting:
-            warnings.append("Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.")
-        if missing_action_customer:
-            warnings.append("Часть Actions не содержит customer ID; число клиентов Actions учитывает только известные ID.")
-        if customers is None:
-            warnings.append("Canonical Customers отсутствует: число профилей неизвестно.")
-        if order_aggregates.currency_counts["mixed"] or order_aggregates.currency_counts["unknown"]:
-            warnings.append(CURRENCY_WARNING)
-        if fractional_lines:
-            warnings.append("Позиции заказов с нецелым количеством исключены из статистики.")
-        top = sorted(collected.items.items(), key=lambda pair: (-sum(pair[1].values()), pair[0]))[:30]
-        diagnostics = (
-            ("ambiguous_product_view_actions", action_aggregates.ambiguous),
-            ("unknown_currency_view_price_actions", action_aggregates.unknown_price_currency),
-            ("orders_outside_statistics_period", outside_period),
-            ("fractional_quantity_order_lines", fractional_lines),
-            ("mapped_view_actions", interactions.actions_view),
-            ("mapped_favorite_actions", interactions.actions_favorite),
-            ("unmapped_actions", interactions.actions_unmapped),
-            ("mapped_without_product", interactions.actions_malformed),
-            ("actions_without_customer_id", missing_action_customer),
-            ("unknown_candidate", collected.failures["unknown_candidate"]),
-            ("unsupported_namespace", collected.failures["unsupported_namespace"]),
-            ("invalid_id", collected.failures["invalid_id"]),
-            ("orders_unique", len(snapshots.fingerprints)),
-            ("orders_duplicate_identical", snapshots.identical),
-            ("orders_duplicate_conflicting", snapshots.conflicting),
-            ("unique_order_lines", interactions.order_lines_total),
-            ("purchase_lines", interactions.order_lines_purchase),
-            ("filtered_by_status", interactions.order_lines_filtered_by_status),
-        )
-        return DatasetStatistics(
-            calculated_at=calculated_at.isoformat(),
-            coverage=tuple(_coverage(name.title(), entries[name]) for name in ("actions", "orders"))
-                     + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
-            analysis_filter=analysis_filter,
-            source_actions=interactions.actions_total,
-            total_interactions=sum(accepted_counts.values()),
-            orders=business_orders if analysis_filter.active else snapshots.raw,
-            order_lines=business_lines if analysis_filter.active else raw_lines, customers=customers,
-            action_customers=len(accepted_action_users if analysis_filter.active else action_users),
-            order_customers=len(accepted_order_users if analysis_filter.active else order_users), interaction_users=len(collected.users),
-            actions_with_product=with_product, actions_without_product=interactions.actions_total - with_product,
-            view_interactions=accepted_counts["VIEW"], favorite_interactions=accepted_counts["FAVORITE"],
-            purchase_interactions=accepted_counts["PURCHASE"], purchase_quantity=str(collected.quantity),
-            mean_interactions=sum(accepted_counts.values()) / len(collected.users) if collected.users else 0.0,
-            median_interactions=float(median(collected.users.values())) if collected.users else 0.0,
-            unique_source_products=resolution.unique_source_product_keys,
-            unique_resolved_items=resolution.unique_resolved_catalog_items,
-            resolved_interactions=resolution.total.resolved, unresolved_interactions=resolution.total.unresolved,
-            resolution_rate=resolution.total.resolution_rate_percent,
-            action_types=tuple(sorted(action_types.items(), key=lambda pair: (-pair[1], pair[0]))),
-            line_statuses=tuple((name, count, name in builder.rules.purchase_line_statuses)
-                                for name, count in sorted(statuses.items())),
-            namespaces=tuple((name, counts.interactions_total, counts.resolved, counts.unresolved,
-                              counts.resolution_rate_percent) for name, counts in resolution.by_namespace.items()),
-            top_products=tuple((code, metadata[code].name, counts["VIEW"], counts["FAVORITE"],
-                                counts["PURCHASE"], sum(counts.values())) for code, counts in top),
-            diagnostics=diagnostics, warnings=tuple(warnings),
-            gender_distribution=genders, age_distribution=ages, mean_age=mean_age, median_age=median_age,
-            view_users=view_users, favorite_users=favorite_users, purchase_users=purchase_users,
-            view_purchase_users=sum(n for mask, n in user_types.items() if mask & 5 == 5),
-            favorite_purchase_users=sum(n for mask, n in user_types.items() if mask & 6 == 6),
-            all_interaction_type_users=user_types[7], repeat_buyers=repeat_buyers,
-            interaction_activity_distribution=_distribution(activity, activity_labels),
-            purchase_order_distribution=_distribution(order_counts, order_labels),
-            mean_orders_per_buyer=sum(collected.purchase_orders.values()) / purchase_users if purchase_users else 0.0,
-            median_orders_per_buyer=float(median(collected.purchase_orders.values())) if purchase_users else 0.0,
-            repeat_buyer_rate=100 * repeat_buyers / purchase_users if purchase_users else 0.0,
-            active_buyer_rate=100 * purchase_users / len(collected.users) if collected.users else 0.0,
-            orders_without_purchase=business_orders - order_aggregates.orders,
-            **order_aggregates.result(),
-            **action_aggregates.result(),
-            **product_result,
-        )
+    check()
+    customers, customer_coverage, genders, ages, mean_age, median_age = (input_source.customer_snapshot if input_source is not None else _customer_snapshot)(
+        root, as_of, check, progress,
+        cohort=set(collected.users) if analysis_filter.active else None, identities=identities)
+    user_types = Counter(collected.user_types.values())
+    view_users = sum(n for mask, n in user_types.items() if mask & 1)
+    favorite_users = sum(n for mask, n in user_types.items() if mask & 2)
+    purchase_users = len(collected.purchase_orders)
+    repeat_buyers = sum(n >= 2 for n in collected.purchase_orders.values())
+    activity_labels = ("1", "2–5", "6–10", "11–25", "26–50", "51–100", "101+")
+    order_labels = ("1 заказ", "2 заказа", "3–5 заказов", "6–10 заказов", "11+ заказов")
+    activity = Counter(_bucket(n, (1, 5, 10, 25, 50, 100), activity_labels) for n in collected.users.values())
+    order_counts = Counter(_bucket(n, (1, 2, 5, 10), order_labels) for n in collected.purchase_orders.values())
+    interactions, resolution = builder.diagnostics, products.diagnostics
+    product_result = product_aggregates.result()
+    if any(product_result[f"resolved_{kind.value.lower()}_interactions"] != counts.resolved
+           for kind, counts in resolution.by_type.items()):
+        raise ValueError("Product aggregates disagree with resolution diagnostics")
+    if snapshots.conflicting:
+        warnings.append("Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.")
+    if missing_action_customer:
+        warnings.append("Часть Actions не содержит customer ID; число клиентов Actions учитывает только известные ID.")
+    if customers is None:
+        warnings.append("Canonical Customers отсутствует: число профилей неизвестно.")
+    if order_aggregates.currency_counts["mixed"] or order_aggregates.currency_counts["unknown"]:
+        warnings.append(CURRENCY_WARNING)
+    if fractional_lines:
+        warnings.append("Позиции заказов с нецелым количеством исключены из статистики.")
+    top = sorted(collected.items.items(), key=lambda pair: (-sum(pair[1].values()), pair[0]))[:30]
+    diagnostics = (
+        ("ambiguous_product_view_actions", action_aggregates.ambiguous),
+        ("unknown_currency_view_price_actions", action_aggregates.unknown_price_currency),
+        ("orders_outside_statistics_period", outside_period),
+        ("fractional_quantity_order_lines", fractional_lines),
+        ("mapped_view_actions", interactions.actions_view),
+        ("mapped_favorite_actions", interactions.actions_favorite),
+        ("unmapped_actions", interactions.actions_unmapped),
+        ("mapped_without_product", interactions.actions_malformed),
+        ("actions_without_customer_id", missing_action_customer),
+        ("unknown_candidate", collected.failures["unknown_candidate"]),
+        ("unsupported_namespace", collected.failures["unsupported_namespace"]),
+        ("invalid_id", collected.failures["invalid_id"]),
+        ("orders_unique", len(snapshots.fingerprints)),
+        ("orders_duplicate_identical", snapshots.identical),
+        ("orders_duplicate_conflicting", snapshots.conflicting),
+        ("unique_order_lines", interactions.order_lines_total),
+        ("purchase_lines", interactions.order_lines_purchase),
+        ("filtered_by_status", interactions.order_lines_filtered_by_status),
+    )
+    return DatasetStatistics(
+        calculated_at=calculated_at.isoformat(),
+        coverage=tuple(_coverage(name.title(), entries[name]) for name in ("actions", "orders"))
+                 + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
+        analysis_filter=analysis_filter,
+        source_actions=interactions.actions_total,
+        total_interactions=sum(accepted_counts.values()),
+        orders=business_orders if analysis_filter.active else snapshots.raw,
+        order_lines=business_lines if analysis_filter.active else raw_lines, customers=customers,
+        action_customers=len(accepted_action_users if analysis_filter.active else action_users),
+        order_customers=len(accepted_order_users if analysis_filter.active else order_users), interaction_users=len(collected.users),
+        actions_with_product=with_product, actions_without_product=interactions.actions_total - with_product,
+        view_interactions=accepted_counts["VIEW"], favorite_interactions=accepted_counts["FAVORITE"],
+        purchase_interactions=accepted_counts["PURCHASE"], purchase_quantity=str(collected.quantity),
+        mean_interactions=sum(accepted_counts.values()) / len(collected.users) if collected.users else 0.0,
+        median_interactions=float(median(collected.users.values())) if collected.users else 0.0,
+        unique_source_products=resolution.unique_source_product_keys,
+        unique_resolved_items=resolution.unique_resolved_catalog_items,
+        resolved_interactions=resolution.total.resolved, unresolved_interactions=resolution.total.unresolved,
+        resolution_rate=resolution.total.resolution_rate_percent,
+        action_types=tuple(sorted(action_types.items(), key=lambda pair: (-pair[1], pair[0]))),
+        line_statuses=tuple((name, count, name in builder.rules.purchase_line_statuses)
+                            for name, count in sorted(statuses.items())),
+        namespaces=tuple((name, counts.interactions_total, counts.resolved, counts.unresolved,
+                          counts.resolution_rate_percent) for name, counts in resolution.by_namespace.items()),
+        top_products=tuple((code, metadata[code].name, counts["VIEW"], counts["FAVORITE"],
+                            counts["PURCHASE"], sum(counts.values())) for code, counts in top),
+        diagnostics=diagnostics, warnings=tuple(warnings),
+        gender_distribution=genders, age_distribution=ages, mean_age=mean_age, median_age=median_age,
+        view_users=view_users, favorite_users=favorite_users, purchase_users=purchase_users,
+        view_purchase_users=sum(n for mask, n in user_types.items() if mask & 5 == 5),
+        favorite_purchase_users=sum(n for mask, n in user_types.items() if mask & 6 == 6),
+        all_interaction_type_users=user_types[7], repeat_buyers=repeat_buyers,
+        interaction_activity_distribution=_distribution(activity, activity_labels),
+        purchase_order_distribution=_distribution(order_counts, order_labels),
+        mean_orders_per_buyer=sum(collected.purchase_orders.values()) / purchase_users if purchase_users else 0.0,
+        median_orders_per_buyer=float(median(collected.purchase_orders.values())) if purchase_users else 0.0,
+        repeat_buyer_rate=100 * repeat_buyers / purchase_users if purchase_users else 0.0,
+        active_buyer_rate=100 * purchase_users / len(collected.users) if collected.users else 0.0,
+        orders_without_purchase=business_orders - order_aggregates.orders,
+        **order_aggregates.result(),
+        **action_aggregates.result(),
+        **product_result,
+    )

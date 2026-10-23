@@ -233,7 +233,7 @@ def test_empty_sources_and_missing_canonical(dataset, tmp_path):
 
 def test_cli_result_and_structured_failure(dataset, capsys):
     root, catalog, _ = dataset
-    assert cli_main(["--raw-root", str(root), "--catalog", str(catalog)]) == 0
+    assert cli_main(["--raw-root", str(root), "--catalog", str(catalog), "--slice-cache", str(root/"slices")]) == 0
     messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert messages[-1]["event"] == "result"
     assert messages[-1]["value"]["source_actions"] == 7
