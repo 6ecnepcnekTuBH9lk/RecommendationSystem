@@ -1040,21 +1040,21 @@ def test_export_cache_result_and_dialog_cancel(window, sample_result, monkeypatc
     status, page_status = parent.status_label.text(), tab.status.text()
     calls = []
     def dialog(*args):
-        assert args[1] == 'Экспорт статистики' and args[3] == 'Excel (*.xlsx)'
-        assert args[2].endswith('Статистика_2026-09-24_09-47-28.xlsx')
+        assert args[1] == 'Экспорт статистики' and args[3] == 'ZIP (*.zip)'
+        assert args[2].endswith('Статистика_2026-09-24_09-47-28.zip')
         return '', ''
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', dialog)
-    monkeypatch.setattr(ui, 'export_statistics', lambda *args: calls.append(args))
+    monkeypatch.setattr(ui, 'export_statistics_bundle', lambda *args: calls.append(args))
     tab.export_button.click()
     assert not calls and tab._export_task is None
     assert parent.status_label.text() == status and tab.status.text() == page_status
     assert tab.export_button.isEnabled()
 
 
-@pytest.mark.parametrize('suffix', ['', '.xlsx', '.XLSX'])
+@pytest.mark.parametrize('suffix', ['', '.zip', '.ZIP'])
 def test_export_uses_displayed_snapshot_despite_new_filter(window, sample_result, monkeypatch, tmp_path, suffix):
     from Application.analysis_filter import AnalysisFilter
-    from Application.statistics_export import export_statistics
+    from Application.statistics_bundle_export import export_statistics_bundle
     from openpyxl import load_workbook
     parent, tab = window
     tab.render(sample_result)
@@ -1064,23 +1064,38 @@ def test_export_uses_displayed_snapshot_despite_new_filter(window, sample_result
     tab.pending = {**sample_result, 'total_interactions': 999}
     status = tab.status.text()
     destination = tmp_path / ('export' + suffix)
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(destination), 'Excel (*.xlsx)'))
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(destination), 'ZIP (*.zip)'))
     calls = []
     def save(result, path):
         assert result is tab.displayed_result is sample_result
         calls.append(path)
-        export_statistics(result, path)
-    monkeypatch.setattr(ui, 'export_statistics', save)
+        export_statistics_bundle(result, path)
+    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
     tab.export_button.click()
     wait_until(lambda: tab._export_task is None)
-    assert len(calls) == 1 and calls[0] == str(destination) + ('' if suffix else '.xlsx')
-    assert parent.status_label.text() == 'Статистика экспортирована'
+    assert len(calls) == 1 and calls[0] == str(destination) + ('' if suffix else '.zip')
+    assert parent.status_label.text() == 'Статистика экспортирована в ZIP: Excel + HTML'
     assert parent._status_reset_timer.interval() == 5000
     assert tab.status.text() == status and tab.cache_path.read_bytes() == before
     assert tab.export_button.isEnabled()
-    book = load_workbook(calls[0])
+    from io import BytesIO
+    from zipfile import ZipFile
+    with ZipFile(calls[0]) as archive:
+        assert archive.testzip() is None and len(archive.namelist()) == 2
+        html = archive.read(next(name for name in archive.namelist() if name.endswith('.html'))).decode('utf-8')
+        assert 'Новый фильтр' not in html
+        book = load_workbook(BytesIO(archive.read(next(name for name in archive.namelist() if name.endswith('.xlsx')))))
     metadata = {row[0]: row[1] for row in book['Сводка'].values if row[0]}
     assert metadata['Вид номенклатуры'] == 'Все значения'
+    # Ordinary KPI and monthly tables belong to the displayed snapshot too.
+    from test_statistics_export import kpi, find, assert_minimal_tables
+    from decimal import Decimal
+    assert kpi(book['Сводка'], 'Количество взаимодействий').value == sample_result['total_interactions']
+    assert assert_minimal_tables(book)
+    for month, _, rub, _, kzt in sample_result['order_monthly_dynamics']:
+        row = find(book['Заказы'], month[5:] + '.' + month[:4])
+        assert Decimal(str(row[2].value)) == Decimal(rub)
+        assert Decimal(str(row[4].value)) == Decimal(kzt)
     book.close()
 
 
@@ -1093,7 +1108,7 @@ def test_export_error_preserves_snapshot_cache_and_page_status(window, sample_re
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
     def failed(*args):
         raise error('synthetic')
-    monkeypatch.setattr(ui, 'export_statistics', failed)
+    monkeypatch.setattr(ui, 'export_statistics_bundle', failed)
     tab.export_button.click()
     wait_until(lambda: tab._export_task is None)
     assert parent.status_label.text() == 'Не удалось экспортировать статистику'
@@ -1135,7 +1150,7 @@ def test_export_runs_in_background_and_holds_original_snapshot(window, sample_re
         calls.append(result)
         entered.set()
         assert release.wait(10)
-    monkeypatch.setattr(ui, 'export_statistics', save)
+    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
     try:
         tab.export_button.click()
@@ -1148,6 +1163,33 @@ def test_export_runs_in_background_and_holds_original_snapshot(window, sample_re
         release.set()
     wait_until(lambda: tab._export_task is None)
     assert tab.export_button.isEnabled()
+
+
+def test_export_worker_can_finish_after_tab_destruction(window, sample_result, monkeypatch, tmp_path):
+    from threading import Event
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent, QThreadPool
+
+    _, tab = window
+    tab.render(sample_result)
+    entered, release, finished = Event(), Event(), Event()
+
+    def save(result, path):
+        entered.set()
+        assert release.wait(10)
+        finished.set()
+    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.zip'), ''))
+    try:
+        tab.export()
+        wait_until(entered.is_set)
+        tab.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert sip.isdeleted(tab)
+    finally:
+        release.set()
+    wait_until(finished.is_set)
+    assert QThreadPool.globalInstance().waitForDone(5000)
 
 @pytest.mark.parametrize('filtered', [False, True])
 def test_source_actions_only_technical_and_total_card(window, sample_result, filtered):

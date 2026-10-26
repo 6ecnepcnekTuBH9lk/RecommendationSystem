@@ -24,7 +24,7 @@ from Application.paths import ICONS_DIR, PROJECT_ROOT
 from Application.analysis_filter import AnalysisFilter
 from Application.analysis_filter_settings import load_filter
 from Application.settings.set_status import set_status_processing, schedule_status_reset, set_status_ok, set_status_error
-from Application.statistics_export import export_statistics, suggested_filename
+from Application.statistics_bundle_export import export_statistics_bundle, suggested_filename
 from Application.statistics_cache import CACHE_PATH, load_result, save_result, validate_result
 from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, WARNING_LABELS, DIAGNOSTIC_LABELS,
                                                  _date, _date_time, _calculation_message)
@@ -309,7 +309,7 @@ class _ExportTask(QRunnable):
 
     def run(self):
         try:
-            export_statistics(self.result, self.path)
+            export_statistics_bundle(self.result, self.path)
         except Exception:
             logging.getLogger(__name__).warning("Не удалось экспортировать статистику.")
             self.signals.finished.emit(False)
@@ -446,11 +446,11 @@ class DatasetStatisticsTab(QWidget):
             return
         directory = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
         path, _ = QFileDialog.getSaveFileName(self, "Экспорт статистики",
-                                            str(Path(directory) / suggested_filename(self.displayed_result)), "Excel (*.xlsx)")
+                                            str(Path(directory) / suggested_filename(self.displayed_result)), "ZIP (*.zip)")
         if not path or self.process is not None or self._export_task is not None:
             return
-        if not path.lower().endswith(".xlsx"):
-            path += ".xlsx"
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
         # Capture this snapshot; later render() replaces it rather than mutating it.
         self._export_task = _ExportTask(self.displayed_result, path)
         self._export_task.signals.finished.connect(self._export_finished)
@@ -461,7 +461,7 @@ class DatasetStatisticsTab(QWidget):
         self._export_task = None
         self._update_export_button()
         if success:
-            set_status_ok(self.window, "Статистика экспортирована")
+            set_status_ok(self.window, "Статистика экспортирована в ZIP: Excel + HTML")
         else:
             set_status_error(self.window, "Не удалось экспортировать статистику")
         schedule_status_reset(self.window, 5)

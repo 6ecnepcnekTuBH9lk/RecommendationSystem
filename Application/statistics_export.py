@@ -9,19 +9,27 @@ from pathlib import Path
 import tempfile
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from Application.statistics_presentation import (
     SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING, source_action_rows, source_action_quality_rows,
 )
 from Application.analysis_filter import AnalysisFilter
 from Application.statistics_cache import parse_timestamp
-from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, WARNING_LABELS, DIAGNOSTIC_LABELS,
+from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, DIAGNOSTIC_LABELS,
                                                  _date, _date_time, _calculation_message)
 
 
 SHEET_NAMES = ("Сводка", "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация")
+INK = "242424"
+HEADER_FILL = "D6E5F2"
+SECTION_FILL = "EAF1F7"
+BORDER_COLOR = "BDCCDA"
+PERCENT_FORMAT = '0.00"%"'  # Snapshot percentages are already on the 0..100 scale.
+MAX_ROW_HEIGHT = 96
+ROW_HEIGHT = 21
 
 
 @dataclass(frozen=True)
@@ -32,65 +40,109 @@ class _Numeric:
 
 def _decimal(value, *, money=True):
     number = Decimal(value)
-    places = max(0, -number.normalize().as_tuple().exponent)
+    places = len(format(number, "f").partition(".")[2].rstrip("0"))
     quantity_format = "#,##0" + ("." + "0" * places if places else "")
     return _Numeric(number, "#,##0.00" if money else quantity_format)
 
 
 class _Sheet:
-    """Small section writer; labels are literal text, never Excel formulas."""
+    """Plain metric/data tables; no charts, navigation or presentation tiles."""
 
     def __init__(self, worksheet):
         self.ws = worksheet
         self.row = 1
-        self.heading(worksheet.title)
-        self.ws.freeze_panes = "A2"
-        self.ws.sheet_view.showGridLines = False
-
-    def write(self, values, *, header=False, title=False):
-        height = 22
-        for column, value in enumerate(values, 1):
-            cell = self.ws.cell(self.row, column)
-            fmt = "#,##0.00" if isinstance(value, float) else "#,##0"
-            if isinstance(value, _Numeric):
-                value, fmt = value.value, value.number_format
-            cell.value = value
-            if isinstance(value, str):
-                cell.data_type = "s"
-                fmt = "@"
-            elif isinstance(value, date):
-                fmt = "dd.mm.yyyy"
-            cell.number_format = fmt
-            cell.font = Font(name="Calibri", size=12 if title else 11, bold=header or title,
-                             color="FFFFFF" if header else "202830")
-            cell.alignment = Alignment(vertical="top", wrap_text=True,
-                                       horizontal="left" if isinstance(value, str) else "right")
-            if header:
-                cell.fill = PatternFill("solid", fgColor="3D5266")
-            width = 48 if column == 1 else 32 if column == 2 else 23
+        self.max_columns = 2
+        self.ws.sheet_view.showGridLines = True
+        self.ws.sheet_view.zoomScale = 90
+        self.ws.sheet_properties.pageSetUpPr.fitToPage = True
+        self.ws.sheet_format.defaultRowHeight = ROW_HEIGHT
+        widths = (34, 48, 18, 20, 20, 20, 22)
+        if worksheet.title == "Товары":
+            widths = (18, 48, 18, 20, 20, 20, 22)
+        for column, width in enumerate(widths, 1):
             self.ws.column_dimensions[get_column_letter(column)].width = width
+        self.write(["KANZLER AI"], section=True)
+        self.write([worksheet.title], section=True)
+        self.row += 1
+
+
+    def _cell(self, row, column, value, *, header=False, fmt=None):
+        cell = self.ws.cell(row, column)
+        if isinstance(value, _Numeric):
+            value, fmt = value.value, value.number_format
+        cell.value = value
+        if isinstance(value, str):
+            cell.data_type = "s"  # Also protects =, +, -, @ labels and leading-zero SKUs.
+            fmt = "@"
+        cell.number_format = fmt or ("dd.mm.yyyy" if isinstance(value, date) else
+                                    "#,##0.00" if isinstance(value, float) else "#,##0")
+        cell.font = Font(name="Arial", size=10, bold=header, color=INK)
+        cell.alignment = Alignment(vertical="center", wrap_text=True,
+                                   horizontal="center" if header else "left" if isinstance(value, str) else "right")
+        if header:
+            cell.fill = PatternFill("solid", fgColor=HEADER_FILL)
+        side = Side(style="thin", color=BORDER_COLOR)
+        cell.border = Border(left=side, right=side, top=side, bottom=side)
+        return cell
+
+    def write(self, values, *, header=False, section=False, formats=None):
+        height = ROW_HEIGHT
+        for column, value in enumerate(values, 1):
+            fmt = (formats or {}).get(column)
+            if not header and column == 2 and isinstance(values[0], str) and values[0].startswith("Доля"):
+                fmt = PERCENT_FORMAT
+            cell = self._cell(self.row, column, value, header=header, fmt=fmt)
+            if section:
+                cell.font = Font(name="Arial", size=11, bold=True, color=INK)
+                cell.fill = PatternFill("solid", fgColor=SECTION_FILL)
+            value = cell.value
+            width = self.ws.column_dimensions[get_column_letter(column)].width
             if value is not None:
-                height = max(height, 16 * sum(max(1, math.ceil(len(line) / (width - 3)))
+                height = max(height, 13.5 * sum(max(1, math.ceil(len(line) / (width - 3)))
                                              for line in str(value).split("\n")) + 6)
-        self.ws.row_dimensions[self.row].height = height
+        self.ws.row_dimensions[self.row].height = min(48 if header else MAX_ROW_HEIGHT, height)
         self.row += 1
 
     def heading(self, title):
-        self.write([title], title=True)
-
-    def note(self, text):
-        self.write([text])
+        self.write([title], section=True)
         self.row += 1
 
     def table(self, headers, rows):
+        header = self.row
+        self.max_columns = max(self.max_columns, len(headers))
         self.write(headers, header=True)
+        formats = {i: PERCENT_FORMAT for i, label in enumerate(headers, 1) if "%" in label}
         for values in rows:
-            self.write(values)
+            self.write(values, formats=formats)
+        last = self.row - 1
+        if last > header and len(headers) > 1:
+            # Each independent block has its own filter, never one worksheet-wide AutoFilter.
+            name = f"Stats{self.ws.parent.index(self.ws) + 1}Block{header}"
+            table = Table(displayName=name, ref=f"A{header}:{get_column_letter(len(headers))}{last}")
+            table.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showFirstColumn=False,
+                showLastColumn=False, showRowStripes=False, showColumnStripes=False)
+            self.ws.add_table(table)
+        elif last == header:
+            self.write(["Нет данных для таблицы."])
         self.row += 1
+
+    def finish(self):
+        self.ws.freeze_panes = None
+        self.ws.print_title_rows = "1:2"
+        self.ws.print_options.horizontalCentered = False
+        wide = self.max_columns > 3
+        self.ws.page_setup.orientation = "landscape" if wide else "portrait"
+        self.ws.page_setup.paperSize = self.ws.PAPERSIZE_A3 if wide else self.ws.PAPERSIZE_A4
+        self.ws.page_setup.fitToWidth = 1
+        self.ws.page_setup.fitToHeight = 0
+        self.ws.page_margins.left = self.ws.page_margins.right = .25
+        self.ws.print_area = f"A1:{get_column_letter(self.max_columns)}{self.row}"
+        self.ws.oddFooter.center.text = "Страница &P из &N"
+
 
     def cards(self, values):
         self.table(["Показатель", "Значение"], [
-            (label, _Numeric(Decimal(str(value)), '0.00"%"') if label.startswith("Доля") and value is not None else value)
+            (label, _Numeric(Decimal(str(value)), PERCENT_FORMAT) if label.startswith("Доля") and value is not None else value)
             for label, value in values])
 
 
@@ -100,26 +152,24 @@ def _selection_values(values):
 
 def _summary(sheet, result):
     selection = AnalysisFilter.from_dict(result["analysis_filter"])
-    sheet.cards([
-        ("Дата и время расчета", _date_time(result["calculated_at"])),
+    metadata = [
         ("Период расчета", _calculation_message(result)),
-        ("Отбор, по которому рассчитана статистика", selection.summary()),
-        ("Дата начала", date.fromisoformat(selection.start_date) if selection.start_date else "Все значения"),
-        ("Дата окончания", date.fromisoformat(selection.end_date) if selection.end_date else "Все значения"),
+        ("Дата и время расчета", _date_time(result["calculated_at"])),
         ("Вид номенклатуры", _selection_values(selection.nomenclature_types)),
         ("Сезон", _selection_values(selection.collections)),
-    ])
+    ]
+    metadata = [(label, (f"Выбрано значений: {len(selection.nomenclature_types if label == 'Вид номенклатуры' else selection.collections)}. "
+                          "Полный список: лист «Техническая информация».")
+                 if label in ("Вид номенклатуры", "Сезон") and isinstance(value, str) and len(value) > 500 else value)
+                for label, value in metadata]
+    sheet.table(["Параметр отчёта", "Значение"], metadata)
     sheet.heading("Основные показатели")
-    sheet.cards([(label, result[key]) for label, key in (
+    main = (
         ("Количество взаимодействий", "total_interactions"), ("Количество заказов", "orders"),
-        ("Количество позиций в заказах", "order_lines"), ("Количество клиентов", "customers"))])
-    _warnings(sheet, result)
-
-
-def _warnings(sheet, result):
-    if result["warnings"]:
-        sheet.heading("Предупреждения")
-        sheet.table(["Предупреждение"], [(WARNING_LABELS.get(w, w),) for w in result["warnings"]])
+        ("Количество позиций в заказах", "order_lines"), ("Количество клиентов", "customers"),
+        ("Активные клиенты", "interaction_users"), ("Покупатели", "purchase_users"),
+        ("Повторные покупатели", "repeat_buyers"), ("Доля повторных покупателей", "repeat_buyer_rate"))
+    sheet.cards([(label, result[key] if result[key] is not None else "Нет данных") for label, key in main])
 
 
 def suggested_filename(result):
@@ -143,7 +193,8 @@ def export_statistics(result, path):
         _orders_page(sheets[2], result)
         _products_page(sheets[3], result)
         _clients_technical(sheets[4], sheets[5], result)
-        _warnings(sheets[5], result)
+        for sheet in sheets:
+            sheet.finish()
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".statistics-", suffix=".xlsx", delete=False) as stream:
             temporary = Path(stream.name)
             book.save(stream)
@@ -182,7 +233,6 @@ def _actions_page(layout, result):
     table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
            [(currency, n, _decimal(mean), _decimal(middle))
             for currency, n, mean, middle in result["view_price_statistics"]])
-
 
 
 def _orders_page(layout, result):
@@ -291,8 +341,6 @@ def _clients_technical(customers, technical, result):
                       ("Активные клиенты", result["interaction_users"]),
                       ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
     customers.heading("Портрет клиента")
-    if result["customers"] is None:
-        customers.note("Данные профилей клиентов отсутствуют. Пол и возраст недоступны.")
     customers.table(["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
     customers.cards([("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
     customers.table(["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
@@ -321,3 +369,40 @@ def _clients_technical(customers, technical, result):
               ("Распознанные взаимодействия", result["resolved_interactions"]),
               ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
               ("Доля распознанных, %", result["resolution_rate"])])
+    _additional_details(technical, result)
+
+
+def _additional_details(sheet, result):
+    """Retain aggregate DTO fields beyond the GUI's compact selection; no raw identities."""
+    sheet.heading("Дополнительные агрегаты snapshot")
+    sheet.cards([(label, result[key]) for label, key in (
+        ("Клиенты исходных Actions", "action_customers"), ("Клиенты исходных Orders", "order_customers"),
+        ("Просмотры с параметрами", "view_parameter_actions"),
+        ("Распознанные просмотры", "resolved_view_interactions"),
+        ("Распознанное избранное", "resolved_favorite_interactions"),
+        ("Распознанные позиции покупок", "resolved_purchase_interactions"),
+    )] + [(label, _decimal(result[key], money=False)) for label, key in (
+        ("Куплено единиц", "purchase_quantity"), ("Куплено распознанных единиц", "resolved_purchase_quantity"),
+        ("Среднее число единиц на заказ", "mean_purchase_units_per_order"),
+        ("Медиана числа единиц на заказ", "median_purchase_units_per_order"))])
+    for title, field in (("Способы оформления", "ordering_method_distribution"),
+                         ("Способы доставки", "delivery_type_distribution")):
+        sheet.heading(title)
+        sheet.table(["Значение", "Заказов", "Доля, %"], result[field])
+    sheet.heading("Стоимость доставки по валютам")
+    sheet.table(["Валюта", "Заказов с ценой доставки", "Сумма доставки", "Средняя стоимость", "Медианная стоимость"],
+                [(currency, count, *(_decimal(value) for value in amounts))
+                 for currency, count, *amounts in result["delivery_financials"]])
+    sheet.heading("Товары по всем взаимодействиям")
+    sheet.table(["Код", "Название", "Просмотры", "Избранное", "Покупки", "Все взаимодействия"], result["top_products"])
+    selection = AnalysisFilter.from_dict(result["analysis_filter"])
+    sheet.heading("Параметры отбора snapshot")
+    sheet.table(["Параметр отбора", "Выбранное значение"], [
+        (label, "Не указано" if value is None else value)
+        for label, values in (("Вид номенклатуры", selection.nomenclature_types), ("Сезон", selection.collections))
+        for value in (("Все значения",) if values is None else values)])
+    sheet.cards([
+        ("Отбор, по которому рассчитана статистика", selection.summary()),
+        ("Дата начала", date.fromisoformat(selection.start_date) if selection.start_date else "Все значения"),
+        ("Дата окончания", date.fromisoformat(selection.end_date) if selection.end_date else "Все значения"),
+    ])
