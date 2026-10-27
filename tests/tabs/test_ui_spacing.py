@@ -44,6 +44,11 @@ def row_for(widget):
                 if layout.indexOf(widget) >= 0)
 
 
+def tab_named(window, title):
+    index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == title)
+    return window.tabs.widget(index)
+
+
 def test_shared_spacing_scale():
     assert (metrics.COMPACT_SPACING, metrics.CONTROL_SPACING, metrics.BLOCK_SPACING,
             metrics.SECTION_SPACING, metrics.PAGE_MARGIN) == (4, 8, 12, 18, 8)
@@ -73,7 +78,7 @@ def test_action_rows_share_control_spacing(spacing_window, names):
 @pytest.mark.parametrize('dark', [False, True])
 def test_main_window_training_geometry_comes_from_global_qss_in_both_states(spacing_window, dark):
     window = spacing_window
-    window.tabs.setCurrentIndex(3)
+    window.tabs.setCurrentWidget(tab_named(window, 'Обучение модели'))
     window.apply_theme(dark)
     app = QApplication.instance()
     for running in (False, True, False):
@@ -112,13 +117,14 @@ def test_panel_and_section_metrics_and_form_spacing(spacing_window):
     for form in (analysis.date_form, analysis.product_form):
         assert form.horizontalSpacing() == form.verticalSpacing() == metrics.CONTROL_SPACING
         assert form.rowWrapPolicy() in (QFormLayout.RowWrapPolicy.DontWrapRows, QFormLayout.RowWrapPolicy.WrapAllRows)
-    train_top = w.tabs.widget(3).layout().itemAt(0).layout()
+    training = tab_named(w, 'Обучение модели')
+    train_top = training.layout().itemAt(0).layout()
     left, right = train_top.itemAt(0).widget().layout(), train_top.itemAt(2).widget().layout()
     assert left.contentsMargins() == right.contentsMargins() == page
     assert left.spacing() == metrics.SECTION_SPACING and right.spacing() == metrics.BLOCK_SPACING
-    forms = w.tabs.widget(3).findChildren(QFormLayout)
+    forms = training.findChildren(QFormLayout)
     assert len(forms) == 1 and forms[0].horizontalSpacing() == forms[0].verticalSpacing() == metrics.CONTROL_SPACING
-    history = w.tabs.widget(3).layout().itemAt(2).layout()
+    history = training.layout().itemAt(2).layout()
     assert history.contentsMargins() == QMargins(metrics.PAGE_MARGIN, metrics.BLOCK_SPACING, metrics.PAGE_MARGIN, metrics.PAGE_MARGIN)
     assert history.spacing() == metrics.BLOCK_SPACING
     assert w.dataset_statistics_tab.layout().contentsMargins() == page
@@ -139,14 +145,14 @@ def test_status_indicator_spacing_and_main_bar(spacing_window):
 
 def test_separator_layouts_keep_structural_zeros_and_results_cards_use_shared_spacing(spacing_window):
     w = spacing_window
-    for index in (0, 3):
-        root = w.tabs.widget(index).layout()
+    for page in (tab_named(w, 'Получение данных'), tab_named(w, 'Обучение модели')):
+        root = page.layout()
         top = root.itemAt(0).layout()
         assert root.contentsMargins() == top.contentsMargins() == QMargins()
         assert root.spacing() == top.spacing() == 0
         assert top.itemAt(1).widget().objectName() == 'vSeparator'
         assert root.itemAt(1).widget().objectName() == 'hSeparator'
-    root = w.tabs.widget(4).layout()
+    root = tab_named(w, 'Выгрузка результатов').layout()
     assert root.spacing() == 0 and root.contentsMargins() == QMargins()
     card = w.results_tab
     assert root.itemAt(0).widget() is card.scroll

@@ -152,9 +152,9 @@ def test_main_window_switch_preserves_tabs_and_customer_cards(app, monkeypatch):
         assert window.minimumWidth() < window.maximumWidth()
         assert window.minimumHeight() < window.maximumHeight()
         assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-            "Получение данных", "Пользовательские настройки", "Статистика и анализ", "Обучение модели", "Выгрузка результатов"]
+            "Получение данных", "Статистика и анализ", "Обучение модели", "Выгрузка результатов", "Пользовательские настройки"]
         assert window.results_tab.scroll.widget() is window.results_tab.page
-        assert not window.results_tab.export_button.isEnabled()
+        assert window.results_tab.export_button.isEnabled()  # Batch ZIP export is available before customer lookup.
         assert window.mb_progress.isTextVisible()
         assert window.mb_progress.text() == "Прогресс загрузки"
         assert window.btn_load.font().weight() >= QFont.Weight.DemiBold
@@ -196,7 +196,7 @@ def test_main_window_switch_preserves_tabs_and_customer_cards(app, monkeypatch):
         identity = CustomerModelIdentityResult("synthetic", "synthetic", CustomerModelIdentityStatus.MATCHED_EXACT, 1, "g")
         product = ProductContent(RawBprRecommendation(1, "synthetic SKU", 1.1234567), "Synthetic item")
         window.results_tab.apply_result(CustomerCardResult(ViewState.READY, "Synthetic ready", identity, "g", (product,)))
-        card = window.results_tab.product_grid.cards[0]
+        card = window.results_tab.raw_grid.cards[0]
         photo = card.photo
         for dark in (False, True):
             QTest.mouseClick(window.theme_switch, Qt.MouseButton.LeftButton)
@@ -204,7 +204,7 @@ def test_main_window_switch_preserves_tabs_and_customer_cards(app, monkeypatch):
             assert Path(os.environ["QTMATERIAL_THEME"]).name == (
                 "dark_custom.xml" if dark else "light_custom.xml"
             )
-            assert window.results_tab.product_grid.cards[0] is card
+            assert window.results_tab.raw_grid.cards[0] is card
             assert card.photo is photo and card.code.text() == "Код: synthetic SKU"
             assert card.content.recommendation.raw_score == 1.1234567
         assert all(label.property("class") == "sectionHeader" for label in window.mb_headings)

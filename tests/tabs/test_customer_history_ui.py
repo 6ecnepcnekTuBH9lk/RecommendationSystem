@@ -484,13 +484,14 @@ def test_views_without_product_are_not_rendered(card, empty_reference):
     variant = logical.variants[0]
     products = (ActionProductOccurrence(0, HistoryProductReference((), None)),) if empty_reference else ()
     event = replace(variant.event, details=replace(variant.event.details, products=products))
-    page = replace(page, events=(replace(logical, variants=(replace(variant, event=event),)),))
+    page = replace(page, events=(replace(logical, variants=(replace(variant, event=event),)),), next_cursor=None)
     display = present_history(page, K.VIEW)
     assert display.events == ((logical.event_key, ()),)
     card.tab._worker.history_lookup = lambda customer, **kwargs: page
     category(history, K.VIEW)
     assert not rows(history)
     assert not history.table.empty_label.isHidden()
+    assert history.property("historyStatus") == S.READY.value and history.cursor is None
 
 
 @pytest.mark.parametrize("status", [S.READY, S.PARTIAL, S.EMPTY])

@@ -92,8 +92,8 @@ def test_main_window_has_only_current_tabs_and_reference_section(app, monkeypatc
     try:
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert titles == [
-            "Получение данных", "Пользовательские настройки", "Статистика и анализ",
-            "Обучение модели", "Выгрузка результатов",
+            "Получение данных", "Статистика и анализ", "Обучение модели",
+            "Выгрузка результатов", "Пользовательские настройки",
         ]
         assert window.status_label.text() == "Готов к работе"
         assert window._status_reset_timer.isSingleShot()

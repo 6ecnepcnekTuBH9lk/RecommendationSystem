@@ -510,8 +510,9 @@ def test_bounded_sql_reader_query_count_and_cancel_in_sql_sort(tiny):
             list(iter_facts(db, lambda: False))
 
 
-def test_canonical_json_to_v2_to_dataset_with_late_identity_merges(tmp_path):
-    """Small actual adapters/index/publication, without mocked source inspection."""
+@pytest.fixture
+def canonical_history_with_late_merges(tmp_path):
+    """Actual portable adapters/identity/index, independent of native TEMP discovery."""
     from Application.mindbox.selection import DEFAULT_SELECTION
     root, cache = tmp_path / "canonical-input", tmp_path / "index"
     since, until, updated = "2022-01-01T00:00:00Z", "2024-04-01T00:00:00Z", "2024-05-01T00:00:00Z"
@@ -546,6 +547,13 @@ def test_canonical_json_to_v2_to_dataset_with_late_identity_merges(tmp_path):
     assert result.status is index.HistoryIndexStatus.READY
     paths = tuple(root.rglob("*.json"))
     before = {str(p): p.read_bytes() for p in paths}
+    return root, cache, paths, before
+
+
+@pytest.mark.skipif(resources.os.name != "nt", reason="Native Windows SQLite TEMP verification is required for publication")
+def test_canonical_json_to_v2_to_dataset_with_late_identity_merges(tmp_path, canonical_history_with_late_merges):
+    """Windows end-to-end publication; never mock or bypass TEMP verification."""
+    root, cache, paths, before = canonical_history_with_late_merges
     builder = build.PropensityDatasetBuilder(raw_root=root, cache_dir=cache, output_dir=tmp_path / "dataset")
     artifact = builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
     assert artifact.counts["customers"] == 1 and artifact.counts["rows"] == 3
@@ -555,6 +563,35 @@ def test_canonical_json_to_v2_to_dataset_with_late_identity_merges(tmp_path):
     assert training_row["features"]["placed_orders_30d"] == 0  # Retrospective: no past order.
     assert {str(p): p.read_bytes() for p in paths} == before
     assert not any(p.exists() for p in (Path(str(builder._path()) + s) for s in ("-wal", "-shm", "-journal")))
+
+
+def test_canonical_json_to_v2_preserves_late_identity_and_rows(canonical_history_with_late_merges):
+    """Portable core contract remains tested even where publication is unsupported."""
+    root, cache, paths, before = canonical_history_with_late_merges
+    service = index.CustomerHistoryIndexService(cache_dir=cache)
+    with index._read_index(service.index_path(raw_root=root)) as connection:
+        connection.row_factory = sqlite3.Row
+        facts = list(iter_facts(connection, lambda: False))
+    assert len(facts) == 2 and {customer for customer, _ in facts} == {"canonical-person"}
+    assert all(event.owned_by("canonical-person") for _, event in facts)
+    status = service.get_status(raw_root=root, verify_integrity=False)
+    plan = make_plan(CONFIG, status.coverage)
+    rows = list(customer_rows("canonical-person", (event for _, event in facts), plan, status.coverage, "synthetic-pseudonym"))
+    assert len(rows) == 3
+    assert [row.target for row in rows] == [1, 0, 0]
+    assert rows[0].features["placed_orders_30d"] == 0
+    assert {str(p): p.read_bytes() for p in paths} == before
+
+
+@pytest.mark.skipif(resources.os.name == "nt", reason="Unsupported native TEMP runtime contract is exercised on non-Windows")
+def test_canonical_dataset_publication_fails_closed_without_windows(tmp_path, canonical_history_with_late_merges):
+    root, cache, paths, before = canonical_history_with_late_merges
+    builder = build.PropensityDatasetBuilder(raw_root=root, cache_dir=cache, output_dir=tmp_path / "dataset")
+    with pytest.raises(PropensityDataError, match="^SQLITE_TEMP_UNVERIFIED$"):
+        builder.build(CONFIG, pseudonym_key=SECRET, allow_retrospective=True, min_free_bytes=resources.MIN_FREE_BYTES)
+    assert {str(p): p.read_bytes() for p in paths} == before
+    assert not list(builder.output_dir.rglob("manifest.json"))
+    assert not list(builder.output_dir.glob(".building-*"))
 
 
 @pytest.mark.parametrize("change", ["status", "quantity", "price_product", "line_identity"])
@@ -1309,6 +1346,15 @@ def test_native_runtime_mismatch_and_missing_api_fail_closed(monkeypatch):
     monkeypatch.setattr(resources, "_loaded_sqlite_dll", Mock(side_effect=OSError("private DLL path")))
     with pytest.raises(PropensityDataError, match="^SQLITE_TEMP_UNVERIFIED$"):
         resources.make_sqlite_temp_locator(Path("unused"))
+
+
+def test_nonwindows_temp_runtime_is_rejected_before_native_access(tmp_path, monkeypatch):
+    # Patch only this module's OS reference, not Python's global os.name/Path selection.
+    monkeypatch.setattr(resources, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(resources, "_extension_imports_sqlite_dll", lambda: pytest.fail("No PE/native access on non-Windows"))
+    with pytest.raises(PropensityDataError, match="^SQLITE_TEMP_UNVERIFIED$"):
+        resources.make_sqlite_temp_locator(tmp_path / "unused.sqlite")
+    assert not list(tmp_path.iterdir())
 
 @pytest.mark.parametrize("magic", [0x10B, 0x20B])
 @pytest.mark.parametrize("damage", ["none", "static", "truncated", "magic", "rva", "no_import", "short_optional", "sections"])

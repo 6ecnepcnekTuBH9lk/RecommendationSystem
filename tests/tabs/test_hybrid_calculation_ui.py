@@ -69,6 +69,7 @@ def test_tables_fill_viewport_and_wrap_without_scroll_or_lost_rows(explained, ap
     assert section.table.columnWidth(1) > section.table.columnWidth(0)
     assert section.features.columnWidth(1) > section.features.columnWidth(3)
     for label in section.formula.findChildren(QLabel):
+        assert label.hasHeightForWidth()
         assert label.height() >= label.heightForWidth(label.width())
 
 

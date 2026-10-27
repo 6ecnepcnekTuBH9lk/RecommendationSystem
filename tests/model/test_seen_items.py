@@ -87,6 +87,7 @@ def test_artifact_roundtrip_and_print_without_csv(tmp_path, monkeypatch, prepare
         model.user_emb.weight.fill_(1)
         model.item_emb.weight.copy_(torch.tensor([[3.], [2.], [1.]]))
     index = build_seen_items_index(prepared)
+    model._item_feature_snapshot = core._prepare_item_feature_snapshot(cfg, prepared.mappings, prepared.splits)
     core._save_artifacts(cfg, prepared.mappings, model, seen_items=index if embedded else None)
     _, checkpoint = core._load_artifacts()
     loaded = seen_items_from_checkpoint(checkpoint)

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from threading import Event, get_ident
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,6 +18,7 @@ from Application.theme.apply_theme import apply_app_theme
 from Application.tabs.customer_card_widgets import StateSection
 from tests.test_hybrid_recommendations import BASE, checked_purchases, raw_result, rules, write_catalog
 from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search, wait
+from tests.test_customer_propensity_service import prediction
 
 
 @pytest.fixture
@@ -36,6 +38,10 @@ def explained(card, tmp_path):
                             historical_items=historical, displayed_raw=raw.recommendations[:10], raw_status="READY")
     hybrid.get.side_effect = load
     card.service.hybrid = hybrid
+    card.service.propensity_service = SimpleNamespace(
+        get=lambda customer, **kwargs: replace(prediction(), canonical_customer_id=customer),
+        validate=lambda value, **kwargs: value,
+    )
     return card, raw, hybrid, threads
 
 
@@ -54,7 +60,8 @@ def test_three_sections_real_components_top10_and_row_selection(explained):
     assert tab.raw_grid.cards[0].collection.text() == "Коллекция: Весна-Лето 2025"
     assert tab.raw_grid.cards[0].photo.text() == "Нет фото"
     assert tab.propensity.message.isHidden()
-    assert tab.propensity.box.itemAt(2).widget().cards and len(tab.propensity.box.itemAt(2).widget().cards) == 4
+    assert len(tab.propensity_grid.cards) == 3
+    assert tab.propensity_grid.cards[0].value.text() == "12,35%"
     for widget in tab.raw_grid.cards:
         score = widget.content.recommendation.raw_score
         assert widget.score.text() == f"Исходный BPR-score: {score:.3f}"

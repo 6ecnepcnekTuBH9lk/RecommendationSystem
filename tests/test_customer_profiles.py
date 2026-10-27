@@ -82,6 +82,7 @@ def test_contacts_not_accepted_or_written_by_model_publication(tmp_path, monkeyp
     cfg = core.TrainConfig(data_dir=str(tmp_path), use_item_features=False)
     maps = Mappings({"source-secret": 0}, ["source-secret"], {"item": 0}, ["item"])
     model = core.BPRMF(1, 1, cfg.embedding_dim)
+    model._item_feature_snapshot = core._prepare_item_feature_snapshot(cfg, maps)
     with pytest.raises(TypeError):
         core._save_artifacts(cfg, maps, model, customer_contacts=index)
     assert not (tmp_path / "model").exists()

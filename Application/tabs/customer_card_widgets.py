@@ -13,7 +13,9 @@ def text_label(text="", *, style=None):
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(True)
     label.setMinimumWidth(0)
-    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    policy.setHeightForWidth(True)
+    label.setSizePolicy(policy)
     if style:
         label.setProperty("class", style)
     return label
