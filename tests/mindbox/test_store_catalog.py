@@ -161,13 +161,15 @@ def manual_pair(root, start, end, key):
 
 
 def test_manual_shared_collector_one_pass_precedence_and_migration(root, monkeypatch):
+    from Application.mindbox import manual_diagnostics
     api = publish(root, "orders", [raw("API", "API")])
     calls = []
     original = storage.iter_export
-    def observed(name, **kwargs):
-        calls.append(name)
-        yield from original(name, **kwargs)
-    monkeypatch.setattr(storage, "iter_export", observed)
+    original_records = manual_diagnostics.iter_json_records
+    def observed(path, root_key):
+        calls.append({'customerActions': 'actions', 'orders': 'orders'}[root_key])
+        yield from original_records(path, root_key)
+    monkeypatch.setattr(manual_diagnostics, "iter_json_records", observed)
     monkeypatch.setattr(stores, "iter_export", no_scan)
     manual_pair(root, 1, 3, "MANUAL")
     assert calls == ["actions", "orders"]

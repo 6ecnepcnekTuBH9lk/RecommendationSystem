@@ -23,6 +23,10 @@ TIMESTAMP_PATTERN = re.compile(r"(\d{8}_\d{6})(?:_(\d{3,}))?")
 class RawExportError(Exception):
     """Ошибка raw export без значений данных в диагностике."""
 
+    def __init__(self, *args, category="json_structure"):
+        super().__init__(*args)
+        self.category = category
+
 
 def part_files(directory: Path, export_name: str) -> list[Path]:
     pattern = re.compile(re.escape(export_name) + r"_part_(\d{3,})\.json")
@@ -30,7 +34,7 @@ def part_files(directory: Path, export_name: str) -> list[Path]:
     try:
         for path in directory.iterdir():
             if path.name.endswith((".tmp", ".download")):
-                raise RawExportError("Каталог содержит незавершённые части экспорта")
+                raise RawExportError("Каталог содержит незавершённые части экспорта", category="incomplete_export")
             match = pattern.fullmatch(path.name)
             if match:
                 if path.is_symlink() or not path.is_file():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
@@ -12,6 +13,7 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -25,14 +27,18 @@ import re
 from difflib import SequenceMatcher
 
 if __package__:
+    from .item_feature_config import normalize_feature_norm
+    from .item_feature_snapshot import ItemFeatureSnapshot, encode_features, feature_parameters, prepare_snapshot
     from .interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
     from .seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
-    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics
+    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics, single_target_metrics
     from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
+    from item_feature_config import normalize_feature_norm
+    from item_feature_snapshot import ItemFeatureSnapshot, encode_features, feature_parameters, prepare_snapshot
     from interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
     from seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
-    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics
+    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics, single_target_metrics
     from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
 
 # --- make CPU BLAS usage predictable (often important for UI apps on Windows) ---
@@ -302,6 +308,9 @@ def _train_test_split_last_per_user(events: pd.DataFrame, cfg: TrainConfig, num_
     dated_events = events_sorted[events_sorted["ts"].notna()]
     last = dated_events.groupby("u_idx").tail(1)
     last = last[last["u_idx"].isin(eligible_users)]
+    # Retain all events for users whose final candidate item has appeared before.
+    item_counts = events_sorted.groupby(["u_idx", "i_idx"])["i_idx"].transform("size")
+    last = last[item_counts.loc[last.index].eq(1)]
 
     eval_users = last["u_idx"].astype(int).to_numpy()
     eval_items = last["i_idx"].astype(int).to_numpy()
@@ -332,13 +341,12 @@ def _sample_batch(
         batch_size: int,
         rng: np.random.Generator,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select positive pairs uniformly; return their confidence weights for loss."""
 
     if len(train_pairs) <= batch_size:
         return train_pairs[:, 0], train_pairs[:, 1], train_weights.astype(np.float64)
 
-    w = train_weights.astype(np.float64)
-    w = w / (w.sum() + 1e-12)
-    idx = rng.choice(len(train_pairs), size=batch_size, replace=False, p=w)
+    idx = rng.choice(len(train_pairs), size=batch_size, replace=False)
     return train_pairs[idx, 0], train_pairs[idx, 1], train_weights[idx].astype(np.float64)
 
 
@@ -350,25 +358,40 @@ def _sample_negatives(
         n_neg: int = 10,
         max_tries: int = 25,
 ) -> np.ndarray:
+    """Uniform unseen negatives with replacement; fail if a user has no candidates."""
 
     n_neg = max(1, int(n_neg))
     if len(users) == 0:
         return np.zeros((0, n_neg), dtype=np.int64)
 
+    positives = {int(u): list(user_pos_train[int(u)]) for u in users}
+    if any(len(pos) >= num_items for pos in positives.values()):
+        raise ValueError("No candidate negative items for a training user")
     neg = rng.integers(0, num_items, size=(len(users), n_neg), dtype=np.int64)
 
-    # rejection sampling (keep it deterministic given rng)
-    for _ in range(max_tries):
+    # Check the initial draw and every redraw, including the last retry.
+    max_tries = max(0, max_tries)
+    for attempt in range(max_tries + 1):
         bad = np.zeros_like(neg, dtype=bool)
         for bi, u in enumerate(users):
-            pos = user_pos_train[int(u)]
+            pos = positives[int(u)]
             if pos:
-                # np.isin is fast for small n_neg; convert set -> list once per user
-                bad[bi] = np.isin(neg[bi], list(pos))
+                bad[bi] = np.isin(neg[bi], pos)
         if not bad.any():
+            return neg
+        if attempt == max_tries:
             break
         neg[bad] = rng.integers(0, num_items, size=int(bad.sum()), dtype=np.int64)
 
+    # Only unresolved rows need a complement; reuse it for repeated users in this call.
+    candidates = {}
+    for bi, u in enumerate(users):
+        if not bad[bi].any():
+            continue
+        user = int(u)
+        if user not in candidates:
+            candidates[user] = np.setdiff1d(np.arange(num_items, dtype=np.int64), positives[user], assume_unique=True)
+        neg[bi, bad[bi]] = rng.choice(candidates[user], size=int(bad[bi].sum()), replace=True)
     return neg
 
 
@@ -380,61 +403,43 @@ def _build_item_feature_matrix(
         cfg: TrainConfig,
 ) -> Tuple[Dict[str, int], np.ndarray]:
 
-    num_items = len(maps.idx2item)
-    max_f = int(getattr(cfg, "max_item_features", 32))
-    item_feat_mat = np.full((num_items, max_f), fill_value=-1, dtype=np.int64)
-
-    if not bool(getattr(cfg, "use_item_features", True)):
-        return {}, item_feat_mat
-
     nom_path = os.path.join(data_dir, "nomenclature.csv")
-    if not os.path.isfile(nom_path):
-        return {}, item_feat_mat
+    catalog = _read_csv_pipe(nom_path) if cfg.use_item_features and os.path.isfile(nom_path) else None
+    return encode_features(catalog, maps.idx2item, cfg)
 
-    nom = _read_csv_pipe(nom_path)
 
-    if "КодНоменклатуры" not in nom.columns:
-        return {}, item_feat_mat
+def _validate_feature_config(cfg):
+    cfg.feature_norm = normalize_feature_norm(cfg.feature_norm)
+    if type(cfg.max_item_features) is not int or cfg.max_item_features < 1:
+        raise ValueError("max_item_features must be a positive integer")
+    for name in ("feature_scale", "feature_dropout", "feat_reg_mult"):
+        value = getattr(cfg, name)
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if not 0 <= cfg.feature_dropout <= 1:
+        raise ValueError("feature_dropout must be between 0 and 1")
 
-    cols = [c for c in getattr(cfg, "item_feature_cols", []) if c in nom.columns]
-    if not cols:
-        return {}, item_feat_mat
 
-    nom = nom[["КодНоменклатуры"] + cols].copy()
-    nom["КодНоменклатуры"] = nom["КодНоменклатуры"].astype(str)
-    nom = nom.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
+def _prepare_item_feature_snapshot(cfg, maps, splits=None):
+    _validate_feature_config(cfg)
+    path = os.path.join(cfg.data_dir, "nomenclature.csv")
+    catalog = _read_csv_pipe(path) if os.path.isfile(path) else None
+    return prepare_snapshot(catalog, maps.idx2item, cfg, splits)
 
-    feat2idx: Dict[str, int] = {}
 
-    def _get_fid(token: str) -> int:
-        fid = feat2idx.get(token)
-        if fid is None:
-            fid = len(feat2idx)
-            feat2idx[token] = fid
-        return fid
-
-    for i_idx, code in enumerate(maps.idx2item):
-        if code not in nom.index:
-            continue
-        row = nom.loc[code]
-        tokens: List[str] = []
-        for c in cols:
-            v = row.get(c)
-            if v is None:
-                continue
-            v = str(v).strip()
-            if not v or v.lower() in ("nan", "none", "null", "-"):
-                continue
-            tokens.append(f"{c}={v}")
-
-        if not tokens:
-            continue
-        # cap
-        tokens = tokens[:max_f]
-        ids = [_get_fid(t) for t in tokens]
-        item_feat_mat[i_idx, :len(ids)] = np.asarray(ids, dtype=np.int64)
-
-    return feat2idx, item_feat_mat
+def _saved_feature_payload(cfg, maps, model):
+    _validate_feature_config(cfg)
+    snapshot = getattr(model, "_item_feature_snapshot", None)
+    if not isinstance(snapshot, ItemFeatureSnapshot):
+        raise ValueError("Missing training item feature snapshot; refusing to rebuild from catalog")
+    if snapshot.item_codes != tuple(maps.idx2item) or snapshot.parameters != feature_parameters(cfg):
+        raise ValueError("Training item feature snapshot/config/mappings mismatch")
+    if getattr(model, "use_item_features", False):
+        if (model.feature_scale != cfg.feature_scale
+                or normalize_feature_norm(model.feature_norm, legacy=True) != cfg.feature_norm
+                or model.feature_dropout != cfg.feature_dropout):
+            raise ValueError("Model feature parameters differ from training snapshot")
+    return snapshot
 
 
 class BPRMF(nn.Module):
@@ -461,7 +466,7 @@ class BPRMF(nn.Module):
             self.register_buffer("item_feat_mat", item_feat_mat.long())
             self.feature_dropout = float(feature_dropout)
             self.feature_scale = float(feature_scale)
-            self.feature_norm = str(feature_norm).strip().lower()
+            self.feature_norm = normalize_feature_norm(feature_norm, legacy=True)
         else:
             self.feat_emb = None
             self.item_feat_mat = None
@@ -552,6 +557,9 @@ def _eval_bprmf_recall_ndcg(
         k: int,
         device: torch.device,
 ) -> Tuple[float, float]:
+    for user, item in zip(splits.eval_users, splits.eval_items):
+        if int(item) in splits.user_pos_train[int(user)]:
+            raise PreparedDataError("Evaluation targets must be unseen in training")
     if len(splits.eval_users) == 0:
         return 0.0, 0.0
 
@@ -571,34 +579,24 @@ def _eval_bprmf_recall_ndcg(
         u_emb = model.user_emb(u_t)  # [B, d]
         scores = u_emb @ item_emb.t()  # [B, I]
 
-        # filter train positives (so we don't recommend already seen items)
-        # IMPORTANT: if the evaluation target was also seen in train (repeat interaction),
-        # we do NOT mask the target item so it remains rankable.
+        # Every train positive is excluded; valid targets are naturally unseen.
         for bi, uu in enumerate(u):
-            target = int(g[bi])
             pos = splits.user_pos_train[int(uu)]
             if pos:
-                if target in pos:
-                    idx_list = [x for x in pos if x != target]
-                else:
-                    idx_list = list(pos)
-
-                if idx_list:
-                    idx = torch.tensor(idx_list, dtype=torch.long, device=device)
-                    scores[bi, idx] = -1e9
+                idx = torch.tensor(list(pos), dtype=torch.long, device=device)
+                scores[bi, idx] = -torch.inf
 
         topk_idx = torch.topk(scores, k=min(k, num_items), dim=1).indices.cpu().numpy()
 
         for bi in range(len(u)):
             target = int(g[bi])
             row = topk_idx[bi]
-            if target in row:
-                rank = int(np.where(row == target)[0][0]) + 1
-                recalls.append(1.0)
-                ndcgs.append(1.0 / np.log2(rank + 1))
-            else:
-                recalls.append(0.0)
-                ndcgs.append(0.0)
+            # topk can include masked tails when K exceeds the unseen candidate count.
+            row = row[~np.isin(row, list(splits.user_pos_train[int(u[bi])]))]
+            rank = int(np.where(row == target)[0][0]) + 1 if target in row else None
+            recall, ndcg = single_target_metrics(rank)
+            recalls.append(recall)
+            ndcgs.append(ndcg)
 
     return float(np.mean(recalls)), float(np.mean(ndcgs))
 
@@ -617,12 +615,23 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
 
 def train_prepared_data_with_metrics(
     cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
+    *, epoch_observer=None, model_initializer=None, batch_observer=None,
 ) -> Tuple[BPRMF, Splits, TrainingRunMetrics]:
-    return _train_prepared_data_impl(cfg, prepared_data, device)
+    """Optional research observer receives (model, immutable epoch metrics).
+
+    The observer must only read model state. It runs without gradients after a
+    completed epoch; it cannot select a checkpoint or control early stopping.
+    """
+    # Research initialization runs before optimizer construction. Batch observers
+    # receive copies and cannot change the sampler's arrays. Defaults are inert.
+    return _train_prepared_data_impl(cfg, prepared_data, device, epoch_observer=epoch_observer,
+                                     model_initializer=model_initializer, batch_observer=batch_observer)
 
 
-def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device):
+def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
+                              *, epoch_observer=None, model_initializer=None, batch_observer=None):
     """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
+    _validate_feature_config(cfg)
     validate_prepared_data(prepared_data)
     maps, splits = prepared_data.mappings, prepared_data.splits
     # keep PyTorch thread usage stable (important for desktop apps)
@@ -633,7 +642,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     num_items = len(maps.idx2item)
 
     # build item side-features from Номенклатура.csv (no cold-start)
-    feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
+    feature_snapshot = _prepare_item_feature_snapshot(cfg, maps, splits)
+    feat2idx, item_feat_np = feature_snapshot.vocabulary(), feature_snapshot.matrix
     item_feat_t = torch.tensor(item_feat_np, dtype=torch.long, device=device)
 
     # --- diagnostics: verify item features are actually used ---
@@ -651,8 +661,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     else:
         status = "не включены, не применяются"
 
-    print(f"[{_now()}] Признаки номенклатуры: вид номенклатуры, вид ассортимента, марка, коллекция, сезон носки, пол, "
-          f"группа составов, категория на сайте, стилевая группа --> {status}\n")
+    print(f"[{_now()}] Признаки номенклатуры --> {status}")
+    print("Диагностика признаков: " + feature_snapshot.diagnostics_json + "\n")
 
     # --- ЛОГ: входные параметры (итоговый cfg, реально ушедший в обучение) ---
     def _fmt(v):
@@ -668,8 +678,7 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     metric_raw = str(getattr(cfg, "early_stop_metric", "ndcg")).strip().lower()
     metric_norm = metric_raw if metric_raw in ("ndcg", "recall") else "ndcg"
 
-    feat_norm_raw = str(getattr(cfg, "feature_norm", "mean")).strip().lower()
-    feat_norm_norm = feat_norm_raw if feat_norm_raw in ("sum", "mean", "sqrt") else "mean"
+    feat_norm_norm = normalize_feature_norm(cfg.feature_norm)
 
     print(f"[{_now()}] Входные параметры:")
     for name, val in [
@@ -710,6 +719,10 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
         feature_scale=float(getattr(cfg, "feature_scale", 0.2)),
         feature_norm=str(getattr(cfg, "feature_norm", "mean")),
     ).to(device)
+    model._item_feature_snapshot = feature_snapshot
+    if model_initializer is not None:
+        with torch.no_grad():
+            model_initializer(model)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     rng = np.random.default_rng(cfg.seed)
 
@@ -718,7 +731,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     if metric_name not in ("ndcg", "recall"):
         metric_name = "ndcg"
 
-    use_early_stop = bool(getattr(cfg, "early_stop", True))
+    has_internal_eval = len(splits.eval_users) > 0
+    use_early_stop = bool(getattr(cfg, "early_stop", True)) and has_internal_eval
     patience = max(1, int(getattr(cfg, "early_stop_patience", 2)))
     min_delta = float(getattr(cfg, "early_stop_min_delta", 1e-4))
     min_epochs = max(1, int(getattr(cfg, "early_stop_min_epochs", 1)))
@@ -727,6 +741,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
     bad_epochs = 0
     history = []
     early_stopped = False
+    if not has_internal_eval:
+        print(f"[{_now()}] Внутренняя оценка отсутствует: ранняя остановка отключена, возвращается последняя эпоха.")
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -737,6 +753,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
             u_pos, i_pos, w_pos = _sample_batch(splits.train_pairs, splits.train_weights, cfg.batch_size, rng)
             n_neg = max(1, int(getattr(cfg, "n_neg", 10)))
             i_neg = _sample_negatives(u_pos, num_items, splits.user_pos_train, rng, n_neg=n_neg)
+            if batch_observer is not None:
+                batch_observer(u_pos.copy(), i_pos.copy(), i_neg.copy())
 
             u_t = torch.tensor(u_pos, dtype=torch.long, device=device)
             ip_t = torch.tensor(i_pos, dtype=torch.long, device=device)
@@ -767,10 +785,25 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
         recall, ndcg = _eval_bprmf_recall_ndcg(model, splits, num_items, cfg.topk, device)
         history.append(TrainingEpochMetrics(epoch, total_loss / steps, float(recall), float(ndcg)))
 
+        evaluation_label = (f"RECALL@{cfg.topk}={recall:.4f}  NDCG@{cfg.topk}={ndcg:.4f}"
+                            if has_internal_eval else "внутренняя оценка отсутствует")
         print(
             f"[{_now()}] Итерация {epoch} из {cfg.epochs}: "
-            f"loss={total_loss / steps:.4f}  RECALL@{cfg.topk}={recall:.4f}  NDCG@{cfg.topk}={ndcg:.4f}"
+            f"loss={total_loss / steps:.4f}  {evaluation_label}"
         )
+
+        if epoch_observer is not None:
+            was_training = model.training
+            try:
+                with torch.no_grad():
+                    epoch_observer(model, history[-1])
+            finally:
+                model.train(was_training)
+
+        # Empty-evaluation zero placeholders in history are not monitored metrics.
+        # Preserve the existing -1 best-observation sentinel and the full budget.
+        if not has_internal_eval:
+            continue
 
         cur_metric = ndcg if metric_name == "ndcg" else recall
         improved = cur_metric > best["metric"] + min_delta
@@ -778,7 +811,9 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
         if improved:
             best["metric"] = float(cur_metric)
             best["RECALL"], best["NDCG"], best["epoch"] = float(recall), float(ndcg), epoch
-            best["state"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            if use_early_stop:
+                # CPU .cpu() can alias model storage; best checkpoints must not.
+                best["state"] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             bad_epochs = 0
         else:
             if use_early_stop and epoch >= min_epochs:
@@ -791,13 +826,14 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, 
                     )
                     break
 
-    if best["state"] is not None:
+    if use_early_stop and best["state"] is not None:
         model.load_state_dict(best["state"])
 
-    print(
-        f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
-        f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
-    )
+    if has_internal_eval:
+        print(
+            f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
+            f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
+        )
     metrics = TrainingRunMetrics(len(history), best["epoch"], best["RECALL"], best["NDCG"],
                                  metric_name, early_stopped, tuple(history))
     return model, splits, metrics
@@ -811,6 +847,44 @@ _MODEL_REQUIRED_CHECKPOINT_KEYS = {
     "num_items",
     "state_dict",
 }
+
+
+def _validate_item_feature_artifacts(checkpoint):
+    config, state = checkpoint["config"], checkpoint["state_dict"]
+    if not isinstance(config, dict) or not isinstance(state, dict):
+        raise ValueError("Invalid feature config/state")
+    if "feature_norm" in config:
+        normalize_feature_norm(config["feature_norm"], legacy=True)
+    features = checkpoint.get("feat2idx", {})
+    if (not isinstance(features, dict)
+            or any(not isinstance(k, str) or not k or type(v) is not int for k, v in features.items())
+            or sorted(features.values()) != list(range(len(features)))):
+        raise ValueError("Invalid feature mapping")
+    matrix = checkpoint.get("item_feat_mat")
+    if matrix is not None:
+        if (not isinstance(matrix, np.ndarray) or matrix.dtype != np.dtype("int64")
+                or matrix.ndim != 2 or matrix.shape[0] != checkpoint["num_items"]
+                or matrix.shape[1] < 1 or np.any(matrix < -1) or np.any(matrix >= len(features))):
+            raise ValueError("Invalid feature matrix")
+    if features:
+        saved_matrix = state.get("item_feat_mat")
+        weights = state.get("feat_emb.weight")
+        if (matrix is None or not isinstance(saved_matrix, torch.Tensor)
+                or saved_matrix.dtype != torch.int64
+                or not np.array_equal(matrix, saved_matrix.detach().cpu().numpy())
+                or not isinstance(weights, torch.Tensor) or weights.dtype != torch.float32
+                or weights.shape != (len(features), config.get("embedding_dim")) or not torch.isfinite(weights).all()):
+            raise ValueError("Inconsistent saved item features")
+        scale = config.get("feature_scale", 0.2)
+        if type(scale) not in (int, float) or not math.isfinite(scale):
+            raise ValueError("Invalid saved feature configuration")
+        normalize_feature_norm(config.get("feature_norm", "mean"), legacy=True)
+    elif "feat_emb.weight" in state or "item_feat_mat" in state:
+        raise ValueError("Feature state without a vocabulary")
+    if "max_item_features" in checkpoint and matrix is not None:
+        if checkpoint["max_item_features"] != matrix.shape[1]:
+            raise ValueError("Saved max_item_features differs from matrix width")
+
 
 
 def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
@@ -839,6 +913,7 @@ def _validate_model_artifacts(mappings: dict, checkpoint: dict) -> None:
         raise ValueError(
             "Model artifact mismatch: len(idx2item) does not equal num_items"
         )
+    _validate_item_feature_artifacts(checkpoint)
     seen_items_from_checkpoint(checkpoint)
     analytics_from_checkpoint(checkpoint)
 
@@ -927,9 +1002,10 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
             f.flush()
             os.fsync(f.fileno())
 
+        snapshot = _saved_feature_payload(cfg, maps, model)
         ckpt = {
             "model_type": "bprmf",
-            "config": cfg.__dict__,
+            "config": deepcopy(cfg.__dict__),
             "num_users": len(maps.idx2user),
             "num_items": len(maps.idx2item),
             "state_dict": model.state_dict(),
@@ -940,47 +1016,13 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
         if analytics is not None:
             ckpt["interaction_analytics"] = analytics.to_checkpoint()
 
-        # save item features for consistent inference/evaluation
-        feat2idx, item_feat_np = _build_item_feature_matrix(cfg.data_dir, maps, cfg)
-        ckpt["feat2idx"] = feat2idx
-        ckpt["item_feat_mat"] = item_feat_np
-        ckpt["item_feature_cols"] = getattr(cfg, "item_feature_cols", [])
-        ckpt["max_item_features"] = int(getattr(cfg, "max_item_features", 32))
-
-        # --- сохраняем метаданные товаров из Номенклатура.csv на момент обучения ---
-        # Нужно для маппинга "старый сезон -> актуальная коллекция" при экспорте рекомендаций.
-        train_item_meta: Dict[str, Dict[str, str]] = {}
-        nom_path = os.path.join(cfg.data_dir, "nomenclature.csv")
-        if os.path.isfile(nom_path):
-            nom = _read_csv_pipe(nom_path)
-            nom.columns = [str(c).replace("\ufeff", "").strip() for c in nom.columns]
-
-            if "КодНоменклатуры" not in nom.columns:
-                raise ValueError(
-                    "Номенклатура.csv не содержит обязательную колонку "
-                    "КодНоменклатуры"
-                )
-
-            want_cols = [
-                "КодНоменклатуры", "Коллекция", "НазваниеНаСайте", "Номенклатура",
-                "ВидНоменклатуры", "ПолНоменклатуры", "КатегорияНаСайте", "СтилеваяГруппа",
-                "Марка", "ГруппаСоставов", "ВидАссортимента", "Остаток"
-            ]
-            cols = [c for c in want_cols if c in nom.columns]
-            sub = nom[cols].copy()
-            sub["КодНоменклатуры"] = sub["КодНоменклатуры"].astype(str)
-            sub = sub.drop_duplicates("КодНоменклатуры", keep="last").set_index("КодНоменклатуры")
-
-            for code in maps.idx2item:
-                if code in sub.index:
-                    row = sub.loc[code].to_dict()
-                    # гарантируем строковые значения
-                    train_item_meta[str(code)] = {
-                        k: ("" if row.get(k) is None else str(row.get(k)))
-                        for k in row.keys()
-                    }
-
-        ckpt["train_item_meta"] = train_item_meta
+        # Never rebuild labels/matrix/metadata from a catalog changed after training.
+        ckpt["feat2idx"] = snapshot.vocabulary()
+        ckpt["item_feat_mat"] = snapshot.matrix.copy()
+        ckpt["item_feature_cols"] = list(snapshot.parameters[1])
+        ckpt["max_item_features"] = snapshot.parameters[2]
+        ckpt["train_item_meta"] = snapshot.historical_metadata()
+        ckpt["item_feature_diagnostics"] = snapshot.diagnostics()
 
         with open(mappings_path, "r", encoding="utf-8") as f:
             saved_mappings = json.load(f)
@@ -999,6 +1041,15 @@ def _save_artifacts(cfg: TrainConfig, maps: Mappings, model: BPRMF, *, seen_item
             disk_mappings = json.load(f)
         disk_checkpoint = torch.load(checkpoint_path, map_location="cpu")
         _validate_model_artifacts(disk_mappings, disk_checkpoint)
+        if (disk_checkpoint.get("feat2idx") != snapshot.vocabulary()
+                or not np.array_equal(disk_checkpoint.get("item_feat_mat"), snapshot.matrix)
+                or disk_checkpoint.get("config") != ckpt["config"]
+                or disk_checkpoint.get("train_item_meta") != snapshot.historical_metadata()):
+            raise ValueError("Serialized feature payload differs from training snapshot")
+        for name in ("feat_emb.weight", "item_feat_mat"):
+            if name in ckpt["state_dict"] and not torch.equal(
+                    disk_checkpoint["state_dict"][name], ckpt["state_dict"][name].detach().cpu()):
+                raise ValueError("Serialized feature tensors differ from trained model")
         if disk_mappings != saved_mappings:
             raise ValueError("Serialized mappings differ from training mappings")
         if seen_items is not None and seen_items_from_checkpoint(disk_checkpoint) is None:
@@ -1429,6 +1480,7 @@ def prepare_training_data_from_csv(cfg: TrainConfig) -> PreparedBprData:
 
 def _train_in_this_process(cfg: Optional[TrainConfig] = None) -> bool:
     cfg = cfg or TrainConfig()
+    _validate_feature_config(cfg)
     _set_seed(cfg.seed)
     try:
         prepared = prepare_training_data_from_csv(cfg)
@@ -1541,6 +1593,7 @@ def _load_train_config_from_json(path: str) -> TrainConfig:
             value = re.sub(r"(^|[/\\])ВходныеДанные(?=[/\\]|$)", r"\1input_data", value)
         setattr(cfg, key, value)
 
+    _validate_feature_config(cfg)
     return cfg
 
 

@@ -93,6 +93,19 @@ class ProductResolution:
     item_id: str | None = None
 
 
+def normalize_product_key(product: ProductKey) -> ProductResolution:
+    """Apply the existing namespace-specific prefix-6 policy, without membership.
+
+    RESOLVED here describes a normalized identity, not catalog availability.
+    ProductResolver.resolve retains its original catalog-membership contract.
+    """
+    if product.namespace not in SUPPORTED_NAMESPACES:
+        return ProductResolution(ResolutionStatus.UNSUPPORTED_NAMESPACE)
+    if not isinstance(product.value, str) or not product.value or product.value != product.value.strip():
+        return ProductResolution(ResolutionStatus.INVALID_ID)
+    return ProductResolution(ResolutionStatus.RESOLVED, product.value[:6])
+
+
 @dataclass(frozen=True, repr=False)
 class ResolvedInteraction:
     interaction: InteractionRecord
@@ -105,6 +118,8 @@ class ResolutionCounts:
     resolved: int = 0
     unresolved: int = 0
     unsupported_namespace: int = 0
+    unknown_candidate: int = 0
+    invalid_id: int = 0
 
     @property
     def resolution_rate_percent(self) -> float:
@@ -139,12 +154,9 @@ class ProductResolver:
         self._item_sources: dict[str, set[ProductKey]] = defaultdict(set)
 
     def resolve(self, product: ProductKey, *, strict: bool = True) -> ProductResolution:
-        if product.namespace not in SUPPORTED_NAMESPACES:
-            result = ProductResolution(ResolutionStatus.UNSUPPORTED_NAMESPACE)
-        elif not isinstance(product.value, str) or not product.value or product.value != product.value.strip():
-            result = ProductResolution(ResolutionStatus.INVALID_ID)
-        else:
-            candidate = product.value[:6]
+        result = normalize_product_key(product)
+        if result.status is ResolutionStatus.RESOLVED:
+            candidate = result.item_id
             result = (ProductResolution(ResolutionStatus.RESOLVED, candidate)
                       if candidate in self._catalog.item_ids
                       else ProductResolution(ResolutionStatus.UNKNOWN_CANDIDATE))
@@ -161,6 +173,8 @@ class ProductResolver:
             counts["interactions_total"] += 1
             counts["resolved" if resolved else "unresolved"] += 1
             counts["unsupported_namespace"] += int(result.status is ResolutionStatus.UNSUPPORTED_NAMESPACE)
+            if result.status in (ResolutionStatus.UNKNOWN_CANDIDATE, ResolutionStatus.INVALID_ID):
+                counts[result.status.value] += 1
         self._source_keys.add(interaction.product)
         if not resolved:
             if strict:

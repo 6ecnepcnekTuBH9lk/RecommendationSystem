@@ -1,0 +1,201 @@
+"""Metadata-only snapshots; Customers raw remains in the M01 raw store."""
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
+import math
+import os
+from pathlib import Path
+import uuid
+
+from Application.customer_profiles import build_customer_contact_index
+from .adapters import adapt_customer_merge
+from .adapters.customer_contacts import adapt_customer_contact_candidate
+from .customers_stream import iter_customers_stream
+from .daily_training_batch import load_chunked_training_batch
+from .identity import CustomerIdResolver
+from .raw_reader import part_files, iter_export
+from .storage import RawExportStorage
+from .training_batch import TrainingBatchExport, _directory
+
+
+class ProfileSnapshotError(ValueError):
+    """Safe snapshot error without payload, identities or paths."""
+
+
+@dataclass(frozen=True, repr=False)
+class CustomerProfileSnapshot:
+    snapshot_id: str
+    created_at: str
+    customers_directory: str
+    customers_parts: int
+    customer_merges_directory: str
+    customer_merges_parts: int
+    originating_training_batch_id: str | None = None
+    transport_complete: bool = True
+    schema_version: int = 1
+    source_kind: str = "API"
+    merge_source_training_batch_id: str | None = None
+
+
+def _uuid(value):
+    try:
+        valid = isinstance(value, str) and uuid.UUID(value).hex == value
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ProfileSnapshotError("Invalid snapshot/batch identity")
+
+
+def _export_directory(root, name, directory, count, source_kind="API"):
+    if type(count) is not int or count < 1:
+        raise ProfileSnapshotError("Invalid snapshot parts count")
+    result = _directory(root, TrainingBatchExport(name, None, "metadata", directory, count, source_kind))
+    if len(part_files(result, name)) != count:
+        raise ProfileSnapshotError("Snapshot parts mismatch")
+    return result
+
+
+def snapshot_manifest_path(raw_root, snapshot_id):
+    _uuid(snapshot_id)
+    root = Path(raw_root).resolve()
+    path = (root / "customer_profile_snapshots" / snapshot_id / "manifest.json").resolve()
+    if not path.is_relative_to(root):
+        raise ProfileSnapshotError("Snapshot path escapes raw root")
+    return path
+
+
+def validate_customer_profile_snapshot(snapshot, *, raw_root):
+    """Read directory listings and manifests only, never Customers raw contents."""
+    if isinstance(snapshot, CustomerProfileSnapshot) and snapshot.schema_version == 3:
+        from .canonical_customers import database
+        if snapshot != load_customer_profile_snapshot(database(raw_root), raw_root=raw_root):
+            raise ProfileSnapshotError("Canonical customer metadata changed")
+        return
+    try:
+        if (not isinstance(snapshot, CustomerProfileSnapshot) or type(snapshot.schema_version) is not int
+                or snapshot.schema_version not in (1, 2) or snapshot.transport_complete is not True):
+            raise ProfileSnapshotError("Invalid snapshot schema/completeness")
+        _uuid(snapshot.snapshot_id)
+        stamp = datetime.fromisoformat(snapshot.created_at)
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ProfileSnapshotError("Snapshot timestamp requires timezone")
+        root = Path(raw_root).resolve()
+        _export_directory(root, "customers", snapshot.customers_directory, snapshot.customers_parts, snapshot.source_kind)
+        _export_directory(root, "customer_merges", snapshot.customer_merges_directory, snapshot.customer_merges_parts)
+        if snapshot.source_kind not in ("API", "MANUAL"):
+            raise ProfileSnapshotError("Invalid source kind")
+        if snapshot.source_kind == "MANUAL" and (snapshot.schema_version != 2
+                or snapshot.originating_training_batch_id is not None or snapshot.merge_source_training_batch_id is None):
+            raise ProfileSnapshotError("Manual snapshot requires an explicit API merges source")
+        if snapshot.source_kind == "MANUAL" and snapshot.customers_directory != f"customer_profile_snapshots/{snapshot.snapshot_id}/customers":
+            raise ProfileSnapshotError("Manual raw must belong to its snapshot")
+        if snapshot.source_kind == "API" and snapshot.merge_source_training_batch_id is not None:
+            raise ProfileSnapshotError("Invalid API snapshot merges source")
+        source_id = snapshot.merge_source_training_batch_id or snapshot.originating_training_batch_id
+        if source_id is not None:
+            _uuid(source_id)
+            batch = load_chunked_training_batch(root / "training_batches" / source_id / "manifest.json",
+                                               raw_root=root, require_complete=True, api_only=snapshot.source_kind == "MANUAL")
+            merges = next(c.export for c in batch.components if c.name == "customer_merges")
+            if (merges.relative_directory, merges.parts_count) != (snapshot.customer_merges_directory, snapshot.customer_merges_parts):
+                raise ProfileSnapshotError("Snapshot merge source differs from originating batch")
+    except Exception:
+        raise ProfileSnapshotError("Invalid customer profile snapshot metadata") from None
+
+
+def _publish_snapshot(snapshot, raw_root):
+    validate_customer_profile_snapshot(snapshot, raw_root=raw_root)
+    path = snapshot_manifest_path(raw_root, snapshot.snapshot_id)
+    path.parent.mkdir(parents=True, exist_ok=False)
+    temporary = path.with_name("manifest.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(asdict(snapshot), stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def create_customer_profile_snapshot(client, *, training_manifest, raw_root, timeout=3600., poll_interval=5.):
+    if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in (timeout, poll_interval)):
+        raise ProfileSnapshotError("Positive finite polling settings required")
+    root = Path(raw_root).resolve()
+    batch = load_chunked_training_batch(training_manifest, raw_root=root, require_complete=True)
+    merges = next(c.export for c in batch.components if c.name == "customer_merges")
+    parts = client.export("customers", storage=RawExportStorage(root), timeout=timeout, poll_interval=poll_interval)
+    if not parts or len({Path(p).resolve().parent for p in parts}) != 1:
+        raise ProfileSnapshotError("Invalid published Customers parts")
+    try:
+        directory = Path(parts[0]).resolve().parent.relative_to(root).as_posix()
+    except ValueError:
+        raise ProfileSnapshotError("Customers export outside raw root") from None
+    snapshot = CustomerProfileSnapshot(uuid.uuid4().hex, datetime.now(timezone.utc).isoformat(), directory, len(parts),
+                                       merges.relative_directory, merges.parts_count, batch.batch_id)
+    _publish_snapshot(snapshot, root)
+    return snapshot
+
+
+def load_customer_profile_snapshot(manifest, *, raw_root):
+    from .canonical_customers import database, customer_summary
+    if Path(manifest).resolve() == database(raw_root):
+        from .canonical_storage import catalog
+        summary = customer_summary(raw_root)
+        if summary is None:
+            raise ProfileSnapshotError("No canonical customer data")
+        merges = catalog(raw_root)["customer_merges"]
+        if merges is None and any((Path(raw_root) / "training_batches").glob("*/manifest.json")):
+            from .manual_import import select_merges_source
+            entry = select_merges_source(raw_root).components[0].export
+            merges = {"directory": entry.relative_directory, "parts": entry.parts_count}
+        return CustomerProfileSnapshot("canonical", summary["updated"], "canonical/customers.sqlite", 0,
+            merges["directory"] if merges else "", merges["parts"] if merges else 0,
+            schema_version=3, source_kind=summary["source_kind"])
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ProfileSnapshotError("Duplicate snapshot metadata field")
+            result[key] = value
+        return result
+    try:
+        with Path(manifest).open(encoding="utf-8") as stream:
+            data = json.load(stream, object_pairs_hook=unique)
+        expected = set(CustomerProfileSnapshot.__dataclass_fields__)
+        if isinstance(data, dict) and data.get("schema_version") == 1:
+            expected -= {"source_kind", "merge_source_training_batch_id"} - set(data)
+        if not isinstance(data, dict) or set(data) != expected:
+            raise ProfileSnapshotError("Invalid snapshot fields")
+        snapshot = CustomerProfileSnapshot(**data)
+        if Path(manifest).resolve() != snapshot_manifest_path(raw_root, snapshot.snapshot_id):
+            raise ProfileSnapshotError("Snapshot location does not match identity")
+        validate_customer_profile_snapshot(snapshot, raw_root=raw_root)
+        return snapshot
+    except Exception:
+        raise ProfileSnapshotError("Cannot load valid customer profile snapshot") from None
+
+
+def load_customer_contact_index(profile_manifest, model_mappings=None, *, raw_root, progress=None, progress_every=100000):
+    from .canonical_customers import database, load_contact_index
+    if Path(profile_manifest).resolve() == database(raw_root):
+        return load_contact_index(raw_root, model_mappings, progress=progress, progress_every=progress_every)
+    snapshot = load_customer_profile_snapshot(profile_manifest, raw_root=raw_root)
+    root = Path(raw_root).resolve()
+    resolver = CustomerIdResolver(adapt_customer_merge(raw) for raw in
+        iter_export("customer_merges", input_dir=root / snapshot.customer_merges_directory))
+    if model_mappings is None:
+        user_ids = None
+    elif isinstance(model_mappings, dict):
+        user_ids = model_mappings["idx2user"]
+    else:
+        user_ids = model_mappings.idx2user
+    wanted = set(user_ids) if user_ids is not None else None
+    def records():
+        for raw in iter_customers_stream(input_dir=root / snapshot.customers_directory):
+            candidate = adapt_customer_contact_candidate(raw, resolver, wanted)
+            del raw
+            yield candidate
+    return build_customer_contact_index(records(), user_ids, progress=progress, progress_every=progress_every)

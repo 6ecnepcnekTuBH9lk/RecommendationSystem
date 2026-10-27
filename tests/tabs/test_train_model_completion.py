@@ -30,9 +30,16 @@ class _Log:
     ],
 )
 def test_train_finished_never_reports_success_for_failed_process(
-    exit_code, exit_status, monkeypatch
+    exit_code, exit_status, monkeypatch, tmp_path
 ):
-    window = SimpleNamespace(start_train=_Button(), train_log=_Log())
+    window = SimpleNamespace(start_train=_Button(), train_log=_Log(), _training_active=True,
+                             train_proc=SimpleNamespace(readAllStandardOutput=lambda: b''),
+                             w_purchase=SimpleNamespace(value=lambda: 10.),
+                             w_favorite=SimpleNamespace(value=lambda: 2.),
+                             w_view_item=SimpleNamespace(value=lambda: .5),
+                             epochs_input=SimpleNamespace(value=lambda: 50))
+    monkeypatch.setattr(train_model_tab, 'metadata_readiness', lambda *args: (True, 'Synthetic ready', 'a' * 32))
+    monkeypatch.setattr(train_model_tab, 'USER_SETTINGS_DIR', tmp_path)
     ok_statuses = []
     error_statuses = []
 

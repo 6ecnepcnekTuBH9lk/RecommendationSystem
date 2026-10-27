@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 import json
 import os
 import re
@@ -23,6 +24,19 @@ from Application import statistics_cache as cache
 from Application.settings.set_status import set_ready_status, schedule_status_reset
 
 pytestmark = pytest.mark.usefixtures("window_settings")
+
+
+def _visual_items(layout):
+    """Preserve content-order checks across the explicit section containers."""
+    items = []
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        section = item.layout()
+        if section is not None and section.objectName() == 'statisticsSectionLayout':
+            items.extend(section.itemAt(i) for i in range(section.count()))
+        else:
+            items.append(item)
+    return items
 
 
 @pytest.fixture
@@ -135,10 +149,70 @@ def canonical_process(monkeypatch, tmp_path):
 
     class Process(QProcess):
         def start(self, program, arguments):
-            super().start(program, arguments + ["--raw-root", str(tmp_path), "--catalog", str(catalog)])
+            super().start(program, arguments + ["--raw-root", str(tmp_path), "--catalog", str(catalog),
+                                               "--slice-cache", str(tmp_path / "slices")])
 
     monkeypatch.setattr(ui, "QProcess", Process)
     return catalog
+
+
+def test_real_indexed_cli_in_existing_qprocess_then_error_preserves_display(window, monkeypatch, tmp_path):
+    from tests.test_dataset_statistics import dataset as fixture
+    from Application import statistics_index as index
+    from Application.dataset_statistics import calculate_statistics
+    _, tab = window
+    dataset = fixture.__wrapped__(tmp_path / "fixture")
+    root, reference, data = dataset
+    monkeypatch.setattr(index, "protect_directory", lambda p: p.chmod(0o700))
+    directory = tmp_path / "analytics"
+    directory.mkdir()
+    monkeypatch.setattr(index, "validate_storage_root", lambda p, **kw: index.path_identity(p))
+    # This is a synthetic GUI/CLI fixture under pytest's shared workspace. ACL
+    # policy has dedicated tests; give the child the same explicit fixture mock.
+    cli = Path(ui.__file__).resolve().parents[2]/"scripts/dataset_statistics.py"
+    bootstrap = tmp_path/"synthetic_statistics_cli.py"
+    bootstrap.write_text(
+        "import sys, runpy\n"
+        f"sys.path.insert(0, {str(cli.parent.parent)!r})\n"
+        "from Application import statistics_index as index\n"
+        "index.validate_storage_root=lambda p, **kw: index.path_identity(p)\n"
+        f"runpy.run_path({str(cli)!r}, run_name='__main__')\n", encoding="utf-8")
+    # Build on an earlier controlled local day; the actual child QProcess must
+    # still use INDEXED today, computing today's demographics from the snapshot.
+    original_capture = index.capture_sources
+
+    def earlier_capture(*args, **kwargs):
+        return original_capture(*args, **kwargs, calculated_at=datetime.fromisoformat("2000-01-01T12:00:00+00:00"))
+
+    with monkeypatch.context() as context:
+        context.setattr(index, "capture_sources", earlier_capture)
+        index.build_statistics_index(raw_root=root, catalog_path=reference, index_dir=directory, expected_bytes=1024**2)
+    expected = asdict(calculate_statistics(raw_root=root, catalog_path=reference))
+
+    class Process(QProcess):
+        def start(self, program, arguments):
+            arguments = [str(bootstrap) if Path(a).name == "dataset_statistics.py" else a for a in arguments]
+            super().start(program, arguments + ["--raw-root", str(root), "--catalog", str(reference),
+                "--slice-cache", str(tmp_path / "slices"), "--index-dir", str(directory), "--backend", "INDEXED"])
+
+    monkeypatch.setattr(ui, "QProcess", Process)
+    tab.start()
+    wait_until(lambda: tab.process is None)
+    assert tab.failure is None
+    displayed = cache.load_result(tab.cache_path)
+    assert displayed is not None
+    actual = deepcopy(displayed)
+    actual.pop("calculated_at")
+    expected.pop("calculated_at")
+    assert actual == json.loads(json.dumps(expected))
+    assert tab.export_button.isEnabled()
+    data["revision"] = "updated"
+    (root / "canonical/catalog.json").write_text(json.dumps(data))
+    tab.start()
+    wait_until(lambda: tab.process is None)
+    assert tab.failure
+    assert cache.load_result(tab.cache_path) == displayed
+    assert tab.export_button.isEnabled()
 
 
 def test_success_theme_switch_and_error_preserves_previous_result(window, monkeypatch, tmp_path):
@@ -285,7 +359,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert isinstance(technical, QScrollArea)
         assert technical.widgetResizable()
         layout = technical.widget().layout()
-        assert layout.spacing() == ui.BLOCK_SPACING
+        assert layout.spacing() == ui.SECTION_SPACING
         assert layout.count() == 5
         coverage, summary, raw, quality, diagnostics = technical.findChildren(QTableWidget)
         assert technical.findChildren(QTableWidget) == [coverage, summary, raw, quality, diagnostics]
@@ -342,7 +416,7 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert card_titles(tab.sections.widget(2)) == ["Товары с взаимодействиями", "Товары с просмотрами",
                                                 "Товары в избранном", "Купленные товары"]
     for index in range(5):
-        assert tab.sections.widget(index).widget().layout().spacing() == ui.BLOCK_SPACING
+        assert tab.sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
     labels = [label.text() for label in tab.findChildren(QLabel)]
     cells = []
     for table in tab.findChildren(QTableWidget):
@@ -359,6 +433,20 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert sample_result["coverage"] == original["coverage"]
     assert sample_result["purchase_quantity"] == "4"
     assert sample_result["resolution_rate"] == 100.
+
+
+def test_conflicting_order_warning_is_hidden_only_from_top_status(window, sample_result):
+    _, tab = window
+    warning = 'Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.'
+    sample_result['warnings'] = (warning,)
+    sample_result['diagnostics'] = (*sample_result['diagnostics'], ('orders_duplicate_conflicting', 7))
+    original = deepcopy(sample_result)
+    tab.render(sample_result)
+    assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
+    assert sample_result == original and tab.displayed_result['warnings'] == (warning,)
+    tables = tab.sections.widget(4).findChildren(QTableWidget)
+    assert any(table.item(row, 0).text() == ui.DIAGNOSTIC_LABELS['orders_duplicate_conflicting']
+               and table.item(row, 1).text() == '7' for table in tables for row in range(table.rowCount()))
 
 
 def test_saved_result_loads_automatically_without_process(app, sample_result, monkeypatch):
@@ -568,7 +656,7 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         QApplication.processEvents()
         page = tab.sections.widget(3)
         assert page.widgetResizable()
-        assert page.widget().layout().spacing() == ui.BLOCK_SPACING
+        assert page.widget().layout().spacing() == ui.SECTION_SPACING
         assert card_titles(page) == ["Количество клиентов", "Активные клиенты", "Покупатели", "Повторные покупатели (от 2 покупок)",
                                     "Средний возраст", "Медианный возраст"]
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
@@ -605,26 +693,27 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         QApplication.processEvents()
         page = tab.sections.widget(3)
         layout = page.widget().layout()
-        assert layout.itemAt(0).layout().count() == 4
-        assert layout.itemAt(1).widget().text() == 'ПОРТРЕТ КЛИЕНТА'
+        items = _visual_items(layout)
+        assert items[0].layout().count() == 4
+        assert items[1].widget().text() == 'ПОРТРЕТ КЛИЕНТА'
         index = 2
         if customers is None:
-            assert layout.itemAt(index).widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
+            assert items[index].widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
             index += 1
-        assert layout.itemAt(index).widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
-        cards = layout.itemAt(index + 1).layout()
+        assert items[index].widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
+        cards = items[index + 1].layout()
         assert cards.count() == 2
         assert [cards.itemAt(i).widget().findChildren(QLabel)[0].text() for i in range(2)] == ['Средний возраст', 'Медианный возраст']
-        age = layout.itemAt(index + 2).widget()
-        age_table = layout.itemAt(index + 3).widget()
+        age = items[index + 2].widget()
+        age_table = items[index + 3].widget()
         assert isinstance(age, StatisticsChart) and age.data.title == 'Возрастная структура клиентов'
         assert isinstance(age_table, QTableWidget) and age_table.horizontalHeaderItem(0).text() == 'Возрастная группа'
-        assert layout.itemAt(index + 4).widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
-        gender = layout.itemAt(index + 5).widget()
-        gender_table = layout.itemAt(index + 6).widget()
+        assert items[index + 4].widget().text() == 'РАСПРЕДЕЛЕНИЕ ПО ПОЛУ'
+        gender = items[index + 5].widget()
+        gender_table = items[index + 6].widget()
         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
-        assert layout.itemAt(index + 7).widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
+        assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
         assert len(page.findChildren(QTableWidget)) == 6
         assert len(page.findChildren(StatisticsChart)) == 3
         assert len(tab.findChildren(StatisticsChart)) == 17
@@ -668,7 +757,7 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         tab.sections.setCurrentIndex(1)
         QApplication.processEvents()
         page = tab.sections.widget(1)
-        assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+        assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
         assert card_titles(page)[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
         assert len(card_titles(page)) == 8
         labels = [label.text() for label in page.findChildren(QLabel)]
@@ -685,7 +774,7 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
         assert tables[1].rowCount() == 2  # No cross-currency total.
         assert tables[1].item(0, 4).text() == "40.00"
         assert tables[2].item(0, 0).text() == "01.2025"
-        assert page.widget().layout().itemAt(page.widget().layout().count() - 1).widget() is tables[-1]
+        assert _visual_items(page.widget().layout())[-1].widget() is tables[-1]
         for table in tables:
             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
         assert page.verticalScrollBar().maximum() > 0
@@ -724,7 +813,7 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
                 "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ПРОСМОТРОВ",
                 "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ИЗБРАННОГО", "КАНАЛЫ",
                 "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
-            assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+            assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
             assert tables[4].item(0, 0).text() == "01.2025"
@@ -776,7 +865,7 @@ def test_products_analytics_themes_headers_scroll_and_no_duplicates(window, samp
             assert all(tables[i].item(0, 0).text() == "Не указано" for i in range(3, 7))
             assert tables[7].rowCount() == 5 and tables[7].item(2, 1).text() == "3"
             assert tables[8].item(0, 0).text() == "offline1C"
-            assert page.widgetResizable() and page.widget().layout().spacing() == ui.BLOCK_SPACING
+            assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
             for table in tables:
                 assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
             wait_until(lambda: page.verticalScrollBar().maximum() > 0)
@@ -849,7 +938,7 @@ def test_table_content_height_and_scroll_after_resize_and_theme_change(app, coun
         app.processEvents()
 
 
-def test_orders_cards_rates_full_stores_and_bright_scrollbars(window, sample_result):
+def test_orders_cards_rates_full_stores_and_shared_scrollbars(window, sample_result):
     from PyQt6.QtCore import QEvent
     from PyQt6.QtGui import QColor
     from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
@@ -911,7 +1000,7 @@ def test_orders_cards_rates_full_stores_and_bright_scrollbars(window, sample_res
             ratio = pixmap.devicePixelRatio()
             x, y = round(rect.center().x() * ratio), round(rect.center().y() * ratio)
             assert 0 <= x < image.width() and 0 <= y < image.height()
-            assert image.pixelColor(x, y) == QColor(os.environ["QTMATERIAL_PRIMARYCOLOR"])
+            assert image.pixelColor(x, y) == QColor(os.environ['QTMATERIAL_PRIMARYCOLOR'])
     assert sample_result == original
     sample_result["purchase_basket_distribution"] = tuple((label, 0, 0.) for label, _, _ in original["purchase_basket_distribution"])
     tab.render(sample_result)
@@ -951,21 +1040,21 @@ def test_export_cache_result_and_dialog_cancel(window, sample_result, monkeypatc
     status, page_status = parent.status_label.text(), tab.status.text()
     calls = []
     def dialog(*args):
-        assert args[1] == 'Экспорт статистики' and args[3] == 'Excel (*.xlsx)'
-        assert args[2].endswith('Статистика_2026-09-24_09-47-28.xlsx')
+        assert args[1] == 'Экспорт статистики' and args[3] == 'ZIP (*.zip)'
+        assert args[2].endswith('Статистика_2026-09-24_09-47-28.zip')
         return '', ''
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', dialog)
-    monkeypatch.setattr(ui, 'export_statistics', lambda *args: calls.append(args))
+    monkeypatch.setattr(ui, 'export_statistics_bundle', lambda *args: calls.append(args))
     tab.export_button.click()
     assert not calls and tab._export_task is None
     assert parent.status_label.text() == status and tab.status.text() == page_status
     assert tab.export_button.isEnabled()
 
 
-@pytest.mark.parametrize('suffix', ['', '.xlsx', '.XLSX'])
+@pytest.mark.parametrize('suffix', ['', '.zip', '.ZIP'])
 def test_export_uses_displayed_snapshot_despite_new_filter(window, sample_result, monkeypatch, tmp_path, suffix):
     from Application.analysis_filter import AnalysisFilter
-    from Application.statistics_export import export_statistics
+    from Application.statistics_bundle_export import export_statistics_bundle
     from openpyxl import load_workbook
     parent, tab = window
     tab.render(sample_result)
@@ -975,23 +1064,38 @@ def test_export_uses_displayed_snapshot_despite_new_filter(window, sample_result
     tab.pending = {**sample_result, 'total_interactions': 999}
     status = tab.status.text()
     destination = tmp_path / ('export' + suffix)
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(destination), 'Excel (*.xlsx)'))
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(destination), 'ZIP (*.zip)'))
     calls = []
     def save(result, path):
         assert result is tab.displayed_result is sample_result
         calls.append(path)
-        export_statistics(result, path)
-    monkeypatch.setattr(ui, 'export_statistics', save)
+        export_statistics_bundle(result, path)
+    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
     tab.export_button.click()
     wait_until(lambda: tab._export_task is None)
-    assert len(calls) == 1 and calls[0] == str(destination) + ('' if suffix else '.xlsx')
-    assert parent.status_label.text() == 'Статистика экспортирована'
+    assert len(calls) == 1 and calls[0] == str(destination) + ('' if suffix else '.zip')
+    assert parent.status_label.text() == 'Статистика экспортирована в ZIP: Excel + HTML'
     assert parent._status_reset_timer.interval() == 5000
     assert tab.status.text() == status and tab.cache_path.read_bytes() == before
     assert tab.export_button.isEnabled()
-    book = load_workbook(calls[0])
+    from io import BytesIO
+    from zipfile import ZipFile
+    with ZipFile(calls[0]) as archive:
+        assert archive.testzip() is None and len(archive.namelist()) == 2
+        html = archive.read(next(name for name in archive.namelist() if name.endswith('.html'))).decode('utf-8')
+        assert 'Новый фильтр' not in html
+        book = load_workbook(BytesIO(archive.read(next(name for name in archive.namelist() if name.endswith('.xlsx')))))
     metadata = {row[0]: row[1] for row in book['Сводка'].values if row[0]}
     assert metadata['Вид номенклатуры'] == 'Все значения'
+    # Ordinary KPI and monthly tables belong to the displayed snapshot too.
+    from test_statistics_export import kpi, find, assert_minimal_tables
+    from decimal import Decimal
+    assert kpi(book['Сводка'], 'Количество взаимодействий').value == sample_result['total_interactions']
+    assert assert_minimal_tables(book)
+    for month, _, rub, _, kzt in sample_result['order_monthly_dynamics']:
+        row = find(book['Заказы'], month[5:] + '.' + month[:4])
+        assert Decimal(str(row[2].value)) == Decimal(rub)
+        assert Decimal(str(row[4].value)) == Decimal(kzt)
     book.close()
 
 
@@ -1004,7 +1108,7 @@ def test_export_error_preserves_snapshot_cache_and_page_status(window, sample_re
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
     def failed(*args):
         raise error('synthetic')
-    monkeypatch.setattr(ui, 'export_statistics', failed)
+    monkeypatch.setattr(ui, 'export_statistics_bundle', failed)
     tab.export_button.click()
     wait_until(lambda: tab._export_task is None)
     assert parent.status_label.text() == 'Не удалось экспортировать статистику'
@@ -1046,7 +1150,7 @@ def test_export_runs_in_background_and_holds_original_snapshot(window, sample_re
         calls.append(result)
         entered.set()
         assert release.wait(10)
-    monkeypatch.setattr(ui, 'export_statistics', save)
+    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
     try:
         tab.export_button.click()
@@ -1059,6 +1163,33 @@ def test_export_runs_in_background_and_holds_original_snapshot(window, sample_re
         release.set()
     wait_until(lambda: tab._export_task is None)
     assert tab.export_button.isEnabled()
+
+
+def test_export_worker_can_finish_after_tab_destruction(window, sample_result, monkeypatch, tmp_path):
+    from threading import Event
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent, QThreadPool
+
+    _, tab = window
+    tab.render(sample_result)
+    entered, release, finished = Event(), Event(), Event()
+
+    def save(result, path):
+        entered.set()
+        assert release.wait(10)
+        finished.set()
+    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.zip'), ''))
+    try:
+        tab.export()
+        wait_until(entered.is_set)
+        tab.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert sip.isdeleted(tab)
+    finally:
+        release.set()
+    wait_until(finished.is_set)
+    assert QThreadPool.globalInstance().waitForDone(5000)
 
 @pytest.mark.parametrize('filtered', [False, True])
 def test_source_actions_only_technical_and_total_card(window, sample_result, filtered):
@@ -1100,26 +1231,26 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [7, 7, 9, 6, 5]
         chart_widgets = tab.findChildren(StatisticsChart)
         assert len(chart_widgets) == 17
-        actions = tab.sections.widget(0).widget().layout()
+        actions = _visual_items(tab.sections.widget(0).widget().layout())
         action_charts = tab.sections.widget(0).findChildren(StatisticsChart)
         assert {chart.data.title for chart in action_charts} == {
             'Распределение клиентов по количеству просмотров', 'Распределение клиентов по количеству избранного',
             'Динамика просмотров', 'Динамика избранного'}
         for kind, header in [('просмотров', 'Количество просмотров'), ('избранного', 'Количество избранного')]:
             chart = next(chart for chart in action_charts if chart.data.title.endswith(kind))
-            index = actions.indexOf(chart)
-            assert actions.itemAt(index - 1).widget().text() == chart.data.title.upper()
-            following = actions.itemAt(index + 1).widget()
+            index = next(i for i, item in enumerate(actions) if item.widget() is chart)
+            assert actions[index - 1].widget().text() == chart.data.title.upper()
+            following = actions[index + 1].widget()
             assert isinstance(following, QTableWidget) and following.horizontalHeaderItem(0).text() == header
         view = next(chart for chart in action_charts if chart.data.title.endswith('просмотров'))
         favorite = next(chart for chart in action_charts if chart.data.title.endswith('избранного'))
-        assert actions.indexOf(favorite) == actions.indexOf(view) + 3
+        assert next(i for i, item in enumerate(actions) if item.widget() is favorite) == next(i for i, item in enumerate(actions) if item.widget() is view) + 3
         assert not any(label.text() == 'ДИНАМИКА КЛИЕНТОВ С ПРОСМОТРАМИ' for label in tab.findChildren(QLabel))
         assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 17
-        clients = tab.sections.widget(3).widget().layout()
+        clients = _visual_items(tab.sections.widget(3).widget().layout())
         frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
-        index = clients.indexOf(frequency)
-        following = clients.itemAt(index + 1).widget()
+        index = next(i for i, item in enumerate(clients) if item.widget() is frequency)
+        following = clients[index + 1].widget()
         assert isinstance(following, QTableWidget)
         assert following.horizontalHeaderItem(0).text() == 'Количество взаимодействий'
         assert sorted(chart.chart().title() for chart in chart_widgets if chart.chart().title()) == [

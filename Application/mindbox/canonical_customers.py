@@ -12,9 +12,8 @@ from .adapters import adapt_customer_merge
 from .adapters.customer_contacts import adapt_customer_contact_candidate
 from .adapters._common import identifier, timestamp
 from .canonical_storage import catalog, checked_directory, stamp, storage_lock
-from .customers_stream import iter_json_records
 from .identity import CustomerIdResolver
-from .manual_sources import normalize_sources
+from .manual_diagnostics import ManualImportContext, normalize_manual_sources
 from .raw_reader import iter_export
 
 
@@ -149,7 +148,7 @@ def import_full(root, source, *, cancelled=None, progress=None):
     from .manual_import import check_cancel, VALIDATION_PROGRESS_EVERY
 
     root = Path(root).resolve()
-    sources = normalize_sources(source)
+    sources = normalize_manual_sources(source, 'customers')
 
     with storage_lock(root):
         from .canonical_storage import collect_unreferenced
@@ -170,6 +169,7 @@ def import_full(root, source, *, cancelled=None, progress=None):
 
         try:
             processed = 0
+            diagnostics = ManualImportContext('customers', len(sources))
 
             with connect(temporary, create=True) as connection, connection:
                 if progress:
@@ -184,14 +184,14 @@ def import_full(root, source, *, cancelled=None, progress=None):
                             f"{number} из {len(sources)}"
                         )
 
-                    for raw in iter_json_records(path, "customers"):
+                    for raw in diagnostics.records((path,), start_index=number):
                         check_cancel(cancelled)
-
-                        _upsert(
-                            connection,
-                            raw,
-                            resolver,
-                        )
+                        try:
+                            _upsert(connection, raw, resolver)
+                        except InterruptedError:
+                            raise
+                        except Exception as exc:
+                            diagnostics.fail(exc)
 
                         processed += 1
 

@@ -1,0 +1,1989 @@
+{
+  "experiment": "CONV-01A",
+  "status": "complete",
+  "started_at": "2026-10-05T06:37:59.546557+00:00",
+  "hyperparameters": {
+    "data_dir": "ВходныеДанные",
+    "w_view_item": 0.1,
+    "w_favorite": 2.0,
+    "w_purchase": 10.0,
+    "embedding_dim": 128,
+    "epochs": 30,
+    "batch_size": 256,
+    "lr": 0.0003,
+    "weight_decay": 0.0,
+    "bpr_reg": 0.0005,
+    "n_neg": 10,
+    "seed": 42,
+    "topk": 10,
+    "min_user_interactions_for_eval": 10,
+    "early_stop": false,
+    "early_stop_metric": "ndcg",
+    "early_stop_patience": 8,
+    "early_stop_min_delta": 0.0005,
+    "early_stop_min_epochs": 30,
+    "use_item_features": false,
+    "item_feature_cols": [
+      "ВидНоменклатуры",
+      "ВидАссортимента",
+      "Марка",
+      "Коллекция",
+      "СезонНоски",
+      "ПолНоменклатуры",
+      "ГруппаСоставов",
+      "КатегорияНаСайте",
+      "СтилеваяГруппа"
+    ],
+    "max_item_features": 32,
+    "feature_dropout": 0.1,
+    "feature_scale": 0.2,
+    "feature_norm": "mean",
+    "feat_reg_mult": 1.0
+  },
+  "optimizer": "torch.optim.Adam",
+  "only_changed_hyperparameter": "epochs: 200 -> 30",
+  "seeds": [
+    42
+  ],
+  "planned_training_runs": 1,
+  "checkpoint_epochs": [
+    1,
+    2,
+    3,
+    5,
+    8,
+    12,
+    20,
+    30
+  ],
+  "primary_metric": "overall.validation.NDCG@10",
+  "secondary_metrics": [
+    "Recall@10",
+    "NDCG@5",
+    "Recall@5",
+    "NDCG@20",
+    "Recall@20"
+  ],
+  "temporal_config": {
+    "validation_start": "2025-11-01T00:00:00+00:00",
+    "test_start": "2025-12-01T00:00:00+00:00",
+    "test_end": "2025-12-31T00:00:00+00:00",
+    "min_history_events": 10
+  },
+  "provenance": {
+    "git_branch": "feature/training-settings",
+    "git_head": "cc1b6fa4bdda06f359e6a581e8a6723158d74492",
+    "working_tree_dirty": true,
+    "source_sha256": {
+      "Application/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/action_statistics.py": "7ef81863bf6293d509631282a445a536f0d01d04b6c0bb109b9bc40a38c334a4",
+      "Application/analysis_filter.py": "f04e66692d0c5150d0fef0e197eabb9dab216909d20364c61a6521dcf0394c44",
+      "Application/analysis_filter_settings.py": "db912c6d7b5499ed77ef8889d070745bca74a371dfc67fb59ca0ee37ec0dcca5",
+      "Application/customer_profiles.py": "db2fb408b1ae861b1dc24938584bcceb33d2f43eb41d1fcd61da929e51a95b47",
+      "Application/dataset_statistics.py": "20dd9dacca5fa93c7d2b40986899a441c941120c53050fcbd8087829c2e84a9e",
+      "Application/evaluation/__init__.py": "693a3d2f1a069f2df3edaac3205db4303199789938a2602a6a543fc32bae737d",
+      "Application/evaluation/audit.py": "63cffa162ec32eca462c51879d471c765668c61cc03c19bbf980826d44802697",
+      "Application/evaluation/bpr.py": "a620a2a5b91103390241a941c06b1a35cafea284fa7982b4b976dff8454e2a02",
+      "Application/evaluation/experiments/__init__.py": "1e57cde7bc5709b5c40b53f2dd0415796c2022f748b314b12c64c2d55a9ff63e",
+      "Application/evaluation/experiments/bpr_weights.py": "34f1c9f463778afee6e6a53632e1db29fc0be6a6fd4c1e0e2caaf9da4cb0186b",
+      "Application/evaluation/ranking.py": "186136674692138223695e03016ca466439453c9eac5a794cc45ce32fc57be51",
+      "Application/evaluation/temporal.py": "188de6a3cdc53f5837b11e20b782a489c607afe6c2565c44fc9f178edae4cee6",
+      "Application/files/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/files/files_processing.py": "21dffa99bdac72d3d2d9fc94606179177ad5a35c2633f2126a7020e298832643",
+      "Application/files/reference_import.py": "74671799e545c111825fee0e684cd11cac54a58cf571367e6a3a0b3c6f7947f8",
+      "Application/interactions.py": "d7e6fb6e6da1f30a4390c116747a49aa546224ef46dd6c3ccaaf5b27ac5990e1",
+      "Application/loading_errors.py": "8eceffe04ea1738c500b3cd2de5e274bcca5e5ce991402c666b449e3dca1cc64",
+      "Application/mindbox/__init__.py": "a2daea2730ec7760172e76eff5d069b592f35952cda95e9b854dee2eb5e4d240",
+      "Application/mindbox/adapters/__init__.py": "7a11eb3be26c640ffa55963cf988d277648ccd088a0a78f9beaf18ee1ee823b0",
+      "Application/mindbox/adapters/_common.py": "8618e1ee03db6ecfac4b39537feff8a31847b9079da0000327464f11aa770bdb",
+      "Application/mindbox/adapters/actions.py": "eaef190d9d8b7330e716dc4354ac5cb5d6e4e1438d68f5f5b4f9ada90ea918d0",
+      "Application/mindbox/adapters/customer_contacts.py": "c80f01d0d5b9122885d8f94dad62cdc87a2b521be12656db733434cdb7a72171",
+      "Application/mindbox/adapters/customer_merges.py": "1a76210b6540b242434e1ec46c9377f1b9fb99e58bee26e4a0bd8a99483e8ccd",
+      "Application/mindbox/adapters/customers.py": "52120bf8905f76fa089141e05354537c44b25c5438c3775803f197e0da1cb27e",
+      "Application/mindbox/adapters/orders.py": "d0bd84ed988ad4364f3073f303211401152bdb73acf1c7abdfc3a5517972166a",
+      "Application/mindbox/canonical_customers.py": "3531bf6deeb7a813415df219a749da14c5e9ec57d1c2f133e5262101a7c79214",
+      "Application/mindbox/canonical_jobs.py": "50c755a95f629fdcf26cf36905d773c392956cb1147e5b21c37e74f0f91684fe",
+      "Application/mindbox/canonical_storage.py": "b5abdf4cb7eb916d4efa806fa96cd094201933602117aa55288086f52f056dac",
+      "Application/mindbox/client.py": "f858f013671e21e9f8fc9066a442dc517720beea4d62b1ca9d55c3d9f1b95315",
+      "Application/mindbox/config.py": "bc4c0339f9167503d9c5f6dfa58ed73c12f1a7617f70a2e5c158f9424829a8b8",
+      "Application/mindbox/customer_profile_snapshot.py": "cac7c71c298e0bc0d13ca66d55fea91187e724915166a5b9cfb118fbcb94906a",
+      "Application/mindbox/customers_stream.py": "fd48db8056de1660490700fe25653cdd1b7fc9cd5ace0fb03d8167553fb8fbef",
+      "Application/mindbox/daily_training_batch.py": "c280acc7187261a877ee9d16988a030971fa383c0e05d35ef43dbe97f48580db",
+      "Application/mindbox/exceptions.py": "f96569071cf969269f43d54535adbad582b415d3cc63ae758c4677783c0a37ec",
+      "Application/mindbox/identity.py": "7bfdf983a043503a9e0f7dffcf7f1b310ad92cfbaed17b373a0ad701bf60fd36",
+      "Application/mindbox/manual_import.py": "a3efaef5f89e05fb4782a330b7492f333495a834e7707eaddf4dd3f7f385dda6",
+      "Application/mindbox/manual_sources.py": "cfcad57bdfe9b2f79b24108543e243e852ae450638efbdb1ffe1a78c965809c3",
+      "Application/mindbox/order_dedup.py": "3b4b8f096a9957a382631db9f93a22fe4cc74894ffd108c5c88de6e457d3ba65",
+      "Application/mindbox/raw_reader.py": "7cb1d06c052e57135ff650627b6c8972a21700bc85487ddb9d1a6f6f723f52db",
+      "Application/mindbox/records.py": "2a59ab6aca540aa61477761da4d86fb7bf624e7a214bd4dea3b4dad2c90981cb",
+      "Application/mindbox/schema_profiler.py": "099790e220063d7e72ff800f4f48fadda8c62e46c329ceccb107243283e6e3a6",
+      "Application/mindbox/selection.py": "336c1f104dce1bf7cdd4b9e1a4db1359a6ce08bf42d7a0f596e15eba764a9741",
+      "Application/mindbox/storage.py": "323b54e04c0c3b229ce5448cebe34b22e994e7dad28f04899e040bc09f64584a",
+      "Application/mindbox/store_catalog.py": "7c1acacbe6e01c6ae5c1308bce03cf34dc678b5d4ce2fc72a6ca9d551550761f",
+      "Application/mindbox/training_batch.py": "3ec7b59de1407b95d6151a8a002c22e44cf5c08de3670c173b72d6374f632be0",
+      "Application/model/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/model/bpr_preparation.py": "58853f1a8be8c75388c046de6bcb14d0c21ab6d8c6d9f97c181d21022753e486",
+      "Application/model/BPRMF.py": "5c1e97a8182684f73bee3a330604615be9cdb6eefdf055c576af4a684bf27645",
+      "Application/model/interaction_analytics.py": "e833963a6e803b603201f7a6ba1c7bb93329cacd153f610344d3c81333107090",
+      "Application/model/mindbox_production_training.py": "4216684e2ac68475c6b55f8b0605e998d463c2a5ac92f3b9657e367465baa60b",
+      "Application/model/mindbox_recommendation_smoke.py": "051e4065907332c6805e23b2c33cbde1b37d4a6d885c7846be947a0baa8c9ee6",
+      "Application/model/mindbox_shadow_training.py": "d46fec186b5b5707b6c06e7a8087557e0cfe26443df80e75f4525c3485c00081",
+      "Application/model/mindbox_training_preparation.py": "4474ff9d8348924a773c238d10ef5e8d3c200676c89fa68c98323cd029f679de",
+      "Application/model/seen_items.py": "3e095ba23efb5054955b66393cb29b642a226eb21d903da42ef2298d66237da8",
+      "Application/model/shadow_training.py": "204e491e3962337ed68fa28a07bb1ffb1ff9d3ca787d99d5fde4128a6aa68abe",
+      "Application/model/training_data.py": "883718cc246baaf40d9622dca0d341cd4dd993b6d0bec04774b774c906dba15b",
+      "Application/model/training_metrics.py": "6469b162e29c92c04a0c53c7fe16b7538bdfcdb8e70ca398c6970f33b12b5790",
+      "Application/model/training_quality.py": "aae7cd7aa696a1c1d0313a59a56e995fceddd625ec8b073c2470f5fe2386c0f0",
+      "Application/order_statistics.py": "a3118fb959aa0383eed7c585327e63664f0403e4910f8be9a24027b875f7a47a",
+      "Application/paths.py": "718be53aaf9368d918c11c3f67ecff9a51e94979ebc60be1829d51d4ae3de1a7",
+      "Application/photo/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/photo/photo_processing.py": "0ccf804ec2a68bf65712466d65fd888637d0146cd804ed0b563fca48ee20c6fc",
+      "Application/product_resolution.py": "5ec6883a4ced1703898bb0c17ca7c6ca71981935bb908e6790beab27ece77872",
+      "Application/product_statistics.py": "ca7add665fbb8e98f47d75b4f0bd8bcfcf2d652d69699c6a3239297a935ec569",
+      "Application/settings/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/settings/set_status.py": "b82bad2c3264ef3e7ac82cc85a7ff51e2ffbab5311a0bd43d5ea1c3cedab78df",
+      "Application/settings/settings_and_filter.py": "19bf6b577898863a7ff925f3255480841f180497e1a57c2da11c2739f2c0c094",
+      "Application/statistics_cache.py": "76880e2a6c0f1e0e5c176528ab2b42d8087f9926d2ee61f03bc7650330f3bed2",
+      "Application/statistics_charts.py": "216b7a89047ac7c486135ac15e8d5329a2599c30ee6664c9fa07a550b35cf728",
+      "Application/statistics_export.py": "767ec502d334cd482316a391bd9c6e9da862685cef193ce716e5c2decffa6d29",
+      "Application/statistics_period.py": "84ee4c7eac2e025049c1299b5e99691947887e60d0c422cf21c08977e9a7b129",
+      "Application/statistics_presentation.py": "6be796b0f904f99c9e418eae112f5b4bf076ea0ef212ae6c15959271692f9cf4",
+      "Application/store_city_mapping.py": "28b07acc30f181a0fc336eca91f4baacd0ad3c2a144f0001aba20756b8f6c31f",
+      "Application/tabs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/tabs/analysis_filter_tab.py": "2fbbcf3bdb4271bf822bcdf09c680ea87a6a5148aac46345d528da0a5bc0be1d",
+      "Application/tabs/create_results_tab.py": "ebcf731d5c2d5bb725bb3f337f0a88783632645f72ac36841f8ae36c92249421",
+      "Application/tabs/data_loading_tab.py": "bb64cdef65b836f68a99d3d4cc45c7c21feeb6f337ee0340edc0cf8972e087b1",
+      "Application/tabs/dataset_statistics_tab.py": "1189b14efe00665bd92399bbff80d729f93103f64531ce0b2bb4cabace0cfaf0",
+      "Application/tabs/reference_loading_section.py": "4ac083d291b3cece0c06e98bc9eee8b4b1354640c02299bea5449b0dce8cda68",
+      "Application/tabs/train_model_tab.py": "d0fd033b8d158c7bb6e65951ccf5be3fa42528526b7d984383201dfacaec78dc",
+      "Application/theme/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "Application/theme/apply_theme.py": "f41ccd561ffa807f75e504e8878ae3a3c538d9aac547e76cf89be0fda7cb8299",
+      "Application/theme/SwitchTheme.py": "6f7d8ca9a7ab488694d8924dd42d029c8ae1ea4227cf29f6242d18980d5f4edf",
+      "scripts/audit_temporal_evaluation.py": "b85a3f1edbd3270917d361559deea98dde6c26bff3ba613811186012ead5d593",
+      "scripts/bpr_preparation_smoke.py": "83a1f81b51a760825599b74d2f669c39373b13441c25d8c6de9793d3922ccd8c",
+      "scripts/dataset_statistics.py": "af7259c4687948bfed50baf83241999ce8acbefbea403cbcedec1046a27f00e7",
+      "scripts/import_reference_csv.py": "f07dd5e0f55be508930e80b6bc4853d896133687fe07bf38fa413e5e15e5ca4a",
+      "scripts/mindbox_adapter_smoke.py": "1e1c1ae4aecfad50931d9abed43793ebb288884b393f094934f768b2cfc73482",
+      "scripts/mindbox_canonical.py": "48513bb8bad027fb16c1eb6d7ea36efc9dd2507a6ef50121fd63d447cf0d2153",
+      "scripts/mindbox_customer_profiles.py": "c0dc3732486f2cd7a7298291f800a952b52a9baed68099fc0b58495caf3a2cf4",
+      "scripts/mindbox_daily_batch.py": "f39e00b66747d5c716b704383068a771537bbcbacef64f97baa92997b00f6b71",
+      "scripts/mindbox_export_smoke.py": "507b94b5b3b7a2b0353ee7b3f7ca9a9c74997bdc3fe869de6b0597d35d3383a3",
+      "scripts/mindbox_interaction_smoke.py": "b86187e95c191bfd2afdea280e73491bcc81c7ae8e9ee03af39a0d4864c5400a",
+      "scripts/mindbox_manual_import.py": "0b09b7648f2d0f2f74b3c5668eb75e14b042d8aca05f9c98feff7412ac277866",
+      "scripts/mindbox_production_train.py": "fb09991e1126546a67e9913aa2f5a7e2f030ede74e6e373d767a2f0140d07ccb",
+      "scripts/mindbox_recommendation_smoke.py": "cf8f1c425582fe5b9dd832286815a9726df8890a2af48e8122a9c9f037aceb47",
+      "scripts/mindbox_schema_report.py": "32a16869db64bce04580d343c74bbeb7bfe5dbdc554718017c10d13b319e8103",
+      "scripts/mindbox_shadow_train.py": "60f5b6e0de8031594356af04400e107c0c77450185577d6bdb5a7cf775500950",
+      "scripts/mindbox_training_batch.py": "aed07c91845c28d4db1d65ec3b8f7a0de65e4e8fc7e7bf8d24de8b7cc1b0b539",
+      "scripts/mindbox_training_preparation_smoke.py": "6728789ca25c9055e229821fc22962fbc09e8608d85e8b2fdc8f6a157b18e298",
+      "scripts/product_resolution_smoke.py": "cd4bfdaeac004d8b49b00f3a9bd8f20dddde4c2f10ec2c1fd230b299d45538a2",
+      "scripts/run_bpr_convergence.py": "9b289f6aa344a0c5705f6ab177fc6c40afee709eb3263b911e437bee775287bf",
+      "scripts/run_bpr_gpu_cost.py": "f4a4364701aba31c0d9149c875348f83094e295ec832ee3a54632d226c823cab",
+      "scripts/run_bpr_weight_experiment.py": "b61a0214d9bd2708fcff38603550b1073c7e4fe4dae32945456f9192e08667b7"
+    }
+  },
+  "sys_executable": "C:\\Users\\Ermolenko.i\\PycharmProjects\\РекомендательнаяСистема\\.venv312\\Scripts\\python.exe",
+  "torch_version": "2.5.1+cu124",
+  "torch_cuda_build": "12.4",
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 3050",
+  "trajectory": [
+    {
+      "epoch": 1,
+      "loss": 0.6827613861917706,
+      "training_seconds": 95.48334109999996,
+      "cumulative_training_seconds": 95.48334109999996,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.00043181517571894227,
+              "recall": 0.0008038585209003215
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.0007400988856392399,
+              "recall": 0.0018086816720257234
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.001383431141710654,
+              "recall": 0.0044212218649517685
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.0008182221351350502,
+              "recall": 0.0021492170709241634
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.0005924229108300344,
+              "recall": 0.0011641443538998836
+            }
+          }
+        },
+        "scoring_seconds": 46.20533239999986,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": null,
+      "ndcg10_relative_delta": null
+    },
+    {
+      "epoch": 2,
+      "loss": 0.6398189523239889,
+      "training_seconds": 90.65372690000004,
+      "cumulative_training_seconds": 186.137068,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.0013756787292279295,
+              "recall": 0.002612540192926045
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.0016962560685519345,
+              "recall": 0.003617363344051447
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.002906592936844667,
+              "recall": 0.008440514469453377
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.0010021258813832118,
+              "recall": 0.00184218606079214
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.0030131817237772436,
+              "recall": 0.006984866123399301
+            }
+          }
+        },
+        "scoring_seconds": 47.31946099999959,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.0009561571829126946,
+      "ndcg10_relative_delta": 1.2919316613844651
+    },
+    {
+      "epoch": 3,
+      "loss": 0.5693881372073749,
+      "training_seconds": 90.30258270000013,
+      "cumulative_training_seconds": 276.43965070000013,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.0031935305282906794,
+              "recall": 0.00502411575562701
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.004082719316509225,
+              "recall": 0.007837620578778135
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.005896216347900294,
+              "recall": 0.01507234726688103
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.0012078004875116974,
+              "recall": 0.003070310101320233
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.009535392975043251,
+              "recall": 0.016880093131548313
+            }
+          }
+        },
+        "scoring_seconds": 49.24528099999998,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.002386463247957291,
+      "ndcg10_relative_delta": 1.4069003449429514
+    },
+    {
+      "epoch": 4,
+      "loss": 0.45973317875518455,
+      "training_seconds": 91.9796567000003,
+      "cumulative_training_seconds": 368.41930740000043,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 5,
+      "loss": 0.33228297192895073,
+      "training_seconds": 91.12786589999996,
+      "cumulative_training_seconds": 459.5471733000004,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.005470339666608123,
+              "recall": 0.008038585209003215
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.00685475563592866,
+              "recall": 0.012258842443729904
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.00916889877030516,
+              "recall": 0.0215032154340836
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.0011860227527552643,
+              "recall": 0.0021492170709241634
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.017605580872326616,
+              "recall": 0.03143189755529686
+            }
+          }
+        },
+        "scoring_seconds": 49.644465500000024,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.0027720363194194348,
+      "ndcg10_relative_delta": 0.678968134843411
+    },
+    {
+      "epoch": 6,
+      "loss": 0.2280044731472981,
+      "training_seconds": 92.49853320000011,
+      "cumulative_training_seconds": 552.0457065000005,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 7,
+      "loss": 0.16052574232705996,
+      "training_seconds": 93.89902470000015,
+      "cumulative_training_seconds": 645.9447312000007,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 8,
+      "loss": 0.12002736109561253,
+      "training_seconds": 91.30619819999993,
+      "cumulative_training_seconds": 737.2509294000006,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.006770292209902418,
+              "recall": 0.01004823151125402
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.008176420776881018,
+              "recall": 0.014469453376205787
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.01030845266427694,
+              "recall": 0.022909967845659164
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.0013332816716234235,
+              "recall": 0.002456248081056187
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.021154465297603297,
+              "recall": 0.037252619324796274
+            }
+          }
+        },
+        "scoring_seconds": 48.782694900000024,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.001321665140952358,
+      "ndcg10_relative_delta": 0.19280995722516417
+    },
+    {
+      "epoch": 9,
+      "loss": 0.09370388304369365,
+      "training_seconds": 89.40124070000002,
+      "cumulative_training_seconds": 826.6521701000006,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 10,
+      "loss": 0.07701679374390151,
+      "training_seconds": 90.23803730000009,
+      "cumulative_training_seconds": 916.8902074000007,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 11,
+      "loss": 0.06502716648324612,
+      "training_seconds": 92.30071270000008,
+      "cumulative_training_seconds": 1009.1909201000008,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 12,
+      "loss": 0.05629561157485345,
+      "training_seconds": 86.55172600000014,
+      "cumulative_training_seconds": 1095.742646100001,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.006586832805306881,
+              "recall": 0.00984726688102894
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.008282202455395174,
+              "recall": 0.01507234726688103
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.010834642830527189,
+              "recall": 0.02532154340836013
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.0016564137687989512,
+              "recall": 0.00276327909118821
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.020848253651378466,
+              "recall": 0.03841676367869616
+            }
+          }
+        },
+        "scoring_seconds": 51.38356440000007,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.00010578167851415556,
+      "ndcg10_relative_delta": 0.012937406403209485
+    },
+    {
+      "epoch": 13,
+      "loss": 0.049944605655085274,
+      "training_seconds": 90.28108460000021,
+      "cumulative_training_seconds": 1186.0237307000011,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 14,
+      "loss": 0.04524778905411768,
+      "training_seconds": 93.14036410000017,
+      "cumulative_training_seconds": 1279.1640948000013,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 15,
+      "loss": 0.04138495032020476,
+      "training_seconds": 92.23056550000001,
+      "cumulative_training_seconds": 1371.3946603000013,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 16,
+      "loss": 0.03823213141452849,
+      "training_seconds": 91.6997421000001,
+      "cumulative_training_seconds": 1463.0944024000014,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 17,
+      "loss": 0.0356950210923702,
+      "training_seconds": 91.2829783000002,
+      "cumulative_training_seconds": 1554.3773807000016,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 18,
+      "loss": 0.03352039740488646,
+      "training_seconds": 91.92325280000023,
+      "cumulative_training_seconds": 1646.3006335000018,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 19,
+      "loss": 0.0316745353648368,
+      "training_seconds": 91.57701010000028,
+      "cumulative_training_seconds": 1737.877643600002,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 20,
+      "loss": 0.030255203787818274,
+      "training_seconds": 85.9121054000002,
+      "cumulative_training_seconds": 1823.7897490000023,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.00764583132568965,
+              "recall": 0.011454983922829582
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.009305710852445196,
+              "recall": 0.016680064308681672
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.011975951641744498,
+              "recall": 0.027331189710610933
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.002329473275495246,
+              "recall": 0.00460546515198035
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.022536741992712026,
+              "recall": 0.03958090803259604
+            }
+          }
+        },
+        "scoring_seconds": 45.0451094,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.0010235083970500224,
+      "ndcg10_relative_delta": 0.12357925353337516
+    },
+    {
+      "epoch": 21,
+      "loss": 0.02894488219378293,
+      "training_seconds": 83.58771940000042,
+      "cumulative_training_seconds": 1907.3774684000027,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 22,
+      "loss": 0.027699924048297082,
+      "training_seconds": 84.64519300000029,
+      "cumulative_training_seconds": 1992.022661400003,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 23,
+      "loss": 0.02663545873098731,
+      "training_seconds": 86.3359959999998,
+      "cumulative_training_seconds": 2078.358657400003,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 24,
+      "loss": 0.025701657541700312,
+      "training_seconds": 87.03649380000024,
+      "cumulative_training_seconds": 2165.395151200003,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 25,
+      "loss": 0.02492472452220616,
+      "training_seconds": 92.87831769999957,
+      "cumulative_training_seconds": 2258.2734689000026,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 26,
+      "loss": 0.02422712840028856,
+      "training_seconds": 90.02914299999975,
+      "cumulative_training_seconds": 2348.3026119000024,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 27,
+      "loss": 0.02356115693764726,
+      "training_seconds": 90.41035580000062,
+      "cumulative_training_seconds": 2438.712967700003,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 28,
+      "loss": 0.022989251579875056,
+      "training_seconds": 93.42651949999981,
+      "cumulative_training_seconds": 2532.139487200003,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 29,
+      "loss": 0.022455667277858724,
+      "training_seconds": 92.46364789999916,
+      "cumulative_training_seconds": 2624.603135100002,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      }
+    },
+    {
+      "epoch": 30,
+      "loss": 0.022009617568988272,
+      "training_seconds": 91.13886569999977,
+      "cumulative_training_seconds": 2715.7420008000017,
+      "cuda_memory_before_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "validation": {
+        "metrics": {
+          "overall": {
+            "5": {
+              "cases": 4976,
+              "ndcg": 0.007421049166765873,
+              "recall": 0.011254019292604502
+            },
+            "10": {
+              "cases": 4976,
+              "ndcg": 0.009840156621554253,
+              "recall": 0.018890675241157555
+            },
+            "20": {
+              "cases": 4976,
+              "ndcg": 0.013308059214716233,
+              "recall": 0.03255627009646302
+            }
+          },
+          "VIEW": {
+            "10": {
+              "cases": 3257,
+              "ndcg": 0.003012075854587713,
+              "recall": 0.006754682222904513
+            }
+          },
+          "FAVORITE": {
+            "10": {
+              "cases": 1,
+              "ndcg": 0.0,
+              "recall": 0.0
+            }
+          },
+          "PURCHASE": {
+            "10": {
+              "cases": 1718,
+              "ndcg": 0.02279062182215471,
+              "recall": 0.04190919674039581
+            }
+          }
+        },
+        "scoring_seconds": 47.77958470000067,
+        "scoring_device": "cuda",
+        "cases": 4976,
+        "cuda_memory_after_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "candidate_counts": {
+          "min": 4460,
+          "max": 5199,
+          "mean": 5171.96402733119
+        }
+      },
+      "ndcg10_delta": 0.0005344457691090574,
+      "ndcg10_relative_delta": 0.05743201971170476
+    }
+  ],
+  "test_performance_computed": false,
+  "publication_executed": false,
+  "automatic_follow_up_runs": false,
+  "weight_sweep_executed": false,
+  "canonical_ingestion_seconds": 475.49762179999993,
+  "snapshot_seconds": 11.380961600000091,
+  "preparation_seconds": 191.3140867000002,
+  "training_users": 155669,
+  "training_items": 5201,
+  "training_pairs": 738640,
+  "mapping_sha256": "aeaccd129eab39c1b3b4fbb3558717afe3c45e46fac133da58130c146a694976",
+  "canonical_source": {
+    "canonical_revision": "af24df53c47349d0ae3170ab396df726",
+    "declared_start": "2025-01-01T00:00:00+00:00",
+    "declared_end": "2026-01-01T00:00:00+00:00",
+    "updated": "2026-09-23T11:32:46.254830+00:00",
+    "source_kinds": [
+      "MANUAL"
+    ],
+    "effective_intervals": {
+      "actions": [
+        [
+          "2025-01-01T00:00:00+00:00",
+          "2026-01-01T00:00:00+00:00"
+        ]
+      ],
+      "orders": [
+        [
+          "2025-01-01T00:00:00+00:00",
+          "2026-01-01T00:00:00+00:00"
+        ]
+      ]
+    },
+    "selected_components": 3,
+    "input_stable_during_scan": true,
+    "selected_file_count": 7,
+    "selected_file_bytes": 6064606174,
+    "selection": {
+      "view_action_system_names": [
+        "ProsmotrProdukta",
+        "ProsmotrProduktaVApiMethod",
+        "ProsmotrProduktaVOperaciiKz"
+      ],
+      "favorite_action_system_names": [
+        "DobavlenieProduktaVSpisokVOperaciiDobavlenie",
+        "DobavlenieProduktaVSpisokVOperaciiDobavlenieTovara"
+      ],
+      "purchase_line_statuses": [
+        "CP",
+        "delivering",
+        "F"
+      ],
+      "action_product_namespaces": [
+        "offline1C",
+        "kanzlerKz"
+      ],
+      "order_product_namespaces": [
+        "offline1C",
+        "kanzlerKz"
+      ]
+    },
+    "merge_start": "2025-01-01T00:00:00+00:00",
+    "merge_end": "2026-01-01T00:00:00+00:00",
+    "ingestion": {
+      "customer_merges": 41412,
+      "actions_raw": 3347664,
+      "unmapped_actions": 0,
+      "malformed_mapped_actions": 2732459,
+      "order_lines": 666576,
+      "orders_raw": 309044,
+      "orders_unique": 309044,
+      "orders_duplicate_identical": 0,
+      "orders_duplicate_conflicting": 0,
+      "classified_interactions": 1206884,
+      "resolved_interactions": 1206864,
+      "unresolved_interactions": 20,
+      "unsupported_products": 0,
+      "resolution_by_type": {
+        "VIEW": {
+          "interactions_total": 610094,
+          "resolved": 610086,
+          "unresolved": 8,
+          "unsupported_namespace": 0
+        },
+        "FAVORITE": {
+          "interactions_total": 5111,
+          "resolved": 5111,
+          "unresolved": 0,
+          "unsupported_namespace": 0
+        },
+        "PURCHASE": {
+          "interactions_total": 591679,
+          "resolved": 591667,
+          "unresolved": 12,
+          "unsupported_namespace": 0
+        }
+      }
+    }
+  },
+  "dataset_sha256": "bd69ed9299c51409cc9e27da6cdb2e6324a6b42b1287033de15e84b4db1f5b58",
+  "validation_cases": 4976,
+  "training_events": 990054,
+  "candidate_counts": {
+    "min": 4460,
+    "max": 5199,
+    "mean": 5171.96402733119
+  },
+  "validation_slices": {
+    "VIEW": 3257,
+    "FAVORITE": 1,
+    "PURCHASE": 1718
+  },
+  "parent_memory_before_worker": {
+    "scope": "this process only",
+    "current_working_set_bytes": 1709809664,
+    "peak_working_set_bytes": 1915166720,
+    "peak_commit_bytes": 2545623040
+  },
+  "run": {
+    "epochs_completed": 30,
+    "returned_state_epoch": 30,
+    "internal_best_epoch": -1,
+    "training_seconds": 2715.7420008000017,
+    "evaluation_seconds": 385.4054933000002,
+    "cuda_memory": {
+      "allocated_bytes": 164730880,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "process_memory": {
+      "scope": "this process only",
+      "current_working_set_bytes": 2164932608,
+      "peak_working_set_bytes": 2792931328,
+      "peak_commit_bytes": 3687235584
+    },
+    "device": "cuda:0",
+    "trajectory": [
+      {
+        "epoch": 1,
+        "loss": 0.6827613861917706,
+        "training_seconds": 95.48334109999996,
+        "cumulative_training_seconds": 95.48334109999996,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.00043181517571894227,
+                "recall": 0.0008038585209003215
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.0007400988856392399,
+                "recall": 0.0018086816720257234
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.001383431141710654,
+                "recall": 0.0044212218649517685
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.0008182221351350502,
+                "recall": 0.0021492170709241634
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.0005924229108300344,
+                "recall": 0.0011641443538998836
+              }
+            }
+          },
+          "scoring_seconds": 46.20533239999986,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": null,
+        "ndcg10_relative_delta": null
+      },
+      {
+        "epoch": 2,
+        "loss": 0.6398189523239889,
+        "training_seconds": 90.65372690000004,
+        "cumulative_training_seconds": 186.137068,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.0013756787292279295,
+                "recall": 0.002612540192926045
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.0016962560685519345,
+                "recall": 0.003617363344051447
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.002906592936844667,
+                "recall": 0.008440514469453377
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.0010021258813832118,
+                "recall": 0.00184218606079214
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.0030131817237772436,
+                "recall": 0.006984866123399301
+              }
+            }
+          },
+          "scoring_seconds": 47.31946099999959,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.0009561571829126946,
+        "ndcg10_relative_delta": 1.2919316613844651
+      },
+      {
+        "epoch": 3,
+        "loss": 0.5693881372073749,
+        "training_seconds": 90.30258270000013,
+        "cumulative_training_seconds": 276.43965070000013,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.0031935305282906794,
+                "recall": 0.00502411575562701
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.004082719316509225,
+                "recall": 0.007837620578778135
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.005896216347900294,
+                "recall": 0.01507234726688103
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.0012078004875116974,
+                "recall": 0.003070310101320233
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.009535392975043251,
+                "recall": 0.016880093131548313
+              }
+            }
+          },
+          "scoring_seconds": 49.24528099999998,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.002386463247957291,
+        "ndcg10_relative_delta": 1.4069003449429514
+      },
+      {
+        "epoch": 4,
+        "loss": 0.45973317875518455,
+        "training_seconds": 91.9796567000003,
+        "cumulative_training_seconds": 368.41930740000043,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 5,
+        "loss": 0.33228297192895073,
+        "training_seconds": 91.12786589999996,
+        "cumulative_training_seconds": 459.5471733000004,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.005470339666608123,
+                "recall": 0.008038585209003215
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.00685475563592866,
+                "recall": 0.012258842443729904
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.00916889877030516,
+                "recall": 0.0215032154340836
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.0011860227527552643,
+                "recall": 0.0021492170709241634
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.017605580872326616,
+                "recall": 0.03143189755529686
+              }
+            }
+          },
+          "scoring_seconds": 49.644465500000024,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.0027720363194194348,
+        "ndcg10_relative_delta": 0.678968134843411
+      },
+      {
+        "epoch": 6,
+        "loss": 0.2280044731472981,
+        "training_seconds": 92.49853320000011,
+        "cumulative_training_seconds": 552.0457065000005,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 7,
+        "loss": 0.16052574232705996,
+        "training_seconds": 93.89902470000015,
+        "cumulative_training_seconds": 645.9447312000007,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 8,
+        "loss": 0.12002736109561253,
+        "training_seconds": 91.30619819999993,
+        "cumulative_training_seconds": 737.2509294000006,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.006770292209902418,
+                "recall": 0.01004823151125402
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.008176420776881018,
+                "recall": 0.014469453376205787
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.01030845266427694,
+                "recall": 0.022909967845659164
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.0013332816716234235,
+                "recall": 0.002456248081056187
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.021154465297603297,
+                "recall": 0.037252619324796274
+              }
+            }
+          },
+          "scoring_seconds": 48.782694900000024,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.001321665140952358,
+        "ndcg10_relative_delta": 0.19280995722516417
+      },
+      {
+        "epoch": 9,
+        "loss": 0.09370388304369365,
+        "training_seconds": 89.40124070000002,
+        "cumulative_training_seconds": 826.6521701000006,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 10,
+        "loss": 0.07701679374390151,
+        "training_seconds": 90.23803730000009,
+        "cumulative_training_seconds": 916.8902074000007,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 11,
+        "loss": 0.06502716648324612,
+        "training_seconds": 92.30071270000008,
+        "cumulative_training_seconds": 1009.1909201000008,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 12,
+        "loss": 0.05629561157485345,
+        "training_seconds": 86.55172600000014,
+        "cumulative_training_seconds": 1095.742646100001,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.006586832805306881,
+                "recall": 0.00984726688102894
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.008282202455395174,
+                "recall": 0.01507234726688103
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.010834642830527189,
+                "recall": 0.02532154340836013
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.0016564137687989512,
+                "recall": 0.00276327909118821
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.020848253651378466,
+                "recall": 0.03841676367869616
+              }
+            }
+          },
+          "scoring_seconds": 51.38356440000007,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.00010578167851415556,
+        "ndcg10_relative_delta": 0.012937406403209485
+      },
+      {
+        "epoch": 13,
+        "loss": 0.049944605655085274,
+        "training_seconds": 90.28108460000021,
+        "cumulative_training_seconds": 1186.0237307000011,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 14,
+        "loss": 0.04524778905411768,
+        "training_seconds": 93.14036410000017,
+        "cumulative_training_seconds": 1279.1640948000013,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 15,
+        "loss": 0.04138495032020476,
+        "training_seconds": 92.23056550000001,
+        "cumulative_training_seconds": 1371.3946603000013,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 16,
+        "loss": 0.03823213141452849,
+        "training_seconds": 91.6997421000001,
+        "cumulative_training_seconds": 1463.0944024000014,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 17,
+        "loss": 0.0356950210923702,
+        "training_seconds": 91.2829783000002,
+        "cumulative_training_seconds": 1554.3773807000016,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 18,
+        "loss": 0.03352039740488646,
+        "training_seconds": 91.92325280000023,
+        "cumulative_training_seconds": 1646.3006335000018,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 19,
+        "loss": 0.0316745353648368,
+        "training_seconds": 91.57701010000028,
+        "cumulative_training_seconds": 1737.877643600002,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 20,
+        "loss": 0.030255203787818274,
+        "training_seconds": 85.9121054000002,
+        "cumulative_training_seconds": 1823.7897490000023,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.00764583132568965,
+                "recall": 0.011454983922829582
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.009305710852445196,
+                "recall": 0.016680064308681672
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.011975951641744498,
+                "recall": 0.027331189710610933
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.002329473275495246,
+                "recall": 0.00460546515198035
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.022536741992712026,
+                "recall": 0.03958090803259604
+              }
+            }
+          },
+          "scoring_seconds": 45.0451094,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.0010235083970500224,
+        "ndcg10_relative_delta": 0.12357925353337516
+      },
+      {
+        "epoch": 21,
+        "loss": 0.02894488219378293,
+        "training_seconds": 83.58771940000042,
+        "cumulative_training_seconds": 1907.3774684000027,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 22,
+        "loss": 0.027699924048297082,
+        "training_seconds": 84.64519300000029,
+        "cumulative_training_seconds": 1992.022661400003,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 23,
+        "loss": 0.02663545873098731,
+        "training_seconds": 86.3359959999998,
+        "cumulative_training_seconds": 2078.358657400003,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 24,
+        "loss": 0.025701657541700312,
+        "training_seconds": 87.03649380000024,
+        "cumulative_training_seconds": 2165.395151200003,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 25,
+        "loss": 0.02492472452220616,
+        "training_seconds": 92.87831769999957,
+        "cumulative_training_seconds": 2258.2734689000026,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 26,
+        "loss": 0.02422712840028856,
+        "training_seconds": 90.02914299999975,
+        "cumulative_training_seconds": 2348.3026119000024,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 27,
+        "loss": 0.02356115693764726,
+        "training_seconds": 90.41035580000062,
+        "cumulative_training_seconds": 2438.712967700003,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 28,
+        "loss": 0.022989251579875056,
+        "training_seconds": 93.42651949999981,
+        "cumulative_training_seconds": 2532.139487200003,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 29,
+        "loss": 0.022455667277858724,
+        "training_seconds": 92.46364789999916,
+        "cumulative_training_seconds": 2624.603135100002,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        }
+      },
+      {
+        "epoch": 30,
+        "loss": 0.022009617568988272,
+        "training_seconds": 91.13886569999977,
+        "cumulative_training_seconds": 2715.7420008000017,
+        "cuda_memory_before_scoring": {
+          "allocated_bytes": 330845696,
+          "reserved_bytes": 432013312,
+          "peak_allocated_bytes": 413211136,
+          "peak_reserved_bytes": 432013312
+        },
+        "validation": {
+          "metrics": {
+            "overall": {
+              "5": {
+                "cases": 4976,
+                "ndcg": 0.007421049166765873,
+                "recall": 0.011254019292604502
+              },
+              "10": {
+                "cases": 4976,
+                "ndcg": 0.009840156621554253,
+                "recall": 0.018890675241157555
+              },
+              "20": {
+                "cases": 4976,
+                "ndcg": 0.013308059214716233,
+                "recall": 0.03255627009646302
+              }
+            },
+            "VIEW": {
+              "10": {
+                "cases": 3257,
+                "ndcg": 0.003012075854587713,
+                "recall": 0.006754682222904513
+              }
+            },
+            "FAVORITE": {
+              "10": {
+                "cases": 1,
+                "ndcg": 0.0,
+                "recall": 0.0
+              }
+            },
+            "PURCHASE": {
+              "10": {
+                "cases": 1718,
+                "ndcg": 0.02279062182215471,
+                "recall": 0.04190919674039581
+              }
+            }
+          },
+          "scoring_seconds": 47.77958470000067,
+          "scoring_device": "cuda",
+          "cases": 4976,
+          "cuda_memory_after_scoring": {
+            "allocated_bytes": 330845696,
+            "reserved_bytes": 432013312,
+            "peak_allocated_bytes": 413211136,
+            "peak_reserved_bytes": 432013312
+          },
+          "candidate_counts": {
+            "min": 4460,
+            "max": 5199,
+            "mean": 5171.96402733119
+          }
+        },
+        "ndcg10_delta": 0.0005344457691090574,
+        "ndcg10_relative_delta": 0.05743201971170476
+      }
+    ],
+    "sys_executable": "C:\\Users\\Ermolenko.i\\PycharmProjects\\РекомендательнаяСистема\\.venv312\\Scripts\\python.exe",
+    "torch_version": "2.5.1+cu124",
+    "torch_cuda_build": "12.4",
+    "finite_loss_and_parameters": true,
+    "test_performance_computed": false,
+    "publication_executed": false,
+    "timing_scope": "Training excludes observer; epoch 1 includes model/Adam initialization"
+  },
+  "worker_wall_seconds": 3118.8177392000007,
+  "finished_at": "2026-10-05T07:41:20.403451+00:00"
+}

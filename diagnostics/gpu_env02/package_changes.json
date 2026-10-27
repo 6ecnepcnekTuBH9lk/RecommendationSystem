@@ -1,0 +1,10 @@
+{
+  "only_torch_changed": true,
+  "torch_package_before": [
+    "torch==2.5.1"
+  ],
+  "torch_package_after": [
+    "torch==2.5.1+cu124"
+  ],
+  "other_package_count": 38
+}

@@ -56,8 +56,9 @@ def main(argv=None):
         return 1
     except (KeyboardInterrupt, InterruptedError):
         return 130
-    except Exception as exc:
-        emit_error(exc, source="customers" if args.command == "customers" else "actions/orders")
+    except Exception:
+        emit_error(ManualImportError("Внутренняя ошибка ручного импорта."),
+                   source="customers" if args.command == "customers" else "actions/orders")
         return 1
 
 

@@ -1,0 +1,63 @@
+........................................................................ [  3%]
+........................................................................ [  6%]
+........................................................................ [  9%]
+........................................................................ [ 13%]
+........................................................................ [ 16%]
+........................................................................ [ 19%]
+........................................................................ [ 23%]
+........................................................................ [ 26%]
+........................................................................ [ 29%]
+........................................................................ [ 33%]
+........................................................................ [ 36%]
+........................................................................ [ 39%]
+........................................................................ [ 43%]
+........................................................................ [ 46%]
+........................................................................ [ 49%]
+........................................................................ [ 53%]
+........................................................................ [ 56%]
+........................................................................ [ 59%]
+........................................................................ [ 62%]
+........................................................................ [ 66%]
+........................................................................ [ 69%]
+........................................................................ [ 72%]
+........................................................................ [ 76%]
+........................................................................ [ 79%]
+........................................................................ [ 82%]
+........................................................................ [ 86%]
+........................................................................ [ 89%]
+........................................................................ [ 92%]
+........................................................................ [ 96%]
+........................................................................ [ 99%]
+............                                                             [100%]
+============================== warnings summary ===============================
+tests/evaluation/test_bpr_state_selection.py: 2 warnings
+tests/model/test_bprmf_artifact_publication.py: 13 warnings
+tests/model/test_interaction_analytics.py: 1 warning
+tests/model/test_mindbox_production_training.py: 23 warnings
+tests/model/test_mindbox_recommendation_smoke.py: 16 warnings
+tests/model/test_seen_items.py: 2 warnings
+tests/test_customer_profiles.py: 1 warning
+  C:\Users\Ermolenko.i\PycharmProjects\�����������������������\Application\model\BPRMF.py:1038: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+    disk_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+tests/files/test_files_processing.py::test_interaction_processor_reports_malformed_date_without_dropping_rows[views]
+tests/files/test_files_processing.py::test_interaction_processor_does_not_warn_for_valid_or_empty_dates[views]
+  C:\Users\Ermolenko.i\PycharmProjects\�����������������������\Application\files\files_processing.py:386: FutureWarning: Downcasting behavior in `replace` is deprecated and will be removed in a future version. To retain the old behavior, explicitly call `result.infer_objects(copy=False)`. To opt-in to the future behavior, set `pd.set_option('future.no_silent_downcasting', True)`
+    df = df.replace(["", " ", "  ", "None", "none", "NULL", "null", "-", "--", "nan"], np.nan)
+
+tests/model/test_bprmf_artifact_publication.py: 16 warnings
+tests/model/test_interaction_analytics.py: 1 warning
+tests/model/test_mindbox_production_training.py: 18 warnings
+tests/model/test_mindbox_recommendation_smoke.py: 14 warnings
+tests/model/test_seen_items.py: 2 warnings
+tests/tabs/test_train_model_start.py: 2 warnings
+tests/test_customer_profiles.py: 1 warning
+  C:\Users\Ermolenko.i\PycharmProjects\�����������������������\Application\model\BPRMF.py:1100: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+tests/model/test_bprmf_artifact_publication.py::test_explicit_model_directory_return_and_disk_commit_order
+  C:\Users\Ermolenko.i\PycharmProjects\�����������������������\tests\model\test_bprmf_artifact_publication.py:480: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+    return original_load(path, *args, **kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2172 passed, 115 warnings in 200.77s (0:03:20)

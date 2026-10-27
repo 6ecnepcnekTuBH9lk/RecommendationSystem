@@ -174,7 +174,8 @@ def test_old_api_versions_keep_defaults_and_selection(saved, version):
 
 
 
-def test_manual_transport_uses_normal_preparation_and_dedup(saved):
+@pytest.mark.parametrize('base_price', ['present', 'missing', 'null'])
+def test_manual_transport_uses_normal_preparation_and_dedup(saved, base_price):
     from Application.model.BPRMF import TrainConfig
     root, source, _ = saved
     action = {"ids": {"mindboxId": 10}, "customer": {"ids": {"mindboxId": 1}},
@@ -184,9 +185,14 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
     actions = write(root, "actions", [action] * 9 + [{"actionTemplate": {"ids": {"systemName": "UstanovkaSpiskaProduktovV"}},
                                                      "products": [{"ids": {"website": "ignored"}}]}])
     order = {"ids": {"mindboxId": 20}, "customer": {"ids": {"mindboxId": 1}},
-             "firstAction": {"dateTimeUtc": "2026-01-01T12:00:00Z", "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
+              "firstAction": {"dateTimeUtc": (source.window.interaction_since + timedelta(hours=12)).isoformat(),
+                              "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
              "lines": [{"id": 1, "number": 1, "quantity": 2, "basePricePerItem": 1, "priceOfLine": 2,
                         "status": {"ids": {"externalId": "CP"}}, "product": {"ids": {"offline1C": "654321_variant"}}}]}
+    if base_price == 'missing':
+        del order['lines'][0]['basePricePerItem']
+    elif base_price == 'null':
+        order['lines'][0]['basePricePerItem'] = None
     orders = write(root, "orders", [order, order])
     selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
     manifest = manual.import_interactions(actions, orders, raw_root=root, window=source.window, selection=selection)
@@ -200,6 +206,96 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved):
     assert result.diagnostics.orders_duplicate_identical == 1
     assert result.diagnostics.unmapped_actions == 1
     assert result.prepared_data.mappings.idx2user == ["2"]
+
+
+@pytest.mark.parametrize("boundary,offset,expected_purchase,before_start,at_or_after_end", [
+    ("start", -1, 0, 2, 0),
+    ("start", 0, 1, 0, 0),
+    ("end", -1, 1, 0, 0),
+    ("end", 0, 0, 0, 2),
+    ("end", 1, 0, 0, 2),
+])
+def test_manual_preparation_respects_half_open_order_window(
+    saved, boundary, offset, expected_purchase, before_start, at_or_after_end,
+):
+    from Application.model.BPRMF import TrainConfig
+
+    root, source, _ = saved
+    window = source.window
+    stamp = (window.interaction_since if boundary == "start" else window.interaction_until)
+    stamp += timedelta(microseconds=offset)
+    action = {"ids": {"mindboxId": 10}, "customer": {"ids": {"mindboxId": 1}},
+              "dateTimeUtc": (window.interaction_since + timedelta(hours=12)).isoformat(),
+              "creationDateTimeUtc": (window.interaction_since + timedelta(hours=12)).isoformat(),
+              "actionTemplate": {"ids": {"systemName": "CustomView"}},
+              "products": [{"ids": {"offline1C": "123456_variant"}}]}
+    order = {"ids": {"mindboxId": 20}, "customer": {"ids": {"mindboxId": 1}},
+             "firstAction": {"dateTimeUtc": stamp.isoformat(),
+                             "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
+             "lines": [{"id": 1, "number": 1, "quantity": 2, "basePricePerItem": 1, "priceOfLine": 2,
+                        "status": {"ids": {"externalId": "CP"}}, "product": {"ids": {"offline1C": "654321_variant"}}}]}
+    actions = write(root, "actions", [action] * 9)
+    orders = write(root, "orders", [order, order])
+    original = actions.read_bytes(), orders.read_bytes()
+    selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
+    manifest = manual.import_interactions(actions, orders, raw_root=root, window=window, selection=selection)
+    batch = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
+    catalog = root / "nomenclature.csv"
+    catalog.write_text("КодНоменклатуры\n123456\n654321\n", encoding="utf-8-sig")
+    result = daily.prepare_training_data_from_chunked_batch(
+        batch, raw_root=root, catalog_path=catalog, train_config=TrainConfig(),
+    )
+    assert result.complete
+    assert result.diagnostics.purchase_interactions == expected_purchase
+    assert result.diagnostics.orders_duplicate_identical == expected_purchase
+    assert result.diagnostics.orders_before_start == before_start
+    assert result.diagnostics.orders_at_or_after_end == at_or_after_end
+    assert result.diagnostics.view_interactions == 9
+    assert result.prepared_data.mappings.idx2user == ["2"]
+    assert (actions.read_bytes(), orders.read_bytes()) == original
+
+
+def test_order_schema_failure_keeps_previous_canonical_pair_and_source_bytes(saved):
+    root, batch, _ = saved
+    manual.import_interactions(write(root, 'actions'), write(root, 'orders'), raw_root=root, window=batch.window)
+    before = (root / 'canonical/catalog.json').read_bytes()
+    bad = write(root, 'orders', [{'ids': {'mindboxId': 'PRIVATE_ORDER'},
+                               'customer': {'ids': {'mindboxId': 'PRIVATE_CUSTOMER'}}}])
+    source = bad.read_bytes()
+    with pytest.raises(manual.ManualImportError) as error:
+        manual.import_interactions(write(root, 'actions'), bad, raw_root=root, window=batch.window)
+    assert error.value.diagnostic.source == 'orders' and error.value.diagnostic.record_index == 1
+    assert 'firstAction.dateTimeUtc' in str(error.value) and 'PRIVATE' not in str(error.value)
+    assert (root / 'canonical/catalog.json').read_bytes() == before
+    assert bad.read_bytes() == source
+    assert not list((root / 'canonical').glob('.manual-interactions-*'))
+
+
+@pytest.mark.parametrize('unknown', [False, True])
+def test_customer_second_file_diagnostic_and_atomic_database_preservation(saved, monkeypatch, unknown):
+    from Application.mindbox import canonical_customers as customers
+    root, _, _ = saved
+    first = root / 'customers1.json'
+    first.write_text(json.dumps({'customers': [{'ids': {'mindboxId': 1}, 'email': 'private@example.test'}]}))
+    customers.import_full(root, first)
+    before = customers.database(root).read_bytes()
+    second = root / 'customers2.json'
+    second.write_text(json.dumps({'customers': [{'ids': {'mindboxId': 'PRIVATE_CUSTOMER'}, 'email': True}]}))
+    if unknown:
+        original = customers._upsert
+        def upsert(connection, raw, resolver):
+            if raw['ids']['mindboxId'] == 'PRIVATE_CUSTOMER':
+                raise RuntimeError('PRIVATE_EMAIL_API_KEY')
+            return original(connection, raw, resolver)
+        monkeypatch.setattr(customers, '_upsert', upsert)
+    with pytest.raises(manual.ManualImportError) as error:
+        customers.import_full(root, (second, first))
+    detail = error.value.diagnostic
+    assert (detail.source, detail.file_index, detail.file_total, detail.record_index) == ('customers', 2, 2, 1)
+    assert detail.field_path == (None if unknown else 'email')
+    assert 'PRIVATE' not in str(error.value)
+    assert customers.database(root).read_bytes() == before
+    assert not list((root / 'canonical').glob('.customers-*'))
 
 
 def utc(value):
@@ -381,6 +477,7 @@ def test_interrupt_immediately_after_catalog_switch_keeps_published_raw(tmp_path
 
 def test_manual_validation_consumes_records_once_incrementally(tmp_path, monkeypatch):
     from Application.mindbox.adapters import actions as action_adapter
+    from Application.mindbox import manual_diagnostics
     publish_merges(tmp_path)
     processed = 0
     calls = []
@@ -389,14 +486,15 @@ def test_manual_validation_consumes_records_once_incrementally(tmp_path, monkeyp
         nonlocal processed
         processed += 1
         return original(raw)
-    def records(name, **kwargs):
+    def records(path, name):
+        name = 'actions' if name == 'customerActions' else name
         calls.append(name)
         if name == "actions":
             for index in range(1000):
                 assert processed == index
                 yield {"actionTemplate": {"ids": {"systemName": "Unmapped"}}}
     monkeypatch.setattr(action_adapter, "adapt_action_system_name", adapt)
-    monkeypatch.setattr(store, "iter_export", records)
+    monkeypatch.setattr(manual_diagnostics, "iter_json_records", records)
     import_pair(tmp_path)
     assert processed == 1000 and calls == ["actions", "orders"]
 

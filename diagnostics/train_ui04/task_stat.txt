@@ -1,0 +1,5 @@
+Application/statistics_charts.py: +7 / -2
+Application/tabs/train_model_tab.py: +4 / -2
+Application/training_charts.py: +68 / -10
+tests/tabs/test_training_research_ui.py: +162 / -1
+4 files: +241 / -15

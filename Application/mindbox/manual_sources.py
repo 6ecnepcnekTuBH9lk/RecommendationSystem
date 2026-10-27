@@ -9,6 +9,10 @@ import re
 class ManualImportError(ValueError):
     """Validation categories without source paths or record values."""
 
+    def __init__(self, *args, diagnostic=None):
+        super().__init__(*args)
+        self.diagnostic = diagnostic
+
 
 def natural_path_key(path):
     # Tagged segments avoid comparing str with int; full path breaks filename ties.

@@ -1,6 +1,8 @@
 """Направленные объединения customer ID; без зависимости от профилей клиентов."""
 
 from collections.abc import Iterable
+from threading import current_thread, main_thread
+from time import sleep
 
 from .records import CustomerMergeRecord
 
@@ -9,11 +11,20 @@ class CustomerIdentityError(Exception):
     """Ошибка графа identity, без идентификаторов в диагностике."""
 
 
+def _worker_records(merges):
+    """Give the GUI a GIL acquisition window during a cold background build."""
+    background = current_thread() is not main_thread()
+    for index, merge in enumerate(merges, 1):
+        yield merge
+        if background and index % 256 == 0:
+            sleep(.001)  # Worker only; no Qt calls, changed records or identity rules.
+
+
 class CustomerIdResolver:
     def __init__(self, merges: Iterable[CustomerMergeRecord] = ()) -> None:
         self._parents: dict[str, str] = {}
         self._canonical: dict[str, str] = {}
-        for merge in merges:
+        for merge in _worker_records(merges):
             if (not isinstance(merge, CustomerMergeRecord)
                     or not isinstance(merge.merged_customer_ids, tuple) or not merge.merged_customer_ids):
                 raise CustomerIdentityError("Malformed merge: ожидается запись с непустым списком источников")

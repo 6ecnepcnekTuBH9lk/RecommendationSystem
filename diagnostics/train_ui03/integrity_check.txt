@@ -1,0 +1,38 @@
+{
+  "baseline_files": 189,
+  "changed_for_train_ui03": [
+    "Application/statistics_charts.py",
+    "Application/evaluation/experiments/gui_run.py",
+    "Application/tabs/train_model_tab.py",
+    "tests/evaluation/test_gui_run.py",
+    "tests/tabs/test_training_research_ui.py",
+    "README.md"
+  ],
+  "added_for_train_ui03": [
+    "Application/training_charts.py"
+  ],
+  "protected_count": 23,
+  "protected_unchanged": true,
+  "contracts_unchanged": {
+    "Application/model/BPRMF.py": true,
+    "Application/tabs/training_workflow.py": true,
+    "Application/evaluation/experiments/gui_history.py": true,
+    "Application/model/mindbox_production_training.py": true,
+    "scripts/mindbox_production_train.py": true,
+    "assets/icons/start_training.png": true,
+    "assets/icons/failure.png": true,
+    "requirements.txt": true,
+    "requirements-dev.txt": true
+  },
+  "legacy_helpers_unchanged": true,
+  "production_model_files": [],
+  "production_current_exists": false
+}
+Application/statistics_charts.py: +40 / -33
+Application/evaluation/experiments/gui_run.py: +45 / -8
+Application/tabs/train_model_tab.py: +108 / -62
+tests/evaluation/test_gui_run.py: +88 / -1
+tests/tabs/test_training_research_ui.py: +174 / -22
+README.md: +21 / -11
+Application/training_charts.py: +94 / -0
+7 files: +570 / -137

@@ -1,0 +1,343 @@
+--- TRAIN-UI-03/Application/statistics_charts.py
++++ TRAIN-UI-04/Application/statistics_charts.py
+@@ -20,7 +20,7 @@
+ NEUTRAL = {False: '#8A8F98', True: '#9BA3AD'}
+ 
+ 
+-def style_chart(chart, secondary=False):
++def style_chart(chart, secondary=False, section_title=False):
+     """Shared Material palette for native statistics and live training charts."""
+     surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
+     background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
+@@ -33,8 +33,13 @@
+     chart.setTitleBrush(foreground)
+     font = QFont(QApplication.font())
+     font.setPointSizeF(10)
+-    chart.setTitleFont(font)
+     chart.legend().setFont(font)
++    title_font = QFont(font)
++    if section_title:
++        # Same typography as QLabel.statisticsSection in the shared QSS.
++        title_font.setPointSizeF(12)
++        title_font.setItalic(True)
++    chart.setTitleFont(title_font)
+     chart.legend().setLabelColor(foreground)
+     grid = QColor(foreground)
+     grid.setAlpha(40)
+--- TRAIN-UI-03/Application/tabs/train_model_tab.py
++++ TRAIN-UI-04/Application/tabs/train_model_tab.py
+@@ -103,7 +103,9 @@
+     buttons = QHBoxLayout()
+     buttons.setContentsMargins(0, 0, 0, 0)
+     for button, stretch in ((aboba.start_train, 3), (aboba.cancel_train, 1)):
+-        button.setMinimumHeight(36)
++        button.setFixedHeight(36)
++        button.setContentsMargins(0, 0, 0, 0)
++        button.setStyleSheet('QPushButton {margin: 0px; padding: 2px 14px;}')
+         button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+         buttons.addWidget(button, stretch, alignment=Qt.AlignmentFlag.AlignVCenter)
+ 
+@@ -124,7 +126,7 @@
+     left.addWidget(aboba.train_log, 1)
+     left.addWidget(aboba.training_reason)
+     left.addLayout(buttons)
+-    heading(right, 'Графики обучения')
++    heading(right, 'Визуализация обучения')
+     aboba.training_loss_chart = TrainingChart('Ошибка обучения', ('Ошибка',), 'Ошибка')
+     aboba.training_metric_chart = TrainingChart('Метрики валидации', ('NDCG@10', 'Recall@10'), 'Значение')
+     right.addWidget(aboba.training_loss_chart, 1)
+--- TRAIN-UI-03/Application/training_charts.py
++++ TRAIN-UI-04/Application/training_charts.py
+@@ -2,9 +2,9 @@
+ import math
+ 
+ from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+-from PyQt6.QtCore import QEvent, QLocale, QMargins, Qt
+-from PyQt6.QtGui import QPainter
+-from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout
++from PyQt6.QtCore import QEvent, QLocale, QMargins, QMetaObject, Qt, pyqtSlot
++from PyQt6.QtGui import QFontMetricsF, QPainter
++from PyQt6.QtWidgets import QGraphicsTextItem, QLabel, QSizePolicy
+ 
+ from Application.statistics_charts import style_chart
+ 
+@@ -24,7 +24,7 @@
+         chart.setDropShadowEnabled(False)
+         chart.setBackgroundRoundness(0)
+         chart.setMargins(QMargins(8, 5, 12, 5))
+-        chart.setTitle(title)
++        chart.setTitle(title.upper())
+         chart.setLocale(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
+         chart.setLocalizeNumbers(True)
+         chart.legend().setVisible(len(names) > 1)
+@@ -50,8 +50,9 @@
+         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+         self.placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+         self.placeholder.setProperty('class', 'infoLabel')
+-        overlay = QVBoxLayout(self.viewport())
+-        overlay.addWidget(self.placeholder, alignment=Qt.AlignmentFlag.AlignCenter)
++        self._epoch_labels = []
++        self._epoch_label_color = self.x_axis.labelsBrush().color()
++        chart.plotAreaChanged.connect(self._update_plot_layout, Qt.ConnectionType.QueuedConnection)
+         self.reset(50)
+         self.apply_theme()
+ 
+@@ -60,12 +61,62 @@
+         self._maximum = 0.
+         for series in self.lines.values():
+             series.clear()
+-        self.x_axis.setRange(0, max(1, epochs))
++        self.x_axis.setRange(1 if epochs > 1 else 0, max(1, epochs))
+         self.x_axis.setTickType(QValueAxis.TickType.TicksDynamic)
+-        self.x_axis.setTickAnchor(0)
+-        self.x_axis.setTickInterval(max(1, math.ceil(epochs / 5)))
++        self.x_axis.setTickAnchor(1)
+         self.y_axis.setRange(0, 1)
+         self.placeholder.show()
++        QMetaObject.invokeMethod(self, '_update_plot_layout', Qt.ConnectionType.QueuedConnection)
++
++    @pyqtSlot()
++    def _update_plot_layout(self):
++        # Avoid mutating chart layout during Qt's stylesheet/layout traversal.
++        # Hidden charts are initialized when their tab becomes visible.
++        if not self.isVisible():
++            return
++        area = self.chart().plotArea()
++        # Center in the actual plotting area, excluding titles, axes and legend.
++        rectangle = self.mapFromScene(self.chart().mapToScene(area)).boundingRect()
++        self.placeholder.setGeometry(rectangle if not area.isEmpty() else self.viewport().rect())
++        label_width = QFontMetricsF(self.x_axis.labelsFont()).horizontalAdvance(str(self.epochs)) + 2
++        capacity = max(1, min(100, int(area.width() / label_width)))
++        step = max(1, math.ceil((self.epochs - 1) / capacity))
++        if self.x_axis.tickInterval() != step:
++            self.x_axis.setTickInterval(step)
++        # Narrow views may label fewer epochs; minor ticks retain every position
++        # for normal budgets, without drawing thousands of ticks for huge runs.
++        self.x_axis.setMinorTickCount(step - 1 if self.epochs <= 100 else 0)
++        self.x_axis.setMinorGridLineVisible(self.epochs <= 100 and step > 1)
++        # Qt elides dense numeric labels before drawing them. Use the same
++        # chart-owned text-item approach as StatisticsChart's bar/value labels.
++        values = list(range(1, self.epochs + 1, step))
++        if values[-1] != self.epochs:
++            values[-1] = self.epochs
++        while len(self._epoch_labels) < len(values):
++            item = QGraphicsTextItem(self.chart())
++            item.document().setDocumentMargin(0)
++            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
++            self._epoch_labels.append(item)
++        for index, item in enumerate(self._epoch_labels):
++            item.setVisible(index < len(values))
++            if index >= len(values):
++                continue
++            epoch = values[index]
++            item.setPlainText(str(epoch))
++            item.setFont(self.x_axis.labelsFont())
++            item.setDefaultTextColor(self._epoch_label_color)
++            fraction = (epoch - self.x_axis.min()) / (self.x_axis.max() - self.x_axis.min())
++            item.setPos(area.left() + fraction * area.width() - item.boundingRect().width() / 2,
++                        area.bottom() + 3)
++
++    def resizeEvent(self, event):
++        super().resizeEvent(event)
++        if hasattr(self, 'placeholder'):
++            QMetaObject.invokeMethod(self, '_update_plot_layout', Qt.ConnectionType.QueuedConnection)
++
++    def showEvent(self, event):
++        super().showEvent(event)
++        QMetaObject.invokeMethod(self, '_update_plot_layout', Qt.ConnectionType.QueuedConnection)
+ 
+     def add_point(self, name, epoch, value):
+         if (name not in self.lines or type(epoch) is not int or not 1 <= epoch <= self.epochs
+@@ -85,8 +136,15 @@
+         self.placeholder.hide()
+ 
+     def apply_theme(self):
+-        _, foreground, _ = style_chart(self.chart())
++        _, foreground, _ = style_chart(self.chart(), section_title=True)
++        axis_font = self.x_axis.labelsFont()
++        axis_font.setPointSizeF(8)
++        self.x_axis.setLabelsFont(axis_font)
++        self._epoch_label_color = foreground
++        self.x_axis.setLabelsBrush(Qt.GlobalColor.transparent)
++        self.x_axis.setMinorGridLinePen(self.x_axis.gridLinePen())
+         self.placeholder.setStyleSheet(f'QLabel {{background: transparent; color: {foreground.name()}; border: none;}}')
++        QMetaObject.invokeMethod(self, '_update_plot_layout', Qt.ConnectionType.QueuedConnection)
+ 
+     def changeEvent(self, event):
+         super().changeEvent(event)
+--- TRAIN-UI-03/tests/tabs/test_training_research_ui.py
++++ TRAIN-UI-04/tests/tabs/test_training_research_ui.py
+@@ -331,7 +331,7 @@
+     assert len([f for f in widget.findChildren(QFrame) if f.objectName() == 'vSeparator']) == 1
+     assert len([f for f in widget.findChildren(QFrame) if f.objectName() == 'hSeparator']) == 1
+     headers = [label for label in widget.findChildren(QLabel) if label.property('class') == 'sectionHeader']
+-    assert [label.text() for label in headers] == ['Параметры', 'Процесс обучения', 'Графики обучения', 'История экспериментов']
++    assert [label.text() for label in headers] == ['Параметры', 'Процесс обучения', 'Визуализация обучения', 'История экспериментов']
+     assert all(label.alignment() == Qt.AlignmentFlag.AlignCenter for label in headers)
+     layouts = widget.findChildren(QVBoxLayout)
+     for label in headers:
+@@ -667,3 +667,164 @@
+         QApplication.instance().processEvents()
+         assert [(p.x(), p.y()) for p in chart.lines['Ошибка'].points()] == [(1, .6)]
+         assert chart.chart().backgroundBrush().color().name() == os.environ['QTMATERIAL_SECONDARYDARKCOLOR']
++
++
++@pytest.mark.parametrize('width', [1280, 1520])
++def test_ui04_placeholders_follow_plot_area_including_legend_and_resize(ui, width):
++    from PyQt6.QtCore import Qt
++    w, widget = ui
++    w.resize(width, 980)
++    w.tabs.resize(width, 980)
++    w.show()
++    app = QApplication.instance()
++    for _ in range(3):
++        app.processEvents()  # Native layout and queued positioning use separate events.
++    for chart in (w.training_loss_chart, w.training_metric_chart):
++        assert chart.placeholder.parentWidget() is chart.viewport()
++        assert chart.placeholder.alignment() == Qt.AlignmentFlag.AlignCenter
++        assert chart.placeholder.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
++        area = chart.chart().plotArea()
++        assert not area.isEmpty()
++        mapped = chart.mapFromScene(chart.chart().mapToScene(area)).boundingRect()
++        center = chart.placeholder.geometry().center()
++        assert abs(center.x() - mapped.center().x()) <= 1
++        assert abs(center.y() - mapped.center().y()) <= 1
++    metrics = w.training_metric_chart
++    metrics.chart().legend().hide()
++    for _ in range(3):
++        app.processEvents()
++    mapped = metrics.mapFromScene(metrics.chart().mapToScene(metrics.chart().plotArea())).boundingRect()
++    center = metrics.placeholder.geometry().center()
++    assert abs(center.x() - mapped.center().x()) <= 1
++    assert abs(center.y() - mapped.center().y()) <= 1
++
++
++def test_ui04_titles_match_statistics_heading_and_every_epoch_is_labeled(ui):
++    from PyQt6.QtCharts import QValueAxis
++    from PyQt6.QtGui import QFontMetricsF
++    from Application.theme.apply_theme import apply_app_theme
++    w, widget = ui
++    app = QApplication.instance()
++    apply_app_theme(app, False)
++    reference = QLabel('СТАТИСТИКА')
++    reference.setProperty('class', 'statisticsSection')
++    reference.ensurePolished()
++    w.resize(1520, 980)
++    w.tabs.resize(1520, 980)
++    w.show()
++    app.processEvents()
++    for chart, title in ((w.training_loss_chart, 'ОШИБКА ОБУЧЕНИЯ'),
++                         (w.training_metric_chart, 'МЕТРИКИ ВАЛИДАЦИИ')):
++        assert chart.chart().title() == title
++        font = chart.chart().titleFont()
++        assert font.italic() == reference.font().italic() is True
++        assert font.pointSizeF() == reference.font().pointSizeF() == 12
++        assert font.pointSizeF() > chart.chart().legend().font().pointSizeF()
++        axis = chart.x_axis
++        assert (axis.min(), axis.max()) == (1, 50)
++        assert axis.tickType() == QValueAxis.TickType.TicksDynamic
++        assert axis.tickAnchor() == axis.tickInterval() == 1
++        assert axis.labelFormat() == '%.0f' and axis.labelsAngle() == 0
++        assert axis.labelsFont().pointSizeF() == 8
++        assert chart.chart().plotArea().width() / 49 >= QFontMetricsF(axis.labelsFont()).horizontalAdvance('50') + 2
++        labels = [item for item in chart._epoch_labels if item.isVisible()]
++        assert [item.toPlainText() for item in labels] == [str(epoch) for epoch in range(1, 51)]
++        assert all(left.pos().x() + left.boundingRect().width() <= right.pos().x()
++                   for left, right in zip(labels, labels[1:]))
++
++
++def test_ui04_epoch_axis_narrow_view_keeps_minor_epoch_ticks_and_large_budget_is_bounded(ui):
++    w, _ = ui
++    chart = w.training_metric_chart
++    chart.setParent(None)
++    chart.resize(340, 300)
++    chart.show()
++    app = QApplication.instance()
++    try:
++        app.processEvents()
++        step = chart.x_axis.tickInterval()
++        assert 1 < step < 10
++        assert chart.x_axis.minorTickCount() == step - 1
++        assert chart.x_axis.isMinorGridLineVisible()
++        assert step / (chart.x_axis.minorTickCount() + 1) == 1
++        labels = [item for item in chart._epoch_labels if item.isVisible()]
++        assert labels[0].toPlainText() == '1' and labels[-1].toPlainText() == '50'
++        chart.reset(10000)
++        app.processEvents()
++        assert chart.x_axis.minorTickCount() == 0
++        assert 10000 / chart.x_axis.tickInterval() < 100
++        assert (chart.x_axis.min(), chart.x_axis.max()) == (1, 10000)
++    finally:
++        chart.close()
++        chart.deleteLater()
++
++
++@pytest.mark.parametrize('dark', [False, True])
++@pytest.mark.parametrize('mode', [0, 1])
++def test_ui04_buttons_share_actual_frame_and_content_alignment_in_all_states(ui, monkeypatch, dark, mode):
++    from PyQt6.QtCore import QMargins
++    from PyQt6.QtGui import QIcon
++    from PyQt6.QtWidgets import QStyle, QStyleOptionButton
++    from Application.theme.apply_theme import apply_app_theme
++    w, widget = ui
++    app = QApplication.instance()
++    monkeypatch.setattr(tab, '_confirm_production', lambda *args: True)
++    apply_app_theme(app, dark)
++    w.training_mode.setCurrentIndex(mode)
++    w.resize(1520, 980)
++    w.tabs.resize(1520, 980)
++    w.show()
++    def aligned():
++        app.processEvents()
++        start, cancel = w.start_train, w.cancel_train
++        assert start.height() == cancel.height() == 36
++        assert start.minimumHeight() == start.maximumHeight() == cancel.minimumHeight() == cancel.maximumHeight() == 36
++        assert start.geometry().top() == cancel.geometry().top()
++        assert start.geometry().bottom() == cancel.geometry().bottom()
++        assert start.contentsMargins() == cancel.contentsMargins() == QMargins()
++        assert start.styleSheet() == cancel.styleSheet()
++        contents = []
++        for button in (start, cancel):
++            option = QStyleOptionButton()
++            button.initStyleOption(option)
++            contents.append(button.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, button))
++        assert contents[0].top() == contents[1].top() and contents[0].height() == contents[1].height()
++        assert start.font() == cancel.font() and start.iconSize() == cancel.iconSize()
++        assert cancel.icon().pixmap(17, 17).toImage() == QIcon(str(tab.ICONS_DIR / 'failure.png')).pixmap(17, 17).toImage()
++    try:
++        aligned()
++        assert not w.cancel_train.isEnabled()
++        tab.start_training_process(w)
++        aligned()
++        assert w.cancel_train.isEnabled()
++        if mode:
++            event(w, {'stage': 'finished', 'published': True, 'postpublish_validation': True,
++                      'published_generation': 'b' * 32, 'training_metrics': {'epochs_completed': 50}})
++        else:
++            event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': 'completed'}})
++        finish(w)
++        aligned()
++        assert not w.cancel_train.isEnabled()
++    finally:
++        apply_app_theme(app, False)
++
++
++def test_ui04_hidden_charts_defer_label_layout_until_shown(ui):
++    from Application.theme.apply_theme import apply_app_theme
++    w, _ = ui
++    app = QApplication.instance()
++    charts = (w.training_loss_chart, w.training_metric_chart)
++    assert all(not chart._epoch_labels for chart in charts)
++    try:
++        apply_app_theme(app, True)
++        app.processEvents()
++        assert all(not chart._epoch_labels for chart in charts)
++        w.resize(1520, 980)
++        w.tabs.resize(1520, 980)
++        w.show()
++        app.processEvents()
++        app.processEvents()  # Queued chart layout follows the native layout pass.
++        assert all([label.toPlainText() for label in chart._epoch_labels if label.isVisible()]
++                   == [str(epoch) for epoch in range(1, 51)] for chart in charts)
++    finally:
++        apply_app_theme(app, False)

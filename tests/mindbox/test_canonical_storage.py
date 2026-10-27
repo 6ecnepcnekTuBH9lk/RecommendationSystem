@@ -457,7 +457,10 @@ def test_current_manifest_uses_shared_preparation(tmp_path, monkeypatch):
     batch = load_chunked_training_batch(path, raw_root=tmp_path, require_complete=True)
     received = {}
     monkeypatch.setattr(preparation, "_prepare_training_data_from_mindbox_sources", lambda **kwargs: received.update(kwargs))
-    prepare_training_data_from_chunked_batch(batch, raw_root=tmp_path, catalog_path="unused", train_config=None)
+    catalog = tmp_path / "nomenclature.csv"
+    catalog.write_text("КодНоменклатуры\n123456\n", encoding="utf-8-sig")
+    prepare_training_data_from_chunked_batch(batch, raw_root=tmp_path, catalog_path=catalog, train_config=None)
+    assert received["catalog_path"] == catalog
     assert len(received["actions_export_dirs"]) == 3
     assert received["selection"] == batch.selection
     assert list(iter_export("orders", input_dir=received["orders_export_dirs"][0])) == []
@@ -489,7 +492,10 @@ def test_manual_overlap_extension_summary_and_single_preparation_source(tmp_path
     assert batch.diagnostics["days_total"] == 184
     received = {}
     monkeypatch.setattr(preparation, "_prepare_training_data_from_mindbox_sources", lambda **kwargs: received.update(kwargs))
-    prepare_training_data_from_chunked_batch(batch, raw_root=tmp_path, catalog_path="unused", train_config=None)
+    catalog = tmp_path / "nomenclature.csv"
+    catalog.write_text("КодНоменклатуры\n123456\n", encoding="utf-8-sig")
+    prepare_training_data_from_chunked_batch(batch, raw_root=tmp_path, catalog_path=catalog, train_config=None)
+    assert received["catalog_path"] == catalog
     for name in ("actions", "orders"):
         expected = (tmp_path / data["manual_interactions"][name]["directory"],
                     *(tmp_path / data[name][f"2026-07-0{day}"]["directory"] for day in (1, 2, 3)))

@@ -1,0 +1,14 @@
+.............F.......................................                    [100%]
+================================== FAILURES ===================================
+_________________ test_filter_layout_theme_popup[1200-False] __________________
+tests\tabs\test_analysis_filter_tab.py:251: in test_filter_layout_theme_popup
+    assert abs(left.width() - right.width()) <= 1
+E   assert 93 <= 1
+E    +  where 93 = abs((646 - 553))
+E    +    where 646 = <built-in method width of QWidget object at 0x000001C1480CE350>()
+E    +      where <built-in method width of QWidget object at 0x000001C1480CE350> = <PyQt6.QtWidgets.QWidget object at 0x000001C1480CE350>.width
+E    +    and   553 = <built-in method width of QWidget object at 0x000001C1480CF070>()
+E    +      where <built-in method width of QWidget object at 0x000001C1480CF070> = <PyQt6.QtWidgets.QWidget object at 0x000001C1480CF070>.width
+=========================== short test summary info ===========================
+FAILED tests/tabs/test_analysis_filter_tab.py::test_filter_layout_theme_popup[1200-False]
+1 failed, 52 passed in 20.21s

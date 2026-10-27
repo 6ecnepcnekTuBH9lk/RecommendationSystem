@@ -14,6 +14,12 @@ def safe_message(value):
 
 
 def error_record(exc, *, source="data", category="failed", since=None, secrets=()):
+    from Application.mindbox.manual_sources import ManualImportError
+    if isinstance(exc, ManualImportError):
+        from Application.mindbox.manual_diagnostics import ManualImportDiagnostic
+        if isinstance(exc.diagnostic, ManualImportDiagnostic):
+            return {"category": category, "source": exc.diagnostic.source, "error_type": "ManualImportError",
+                    "message": exc.diagnostic.format(), "since": since, "manual_import": exc.diagnostic.to_dict()}
     kind = type(exc).__name__
     message = str(exc).strip()
     for secret in secrets:
@@ -32,6 +38,9 @@ def format_error(record, stage=None, *, context=None):
     """Validate even structured subprocess output; unknown stdout stays invisible."""
     if not isinstance(record, dict):
         return "Ошибка → некорректное описание причины от процесса."
+    if "manual_import" in record:
+        from Application.mindbox.manual_diagnostics import format_manual_diagnostic
+        return format_manual_diagnostic(record["manual_import"])
     source = record.get("source")
     if (source is None or source == "data") and stage in ("customers", "snapshot_validation"):
         source = "customers"

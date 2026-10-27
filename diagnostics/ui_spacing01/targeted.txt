@@ -1,0 +1,27 @@
+.............F.......................................................... [ 15%]
+........................................................................ [ 31%]
+........................................................................ [ 47%]
+........................................................................ [ 62%]
+........................................................................ [ 78%]
+........................................................................ [ 94%]
+..........................                                               [100%]
+================================== FAILURES ===================================
+_________________ test_filter_layout_theme_popup[1200-False] __________________
+tests\tabs\test_analysis_filter_tab.py:251: in test_filter_layout_theme_popup
+    assert abs(left.width() - right.width()) <= 1
+E   assert 105 <= 1
+E    +  where 105 = abs((652 - 547))
+E    +    where 652 = <built-in method width of QWidget object at 0x000001B9DDADED50>()
+E    +      where <built-in method width of QWidget object at 0x000001B9DDADED50> = <PyQt6.QtWidgets.QWidget object at 0x000001B9DDADED50>.width
+E    +    and   547 = <built-in method width of QWidget object at 0x000001B9DDADEE90>()
+E    +      where <built-in method width of QWidget object at 0x000001B9DDADEE90> = <PyQt6.QtWidgets.QWidget object at 0x000001B9DDADEE90>.width
+============================== warnings summary ===============================
+tests/tabs/test_train_model_start.py::test_real_qprocess_canonical_training[PASS-True]
+tests/tabs/test_train_model_start.py::test_real_qprocess_canonical_training[WARN-True]
+  C:\Users\Ermolenko.i\PycharmProjects\�����������������������\Application\model\BPRMF.py:1100: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/tabs/test_analysis_filter_tab.py::test_filter_layout_theme_popup[1200-False]
+1 failed, 457 passed, 2 warnings in 218.63s (0:03:38)

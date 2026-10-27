@@ -1,0 +1,19 @@
+ Application/model/BPRMF.py                        |  116 ++-
+ Application/model/bpr_preparation.py              |   35 +-
+ Application/model/mindbox_production_training.py  |   20 +-
+ Application/model/mindbox_training_preparation.py |    3 +-
+ Application/model/training_data.py                |    3 +
+ Application/model/training_metrics.py             |    6 +
+ Application/tabs/train_model_tab.py               | 1077 +++++++++++----------
+ README.md                                         |   68 ++
+ assets/icons/start_training.png                   |  Bin 15123 -> 24703 bytes
+ main.py                                           |    2 -
+ scripts/mindbox_production_train.py               |  111 ++-
+ tests/model/test_bpr_preparation.py               |  109 ++-
+ tests/model/test_mindbox_production_training.py   |  206 ++++
+ tests/model/test_mindbox_training_preparation.py  |  120 ++-
+ tests/model/test_seen_items.py                    |    3 +-
+ tests/model/test_training_data.py                 |  295 ++++++
+ tests/tabs/test_train_model_completion.py         |   11 +-
+ tests/tabs/test_train_model_start.py              |  537 +++++-----
+ 18 files changed, 1906 insertions(+), 816 deletions(-)

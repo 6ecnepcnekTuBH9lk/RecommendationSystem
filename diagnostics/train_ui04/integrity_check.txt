@@ -1,0 +1,21 @@
+{
+  "baseline_files": 190,
+  "changed_for_train_ui04": [
+    "Application/statistics_charts.py",
+    "Application/tabs/train_model_tab.py",
+    "Application/training_charts.py",
+    "tests/tabs/test_training_research_ui.py"
+  ],
+  "added_source_files": [],
+  "protected_count": 23,
+  "protected_unchanged": true,
+  "all_other_baseline_files_unchanged": true,
+  "workflow_body_unchanged": true,
+  "production_model_files": [],
+  "production_current_exists": false
+}
+Application/statistics_charts.py: +7 / -2
+Application/tabs/train_model_tab.py: +4 / -2
+Application/training_charts.py: +68 / -10
+tests/tabs/test_training_research_ui.py: +162 / -1
+4 files: +241 / -15

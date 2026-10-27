@@ -1,0 +1,63 @@
+........................................................................ [  3%]
+........................................................................ [  6%]
+........................................................................ [  9%]
+........................................................................ [ 13%]
+........................................................................ [ 16%]
+........................................................................ [ 19%]
+........................................................................ [ 23%]
+........................................................................ [ 26%]
+........................................................................ [ 29%]
+........................................................................ [ 33%]
+........................................................................ [ 36%]
+........................................................................ [ 39%]
+........................................................................ [ 43%]
+........................................................................ [ 46%]
+........................................................................ [ 49%]
+........................................................................ [ 53%]
+........................................................................ [ 56%]
+........................................................................ [ 59%]
+........................................................................ [ 63%]
+........................................................................ [ 66%]
+........................................................................ [ 69%]
+Windows fatal exception: access violation
+
+Thread 0x000056f4 (most recent call first):
+  <no Python frame>
+
+Current thread 0x000031c4 (most recent call first):
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\Application\theme\apply_theme.py", line 69 in apply_app_theme
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\main.py", line 207 in apply_theme
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\tests\tabs\test_reference_loading_section.py", line 103 in test_main_window_has_only_current_tabs_and_reference_section
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\python.py", line 167 in pytest_pyfunc_call
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\python.py", line 1707 in runtest
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\runner.py", line 184 in pytest_runtest_call
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\runner.py", line 250 in <lambda>
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\runner.py", line 361 in from_call
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\runner.py", line 249 in call_and_report
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\runner.py", line 139 in runtestprotocol
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\runner.py", line 118 in pytest_runtest_protocol
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\main.py", line 408 in pytest_runtestloop
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\main.py", line 384 in _main
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\main.py", line 330 in wrap_session
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\main.py", line 377 in pytest_cmdline_main
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_callers.py", line 121 in _multicall
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_manager.py", line 120 in _hookexec
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pluggy\_hooks.py", line 512 in __call__
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\config\__init__.py", line 229 in _main
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\_pytest\config\__init__.py", line 253 in _console_main
+  File "C:\Users\Ermolenko.i\PycharmProjects\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\.venv312\Lib\site-packages\pytest\__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 198 in _run_module_as_main
+.......................................................

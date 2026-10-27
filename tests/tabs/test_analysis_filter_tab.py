@@ -217,7 +217,10 @@ def test_filter_layout_theme_popup(filter_tab, app, monkeypatch, dark, width):
     headings = [label.text() for label in tab.findChildren(QLabel)]
     assert "Отбор для анализа" in headings
     assert "Правила формирования рекомендаций" in headings
-    assert "В разработке" in headings
+    assert "Вид номенклатуры (В группе):" not in headings
+    assert "Основная коллекция:" in headings
+    assert "Актуальные сезоны:" in headings
+    assert "Допустимый остаток:" in headings
     section_headers = [label for label in tab.findChildren(QLabel) if label.property("class") == "sectionHeader"]
     assert len(section_headers) == 3
     assert all(label.height() >= label.heightForWidth(label.width()) for label in section_headers)
@@ -229,7 +232,8 @@ def test_filter_layout_theme_popup(filter_tab, app, monkeypatch, dark, width):
     left, right = layout.itemAt(0).widget(), layout.itemAt(2).widget()
     assert layout.count() == 3
     assert left is tab.controls.parentWidget()
-    assert any(label.text() == "В разработке" for label in right.findChildren(QLabel))
+    assert tab.recommendation_rules.isAncestorOf(tab.recommendation_rules.kinds)
+    assert right.isAncestorOf(tab.recommendation_rules)
     assert layout.stretch(0) == layout.stretch(2) == 1
     assert separator is layout.itemAt(1).widget()
     assert left.geometry().right() < separator.geometry().left()
@@ -493,7 +497,7 @@ def test_complete_prerequisite_gate_uses_real_sources(filter_tab, dataset, monke
         assert not tab._save(AnalysisFilter())
         assert not writes
         assert tab.findChild(QFrame, "vSeparator") is not None
-        assert "В разработке" in [label.text() for label in tab.findChildren(QLabel)]
+        assert "Допустимый остаток:" in [label.text() for label in tab.recommendation_rules.findChildren(QLabel)]
 
 
 def test_running_has_priority_and_refresh_detects_lost_reference(filter_tab, monkeypatch):

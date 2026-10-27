@@ -1,0 +1,40 @@
+--- before_CONV01A/BPRMF.py
++++ after_CONV01A/BPRMF.py
+@@ -627,11 +627,18 @@
+ 
+ def train_prepared_data_with_metrics(
+     cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
++    *, epoch_observer=None,
+ ) -> Tuple[BPRMF, Splits, TrainingRunMetrics]:
+-    return _train_prepared_data_impl(cfg, prepared_data, device)
+-
+-
+-def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device):
++    """Optional research observer receives (model, immutable epoch metrics).
++
++    The observer must only read model state. It runs without gradients after a
++    completed epoch; it cannot select a checkpoint or control early stopping.
++    """
++    return _train_prepared_data_impl(cfg, prepared_data, device, epoch_observer=epoch_observer)
++
++
++def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
++                              *, epoch_observer=None):
+     """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
+     validate_prepared_data(prepared_data)
+     maps, splits = prepared_data.mappings, prepared_data.splits
+@@ -786,6 +793,14 @@
+             f"[{_now()}] Итерация {epoch} из {cfg.epochs}: "
+             f"loss={total_loss / steps:.4f}  {evaluation_label}"
+         )
++
++        if epoch_observer is not None:
++            was_training = model.training
++            try:
++                with torch.no_grad():
++                    epoch_observer(model, history[-1])
++            finally:
++                model.train(was_training)
+ 
+         # Empty-evaluation zero placeholders in history are not monitored metrics.
+         # Preserve the existing -1 best-observation sentinel and the full budget.

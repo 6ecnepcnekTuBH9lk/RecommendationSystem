@@ -1,0 +1,14 @@
+ M Application/tabs/analysis_filter_tab.py
+ M Application/tabs/create_results_tab.py
+ M Application/tabs/data_loading_tab.py
+ M Application/tabs/dataset_statistics_tab.py
+ M Application/tabs/reference_loading_section.py
+ M Application/tabs/train_model_tab.py
+ M Application/theme/custom.qss
+ M main.py
+ M tests/tabs/test_dataset_statistics_tab.py
+ M tests/tabs/test_reference_loading_section.py
+ M tests/tabs/test_training_research_ui.py
+?? Application/theme/layout_metrics.py
+?? diagnostics/ui_spacing01/
+?? tests/tabs/test_ui_spacing.py

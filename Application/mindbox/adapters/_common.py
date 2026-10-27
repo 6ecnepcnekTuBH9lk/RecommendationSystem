@@ -12,6 +12,10 @@ from ..records import ProductKey
 class AdapterError(Exception):
     """Нарушение ожидаемого контракта raw объекта."""
 
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.line_index = None  # 1-based position in raw lines[], not the business line number.
+
 
 def get(raw: Mapping[str, Any], path: str, *, required: bool = False) -> Any:
     current: Any = raw

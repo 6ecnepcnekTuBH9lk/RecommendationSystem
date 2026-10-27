@@ -12,6 +12,7 @@ import uuid
 
 from Application.mindbox.daily_training_batch import load_chunked_training_batch, prepare_training_data_from_chunked_batch
 from .shadow_training import run_shadow_training
+from .item_feature_config import normalize_feature_norm
 from .training_quality import TrainingQualityDiagnostics
 
 REPORT_ROOT = INPUT_DATA_DIR / "MindboxReports" / "shadow_training"
@@ -45,7 +46,7 @@ def _safe_config(cfg):
     if any(type(value) not in (int, float, bool) for value in result.values()):
         raise ValueError("Invalid numeric training config")
     result["early_stop_metric"] = cfg.early_stop_metric if cfg.early_stop_metric in ("recall", "ndcg") else "ndcg"
-    result["feature_norm"] = cfg.feature_norm if cfg.feature_norm in ("sum", "mean", "sqrt") else "mean"
+    result["feature_norm"] = normalize_feature_norm(cfg.feature_norm)
     known_columns = {"ВидНоменклатуры", "ВидАссортимента", "Марка", "Коллекция", "СезонНоски",
                      "ПолНоменклатуры", "ГруппаСоставов", "КатегорияНаСайте", "СтилеваяГруппа"}
     result["item_feature_cols"] = [name for name in cfg.item_feature_cols if name in known_columns]
@@ -68,7 +69,10 @@ def shadow_train_daily_manifest(manifest, *, raw_root, catalog_path, cfg, device
         unresolved_products=d.resolution.total.unresolved, unsupported_products=d.resolution.total.unsupported_namespace,
         bpr_events=d.bpr.events_total, unmapped_actions=d.unmapped_actions,
         malformed_action_system_names=d.malformed_action_system_names,
-        orders_duplicate_conflicting=d.orders_duplicate_conflicting)
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting,
+        product_resolution_attempts=d.resolution.total.interactions_total,
+        unknown_candidate_products=d.resolution.total.unknown_candidate,
+        invalid_product_ids=d.resolution.total.invalid_id)
     result = run_shadow_training(cfg, prepared.prepared_data, diagnostics, device,
                                  complete=prepared.complete, on_quality=on_quality)
     quality = result.quality_report

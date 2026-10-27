@@ -1,0 +1,10 @@
+Looking in indexes: https://download.pytorch.org/whl/cu124
+Collecting torch==2.5.1+cu124
+  Downloading torch-2.5.1%2Bcu124-cp312-cp312-win_amd64.whl (2510.7 MB)
+     ---------------------------------------- 2.5/2.5 GB 774.4 kB/s  0:56:05
+Installing collected packages: torch
+  Attempting uninstall: torch
+    Found existing installation: torch 2.5.1
+    Uninstalling torch-2.5.1:
+      Successfully uninstalled torch-2.5.1
+Successfully installed torch-2.5.1+cu124

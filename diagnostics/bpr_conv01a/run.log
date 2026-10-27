@@ -1,0 +1,197 @@
+actions: 100000 raw records; 17244 resolved events
+actions: 200000 raw records; 33075 resolved events
+actions: 300000 raw records; 51782 resolved events
+actions: 400000 raw records; 71004 resolved events
+actions: 500000 raw records; 90061 resolved events
+actions: 600000 raw records; 112025 resolved events
+actions: 700000 raw records; 132435 resolved events
+actions: 800000 raw records; 149927 resolved events
+actions: 900000 raw records; 170673 resolved events
+actions: 1000000 raw records; 195543 resolved events
+actions: 1100000 raw records; 239920 resolved events
+actions: 1200000 raw records; 260850 resolved events
+actions: 1300000 raw records; 289566 resolved events
+actions: 1400000 raw records; 315272 resolved events
+actions: 1500000 raw records; 338613 resolved events
+actions: 1600000 raw records; 352104 resolved events
+actions: 1700000 raw records; 366630 resolved events
+actions: 1800000 raw records; 385191 resolved events
+actions: 1900000 raw records; 399440 resolved events
+actions: 2000000 raw records; 417958 resolved events
+actions: 2100000 raw records; 432336 resolved events
+actions: 2200000 raw records; 443546 resolved events
+actions: 2300000 raw records; 460595 resolved events
+actions: 2400000 raw records; 474083 resolved events
+actions: 2500000 raw records; 488717 resolved events
+actions: 2600000 raw records; 502823 resolved events
+actions: 2700000 raw records; 516234 resolved events
+actions: 2800000 raw records; 528234 resolved events
+actions: 2900000 raw records; 542653 resolved events
+actions: 3000000 raw records; 558046 resolved events
+actions: 3100000 raw records; 571550 resolved events
+actions: 3200000 raw records; 587219 resolved events
+actions: 3300000 raw records; 605859 resolved events
+actions: completed 3347664 raw records; 615197 resolved events
+orders: 100000 raw records; 801464 resolved events
+orders: 200000 raw records; 1004140 resolved events
+orders: 300000 raw records; 1192553 resolved events
+orders: completed 309044 raw records; 1206864 resolved events
+One continuous 30-epoch GPU baseline; no follow-up configurations.
+[05-10-2026 09:49:36] �������� ������������: ��� ������������, ��� ������������, �����, ���������, ����� �����, ���, ������ ��������, ��������� �� �����, �������� ������ --> �� ��������, �� �����������
+
+[05-10-2026 09:49:36] ������� ���������:
+- ��� �������: 10
+- ��� ����������: 2
+- ��� ���������: 0.1
+- ���������� ������������: 10
+- ���������� ����: 30
+- �������� ��������: 0.0003
+- ���������� ������������� ��������: 10
+- ������������� ��������� �����: 42
+- ������������� BPR: 0.0005
+- ������������� L2: 0
+- ������� �������� ��� ������: 10
+- ������ ���������� ������: 256
+- ����������� ��������: 128
+- ���������� ���� ��� ���������: 8
+- ����������� ������� �������: 0.0005
+- ������� ���� �� ���������: 30
+- ������� ������ ���������: NDCG
+- ������������ ����� ��������� ������������: 32
+- ��������� ���������� ��������� ������������: 0.1
+- ��� ��������� ������������ � ������: 0.2
+- ���� ������������� ��������� ������������: 1
+- ������ ����������� ��������� ������������: MEAN
+
+[05-10-2026 09:49:37] ���������� ������ �����������: ������ ��������� ���������, ������������ ��������� �����.
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 09:51:09] �������� 1 �� 30: loss=0.6828  ���������� ������ �����������
+Continuous CONV-01A worker active
+Checkpoint 1: NDCG@10=0.0007400989, scoring=46.205s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 09:53:26] �������� 2 �� 30: loss=0.6398  ���������� ������ �����������
+Continuous CONV-01A worker active
+Checkpoint 2: NDCG@10=0.0016962561, scoring=47.319s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 09:55:44] �������� 3 �� 30: loss=0.5694  ���������� ������ �����������
+Continuous CONV-01A worker active
+Checkpoint 3: NDCG@10=0.0040827193, scoring=49.245s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 09:58:05] �������� 4 �� 30: loss=0.4597  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 09:59:36] �������� 5 �� 30: loss=0.3323  ���������� ������ �����������
+Continuous CONV-01A worker active
+Checkpoint 5: NDCG@10=0.0068547556, scoring=49.644s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:01:58] �������� 6 �� 30: loss=0.2280  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:03:32] �������� 7 �� 30: loss=0.1605  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:05:03] �������� 8 �� 30: loss=0.1200  ���������� ������ �����������
+Continuous CONV-01A worker active
+Checkpoint 8: NDCG@10=0.0081764208, scoring=48.783s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:07:22] �������� 9 �� 30: loss=0.0937  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:08:52] �������� 10 �� 30: loss=0.0770  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:10:24] �������� 11 �� 30: loss=0.0650  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:11:51] �������� 12 �� 30: loss=0.0563  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Checkpoint 12: NDCG@10=0.0082822025, scoring=51.384s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:14:12] �������� 13 �� 30: loss=0.0499  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:15:45] �������� 14 �� 30: loss=0.0452  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:17:18] �������� 15 �� 30: loss=0.0414  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:18:49] �������� 16 �� 30: loss=0.0382  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:20:21] �������� 17 �� 30: loss=0.0357  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:21:53] �������� 18 �� 30: loss=0.0335  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:23:24] �������� 19 �� 30: loss=0.0317  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:24:50] �������� 20 �� 30: loss=0.0303  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Checkpoint 20: NDCG@10=0.0093057109, scoring=45.045s
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:26:59] �������� 21 �� 30: loss=0.0289  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:28:23] �������� 22 �� 30: loss=0.0277  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:29:50] �������� 23 �� 30: loss=0.0266  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:31:17] �������� 24 �� 30: loss=0.0257  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:32:50] �������� 25 �� 30: loss=0.0249  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:34:20] �������� 26 �� 30: loss=0.0242  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:35:50] �������� 27 �� 30: loss=0.0236  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:37:24] �������� 28 �� 30: loss=0.0230  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:38:56] �������� 29 �� 30: loss=0.0225  ���������� ������ �����������
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+Continuous CONV-01A worker active
+[05-10-2026 10:40:27] �������� 30 �� 30: loss=0.0220  ���������� ������ �����������
+Continuous CONV-01A worker active
+Checkpoint 30: NDCG@10=0.0098401566, scoring=47.780s
+CONV-01A complete. Stopped after epoch 30; no publication or test scoring.

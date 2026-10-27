@@ -1,0 +1,843 @@
+--- TRAIN-UI-01/Application/evaluation/experiments/gui_run.py
++++ TRAIN-UI-02/Application/evaluation/experiments/gui_run.py
+@@ -45,7 +45,8 @@
+         raise ValueError("Validation benchmark unavailable")
+     dataset = {"training_users": len(data.training.mappings.idx2user),
+                "training_items": len(data.training.mappings.idx2item), "training_pairs": len(data.training.splits.train_pairs)}
+-    emit({"stage": "training", "device": str(device), **dataset, "hyperparameters": asdict(cfg)})
++    # Presentation aggregate of this exact prepared history; history JSON v1 stays unchanged.
++    emit({"stage": "training", "device": str(device), **dataset, "training_events": len(snapshot.history), "hyperparameters": asdict(cfg)})
+     check_cancel()
+     core._set_seed(cfg.seed)
+     started = time.monotonic()
+--- TRAIN-UI-01/Application/tabs/train_model_tab.py
++++ TRAIN-UI-02/Application/tabs/train_model_tab.py
+@@ -9,11 +9,11 @@
+ import pandas as pd
+ import shutil
+ from functools import partial
+-from PyQt6.QtCore import Qt, QSize, QProcess, QTimer, QObject, QEvent
++from PyQt6.QtCore import Qt, QSize, QProcess, QTimer, QObject, QEvent, QLocale
+ from PyQt6.QtGui import QIcon
+ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
+                              QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QFormLayout,
+-                             QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView)
++                             QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QFrame)
+ from Application.settings.settings_and_filter import get_selected_list_values
+ from Application.settings.set_status import (set_status_processing, schedule_status_reset,
+                                              set_status_error, set_status_ok)
+@@ -42,16 +42,24 @@
+     tab = QWidget()
+     root = QVBoxLayout(tab)
+     root.setContentsMargins(0, 0, 0, 0)
++    root.setSpacing(6)
+     top = QHBoxLayout()
++    top.setSpacing(10)
+     root.addLayout(top, 3)
+     left, right = QVBoxLayout(), QVBoxLayout()
+     top.addLayout(left, 4)
++    separator = QFrame()
++    separator.setObjectName('vSeparator')
++    separator.setFixedWidth(1)
++    separator.setFrameShape(QFrame.Shape.NoFrame)
++    top.addWidget(separator)
+     top.addLayout(right, 6)
+ 
+     def heading(layout, text):
+         label = QLabel(text)
+         label.setProperty('class', 'sectionHeader')
+-        layout.addWidget(label)
++        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignHCenter)
+         return label
+ 
+     aboba.heading_enter_parameter = heading(left, 'Параметры')
+@@ -60,32 +68,33 @@
+     left.addLayout(form)
+     aboba.training_mode = QComboBox()
+     aboba.training_mode.addItems(['Эксперимент', 'Рабочая модель'])
+-    form.addRow('Режим обучения', aboba.training_mode)
++    form.addRow('Режим обучения:', aboba.training_mode)
++    aboba.epochs_input = QSpinBox()
++    aboba.epochs_input.setRange(0, 10000)
++    aboba.epochs_input.setValue(50)
++    aboba.epochs_input.setObjectName('epochs_input')
++    form.addRow('Количество эпох:', aboba.epochs_input)
+     for name, label, default in [('w_purchase', 'Вес покупки', 10.), ('w_favorite', 'Вес избранного', 2.),
+                                   ('w_view_item', 'Вес просмотра', .5)]:
+         widget = QDoubleSpinBox()
+-        widget.setDecimals(4)
++        widget.setDecimals(2)
++        widget.setLocale(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
+         widget.setRange(0, 1000000)
+         widget.setValue(default)
+         widget.setObjectName(name)
+         setattr(aboba, name, widget)
+-        form.addRow(label, widget)
+-    aboba.epochs_input = QSpinBox()
+-    aboba.epochs_input.setRange(0, 10000)
+-    aboba.epochs_input.setValue(50)
+-    aboba.epochs_input.setObjectName('epochs_input')
+-    form.addRow('Количество эпох', aboba.epochs_input)
+-    aboba.mode_description = QLabel()
+-    aboba.mode_description.setWordWrap(True)
+-    left.addWidget(aboba.mode_description)
++        form.addRow(label + ':', widget)
+     heading(left, 'Данные для обучения')
+     aboba.training_readiness = QLabel()
+     aboba.training_readiness.setWordWrap(True)
+     left.addWidget(aboba.training_readiness)
++    aboba.training_data_counts = QLabel()
++    aboba.training_data_counts.setTextFormat(Qt.TextFormat.PlainText)
++    left.addWidget(aboba.training_data_counts)
+     aboba.training_reason = QLabel()
+     aboba.training_reason.setWordWrap(True)
++    left.addStretch()
+     left.addWidget(aboba.training_reason)
+-    left.addStretch()
+     aboba.start_train = QPushButton(QIcon(str(ICONS_DIR / 'start_training.png')), 'Начать эксперимент')
+     aboba.start_train.setIconSize(QSize(17, 17))
+     aboba.start_train.clicked.connect(lambda: start_training_process(aboba))
+@@ -100,6 +109,7 @@
+     aboba.label_69 = heading(right, 'Процесс обучения')
+     aboba.training_progress_text = QLabel('Ожидание запуска')
+     aboba.training_progress_text.setWordWrap(True)
++    aboba.training_progress_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+     aboba.training_progress = QProgressBar()
+     aboba.training_progress.setRange(0, 50)
+     aboba.training_progress.setValue(0)
+@@ -111,29 +121,34 @@
+     aboba.train_log.setPlaceholderText('Логи подготовки, обучения и оценки появятся здесь…')
+     aboba.train_log.document().setMaximumBlockCount(5000)
+     right.addWidget(aboba.train_log, 1)
+-    heading(right, 'Результат')
+-    aboba.training_result = QLabel('Результатов пока нет')
+-    aboba.training_result.setTextFormat(Qt.TextFormat.PlainText)
+-    aboba.training_result.setWordWrap(True)
+-    right.addWidget(aboba.training_result)
+-
+-    heading(root, 'История экспериментов')
++    separator = QFrame()
++    separator.setObjectName('hSeparator')
++    separator.setFixedHeight(1)
++    separator.setFrameShape(QFrame.Shape.NoFrame)
++    root.addWidget(separator)
++    history = QVBoxLayout()
++    history.setSpacing(4)
++    history.setContentsMargins(0, 0, 0, 0)
++    root.addLayout(history, 2)
++    heading(history, 'История экспериментов')
+     aboba.history_notice = QLabel()
+     aboba.history_notice.setWordWrap(True)
+-    root.addWidget(aboba.history_notice)
++    history.addWidget(aboba.history_notice)
+     aboba.experiment_history = QTableWidget(0, 12)
+     aboba.experiment_history.setHorizontalHeaderLabels([
+-        'Дата', 'VIEW', 'FAVORITE', 'PURCHASE', 'Эпохи', 'NDCG@10', 'Recall@10',
+-        'VIEW NDCG@10', 'PURCHASE NDCG@10', 'Время', 'Device', 'Статус'])
++        'Дата', 'Просмотр', 'Избранное', 'Покупка', 'Эпохи', 'NDCG@10', 'Recall@10',
++        'NDCG@10 (просмотры)', 'NDCG@10 (покупки)', 'Время', 'Устройство', 'Статус'])
+     aboba.experiment_history.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+     aboba.experiment_history.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+     aboba.experiment_history.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+-    aboba.experiment_history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+-    aboba.experiment_history.horizontalHeader().setStretchLastSection(True)
++    aboba.experiment_history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
++    aboba.experiment_history.horizontalHeader().setStretchLastSection(False)
++    aboba.experiment_history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
++    for column, width in enumerate((180, 85, 95, 85, 70, 105, 105, 180, 170, 90, 100, 110)):
++        aboba.experiment_history.setColumnWidth(column, width)
+     aboba.experiment_history.verticalHeader().hide()
+     aboba.experiment_history.setMinimumHeight(130)
+-    root.addWidget(aboba.experiment_history, 2)
+-    aboba.experiment_history.itemSelectionChanged.connect(lambda: _history_selection(aboba))
++    history.addWidget(aboba.experiment_history, 1)
+     aboba._experiment_store = ExperimentHistory(USER_SETTINGS_DIR / 'research_experiments')
+     aboba._training_active = False
+     aboba._training_timer = QTimer(tab)
+@@ -170,23 +185,20 @@
+ def refresh_training_state(aboba, metadata=True):
+     research = _research(aboba)
+     active = getattr(aboba, '_training_active', False)
+-    if not active and hasattr(aboba, 'training_result') and getattr(aboba, '_display_mode', research) != research:
+-        aboba.training_result.setText('Результатов в выбранном режиме пока нет')
+-    aboba._display_mode = research
+     if metadata and not active:
+         aboba._training_ready = metadata_readiness(INPUT_DATA_DIR, research)
+     ready, reason, revision = getattr(aboba, '_training_ready', (False, 'Данные ещё не проверены', None))
++    reason = reason.replace('Temporal validation benchmark', 'Набор данных для валидации').replace('metadata', 'метаданных')
++    reason = reason.replace('Canonical batch', 'Канонический пакет данных')
+     if hasattr(aboba, 'training_mode'):
+         aboba.start_train.setText('Начать эксперимент' if research else 'Обучить рабочую модель')
+-        aboba.mode_description.setText('Один запуск и оценка на фиксированном validation benchmark. Модель не публикуется.' if research
+-                                      else 'Обучение на актуальном canonical batch. Новая generation публикуется при успехе.')
+     blocker = ''
+     if active:
+         blocker = 'Выполняется обучение' if not getattr(aboba, '_cancel_requested', False) else 'Отмена: ожидаем завершения процесса'
+     elif not ready:
+         blocker = reason
+     elif research and getattr(aboba, '_benchmark_block', None) is not None and aboba._benchmark_block == revision:
+-        blocker = 'Temporal validation benchmark недоступен; обновите данные'
++        blocker = 'Набор данных для валидации недоступен; обновите данные'
+     elif getattr(aboba, '_preflight_block', None) is not None and aboba._preflight_block == _block_key(aboba):
+         blocker = getattr(aboba, '_preflight_block_reason', 'Проверка данных заблокировала обучение; обновите данные или параметры')
+     else:
+@@ -201,15 +213,62 @@
+     aboba.start_train.setEnabled(not blocker)
+     if hasattr(aboba, 'training_reason'):
+         aboba.training_reason.setText(blocker)
+-        aboba.training_readiness.setText(('● ' if ready else '⚠ ') + reason)
++        aboba.training_reason.setVisible(bool(blocker))
++        _render_data(aboba)
+         aboba.cancel_train.setEnabled(active and not getattr(aboba, '_cancel_requested', False) and not getattr(aboba, '_publishing', False))
+         for widget in (aboba.training_mode, aboba.w_purchase, aboba.w_favorite, aboba.w_view_item, aboba.epochs_input):
+             widget.setEnabled(not active)
+     return not blocker
+ 
+ 
++def _render_data(aboba):
++    """Render metadata readiness and already received preparation aggregates only."""
++    if not hasattr(aboba, 'training_data_counts'):
++        return
++    ready, reason, revision = aboba._training_ready
++    cached = getattr(aboba, '_training_data_by_mode', {}).get(_research(aboba), {})
++    counts = cached.get('counts', {}) if ready and cached.get('revision') == revision else {}
++    state = cached.get('state', 'ready') if counts else 'ready'
++    if not ready:
++        state_text = ('Ошибка проверки данных' if any(word in reason.lower() for word in ('ошиб', 'поврежд', 'corrupt'))
++                      else 'Данные для обучения отсутствуют')
++    else:
++        state_text = {'ready': 'Данные готовы', 'using': 'Данные используются в обучении',
++                      'used': 'Данные использованы'}[state]
++    aboba.training_readiness.setText(state_text)
++    labels = [('interactions', 'Взаимодействий'), ('users', 'Пользователей'), ('items', 'Товаров')]
++    if 'pairs' in counts:
++        labels.append(('pairs', 'Обучающих пар'))
++    aboba.training_data_counts.setText('\n'.join(
++        f'{label}: {format(counts[key], ",").replace(",", " ") if key in counts else "—"}' for key, label in labels))
++
++
++def _receive_data_counts(aboba, event, state='ready'):
++    """No raw reads: both runners deliver counts from their normal preparation."""
++    if not hasattr(aboba, 'training_data_counts'):
++        return
++    source = event.get('dataset', event)
++    names = {'interactions': ('training_events', 'bpr_events'), 'users': ('training_users', 'users'),
++             'items': ('training_items', 'items'), 'pairs': ('training_pairs', 'train_pairs')}
++    counts = {}
++    for name, keys in names.items():
++        for key in keys:
++            value = source.get(key)
++            if type(value) is int and value >= 0:
++                counts[name] = value
++                break
++    cache = getattr(aboba, '_training_data_by_mode', {})
++    research, revision = _research(aboba), aboba._training_ready[2]
++    previous = cache.get(research, {})
++    if previous.get('revision') != revision:
++        previous = {}
++    cache[research] = {'revision': revision, 'counts': {**previous.get('counts', {}), **counts}, 'state': state}
++    aboba._training_data_by_mode = cache
++    _render_data(aboba)
++
++
+ def _confirm_production(aboba, values):
+-    text = ('Будет выполнено обучение рабочей модели. При успехе новая generation будет опубликована.\n\n'
++    text = ('Будет выполнено обучение рабочей модели. При успехе новое поколение модели будет опубликовано.\n\n'
+             f'Покупка: {values["w_purchase"]:g}\nИзбранное: {values["w_favorite"]:g}\nПросмотр: {values["w_view_item"]:g}\n'
+             f'Количество эпох: {values["epochs"]}\n\nПродолжить?')
+     return QMessageBox.question(aboba, 'Обучение рабочей модели', text,
+@@ -247,10 +306,16 @@
+     aboba._run_started_clock = time.monotonic()
+     aboba._progress_event = {}
+     aboba.train_log.clear()
+-    if hasattr(aboba, 'training_result'):
+-        aboba.training_result.setText('Запуск выполняется…')
++    aboba.train_log.append('Новый эксперимент' if research else 'Новое обучение рабочей модели')
++    if hasattr(aboba, 'training_data_counts'):
++        # Each configuration can produce a different number of positive pairs.
++        if hasattr(aboba, '_training_data_by_mode'):
++            aboba._training_data_by_mode.pop(research, None)
++        _render_data(aboba)
++    if hasattr(aboba, 'training_progress'):
+         aboba.training_progress.setRange(0, values['epochs'])
+         aboba.training_progress.setValue(0)
++        _update_progress(aboba)
+         aboba._training_timer.start()
+     refresh_training_state(aboba, metadata=False)
+     set_status_processing(aboba, 'Проверка данных перед обучением...')
+@@ -330,25 +395,34 @@
+ 
+ def _metric(record, label, name):
+     value = record.get('metrics', {}).get(label, {}).get('10', {}).get(name)
+-    return '—' if value is None else f'{value:.6f}'
+-
+-
+-def _show_result(aboba, record, research=True):
+-    if not hasattr(aboba, 'training_result'):
+-        return
++    return '—' if value is None else f'{value:.6f}'.replace('.', ',')
++
++
++_STATUS_TEXT = {'completed': 'Завершено', 'running': 'Выполняется', 'cancelled': 'Отменено',
++                'failed': 'Ошибка', 'interrupted': 'Прервано'}
++
++
++def _log_result(aboba, record, research=True):
+     if research:
+-        text = (f'{record.get("status", "failed")} · Validation\n'
+-                f'NDCG@10: {_metric(record, "overall", "ndcg")}    Recall@10: {_metric(record, "overall", "recall")}\n'
+-                f'VIEW NDCG@10: {_metric(record, "VIEW", "ndcg")}    PURCHASE NDCG@10: {_metric(record, "PURCHASE", "ndcg")}\n'
+-                f'Эпохи: {record.get("epochs_completed", 0)}    Время: {_duration(record.get("total_seconds"))}    Device: {record.get("device", "—")}')
++        status = record.get('status', 'failed')
++        text = {'completed': 'Эксперимент завершён.', 'cancelled': 'Эксперимент отменён.',
++                'interrupted': 'Эксперимент прерван.', 'failed': 'Эксперимент завершился с ошибкой.'}.get(status, 'Эксперимент выполняется.')
++        if status == 'completed':
++            text += (f'\nNDCG@10: {_metric(record, "overall", "ndcg")}\nRecall@10: {_metric(record, "overall", "recall")}\n'
++                     f'NDCG@10 (просмотры): {_metric(record, "VIEW", "ndcg")}\nNDCG@10 (покупки): {_metric(record, "PURCHASE", "ndcg")}')
++        text += (f'\nВыполнено эпох: {record.get("epochs_completed") or 0}\nВремя: {_duration(record.get("total_seconds"))}\n'
++                 f'Устройство: {(record.get("device") or "—").upper()}')
+     else:
+-        epochs = (record.get('training_metrics') or {}).get('epochs_completed', 0)
+-        text = (f'Рабочая модель · Эпохи: {epochs}    Время: {_duration(aboba._progress_event.get("total_seconds"))}    '
+-                f'Device: {aboba._progress_event.get("device", "—")}\n'
+-                f'Generation: {record.get("published_generation") or "—"}\n'
+-                f'Публикация: {"успех" if record.get("published") else "не выполнена"} · '
+-                f'Проверка чтением: {"успех" if record.get("postpublish_validation") else "не выполнена"}')
+-    aboba.training_result.setText(text)
++        progress = getattr(aboba, '_progress_event', {})
++        epochs = (record.get('training_metrics') or {}).get('epochs_completed', progress.get('epoch', 0))
++        success = record.get('published') and record.get('postpublish_validation') and not record.get('error_code')
++        text = ('Обучение рабочей модели завершено.' if success else 'Обучение рабочей модели отменено.' if
++                record.get('cancelled') else 'Обучение рабочей модели завершилось с ошибкой.')
++        text += (f'\nВыполнено эпох: {epochs}\nВремя: {_duration(progress.get("total_seconds"))}\n'
++                 f'Устройство: {(progress.get("device") or "—").upper()}\n'
++                 f'Публикация модели: {"успешно" if success else "не завершена"}\n'
++                 f'Поколение: {record.get("published_generation") or "—"}')
++    aboba.train_log.append('\n' + text)
+ 
+ 
+ def _pid_alive(pid):
+@@ -382,7 +456,12 @@
+         aboba._experiment_store.upsert(record)
+         _load_history(aboba)
+     except (ValueError, OSError):
+-        aboba.history_notice.setText('Не удалось сохранить историю. Исходный файл сохранён; результат доступен в artifact запуска.')
++        _history_notice(aboba, 'Не удалось сохранить историю. Исходный файл сохранён; результат доступен в файле запуска.')
++
++
++def _history_notice(aboba, text):
++    aboba.history_notice.setText(text)
++    aboba.history_notice.setVisible(bool(text))
+ 
+ 
+ def _load_history(aboba, recover=False):
+@@ -390,29 +469,24 @@
+         return
+     try:
+         records = aboba._experiment_store.recover(_pid_alive) if recover else aboba._experiment_store.read()
+-        aboba.history_notice.setText('')
++        _history_notice(aboba, '')
+     except (ValueError, OSError):
+         records = []
+-        aboba.history_notice.setText('История экспериментов недоступна. Исходный файл сохранён; новые результаты остаются в artifacts.')
++        _history_notice(aboba, 'История экспериментов недоступна. Исходный файл сохранён; новые результаты остаются в файлах запусков.')
+     aboba._history_records = records
+     table = aboba.experiment_history
+     table.setRowCount(len(records))
+     for row, record in enumerate(records):
+         cfg = record['hyperparameters']
+-        values = [record.get('started_at', '')[:19].replace('T', ' '), cfg.get('w_view_item', '—'),
+-                  cfg.get('w_favorite', '—'), cfg.get('w_purchase', '—'),
++        weights = ['—' if cfg.get(key) is None else f'{cfg[key]:.2f}'.replace('.', ',')
++                   for key in ('w_view_item', 'w_favorite', 'w_purchase')]
++        values = [record.get('started_at', '')[:19].replace('T', ' '), *weights,
+                   f'{record.get("epochs_completed") or 0}/{record.get("epochs_requested") or "—"}',
+                   _metric(record, 'overall', 'ndcg'), _metric(record, 'overall', 'recall'),
+                   _metric(record, 'VIEW', 'ndcg'), _metric(record, 'PURCHASE', 'ndcg'),
+-                  _duration(record.get('total_seconds')), record.get('device', '—'), record['status']]
++                  _duration(record.get('total_seconds')), (record.get('device') or '—').upper(), _STATUS_TEXT[record['status']]]
+         for col, value in enumerate(values):
+             table.setItem(row, col, QTableWidgetItem(str(value)))
+-
+-
+-def _history_selection(aboba):
+-    row = aboba.experiment_history.currentRow()
+-    if not getattr(aboba, '_training_active', False) and 0 <= row < len(aboba._history_records):
+-        _show_result(aboba, aboba._history_records[row])
+ 
+ 
+ def _update_progress(aboba):
+@@ -424,11 +498,14 @@
+     loss = event.get('loss')
+     elapsed = event.get('total_seconds', time.monotonic() - aboba._run_started_clock)
+     aboba.training_progress.setValue(epoch)
+-    phase = {'loading': 'Загрузка данных', 'preparation': 'Подготовка', 'training': 'Обучение',
+-             'validation': 'Validation', 'publication': 'Публикация', 'finished': 'Завершено',
+-             'cancelled': 'Отменено', 'failed': 'Ошибка'}.get(event.get('stage'), 'Обучение')
+-    aboba.training_progress_text.setText(f'{phase} · Эпоха {epoch}/{epochs} · Loss: {"—" if loss is None else f"{loss:.6f}"} · '
+-                                        f'{_duration(elapsed)} · {event.get("device", "—").upper()}')
++    stage = event.get('stage')
++    phase = {'loading': 'Загрузка данных', 'preparation': 'Подготовка данных', 'training': 'Обучение',
++             'validation': 'Валидация', 'publication': 'Публикация', 'finished': 'Завершено',
++             'cancelled': 'Отменено', 'failed': 'Ошибка', 'interrupted': 'Прервано'}.get(stage, 'Обучение')
++    text = f'Эпоха {epoch} из {epochs}' if stage == 'epoch' else f'{phase} · {epoch} из {epochs} эпох'
++    if stage in {'epoch', 'training'} and loss is not None:
++        text += f' · Ошибка: {loss:.6f}'.replace('.', ',')
++    aboba.training_progress_text.setText(text + f' · Время: {_duration(elapsed)} · {(event.get("device") or "—").upper()}')
+ 
+ 
+ def _on_train_output(aboba):
+@@ -443,6 +520,12 @@
+     from scripts.mindbox_production_train import EVENT_PREFIX
+     if not line.startswith(EVENT_PREFIX):
+         # CLI emits only safe aggregate/plain diagnostics; no exception traceback.
++        if any(key in line.lower() for key in ('validation cases', 'validation_cases', 'eval events', 'eval_events')):
++            return
++        for original, translated in (('Report:', 'Отчёт:'), ('Error code:', 'Код ошибки:')):
++            if line.startswith(original):
++                line = translated + line[len(original):]
++                break
+         aboba.train_log.append(line)
+         return
+     try:
+@@ -467,6 +550,8 @@
+         return
+     if stage in {'loading', 'preparation', 'training', 'epoch', 'validation', 'publication', 'timing'}:
+         aboba._progress_event.update(event)
++        if stage in {'preparation', 'training'}:
++            _receive_data_counts(aboba, event, 'using' if stage == 'training' else 'ready')
+         _update_progress(aboba)
+         if getattr(aboba, '_run_is_research', False):
+             if stage == 'epoch':
+@@ -477,9 +562,9 @@
+             aboba._research_record['device'] = event.get('device', aboba._research_record.get('device', 'unknown'))
+             if stage in {'training', 'epoch'}:
+                 _save_history(aboba, aboba._research_record)
+-        aboba.train_log.append(f'Эпоха {event["epoch"]}: loss={event["loss"]:.6f}' if stage == 'epoch' else
+-                               {'loading': 'Загрузка canonical данных…', 'preparation': 'Подготовка данных…', 'training': 'Обучение…',
+-                                'validation': 'Оценка validation…', 'publication': 'Безопасная публикация…', 'timing': 'Запуск завершён.'}[stage])
++        aboba.train_log.append(f'Эпоха {event["epoch"]}: Ошибка: {event["loss"]:.6f}'.replace('.', ',') if stage == 'epoch' else
++                               {'loading': 'Загрузка данных…', 'preparation': 'Подготовка данных…', 'training': 'Обучение…',
++                                'validation': 'Оценка модели…', 'publication': 'Публикация модели…', 'timing': 'Обучение и оценка завершены.'}[stage])
+         return
+     if stage == 'research_finished':
+         aboba._train_research_result = event['result']
+@@ -487,18 +572,26 @@
+             aboba._benchmark_block = aboba._training_ready[2]
+         if hasattr(aboba, 'cancel_train'):
+             aboba.cancel_train.setEnabled(False)
+-        _show_result(aboba, event['result'])
+         return
+     if stage == 'finished':
+         aboba._train_publication_result = event
+-        _show_result(aboba, event, research=False)
+-        aboba.train_log.append('Результат публикации:\n' + json.dumps(event, ensure_ascii=False, indent=2))
+         return
+     if stage != 'preflight':
+         return
+     aboba._train_preflight_result = event
++    _receive_data_counts(aboba, event)
+     quality = event.get('quality')
+-    aboba.train_log.append('Диагностика preflight:\n' + json.dumps(event, ensure_ascii=False, indent=2))
++    aboba.train_log.append('Проверка данных: ' + {'PASS': 'Допущено', 'WARN': 'Предупреждение', 'BLOCK': 'Заблокировано'}.get(
++        (quality or {}).get('level'), 'Ошибка'))
++    if quality:
++        # Quality diagnostics remain available without evaluation-case counters.
++        metrics = {key: value for key, value in quality.get('metrics', {}).items()
++                   if key not in {'cases', 'validation_cases', 'eval_events'}}
++        details = ['Показатели проверки: ' + json.dumps(metrics, ensure_ascii=False)]
++        for issue in quality.get('issues', []):
++            details.append(f'{issue["message"]} ({issue["code"]}): {issue["count"]}; '
++                           + json.dumps(issue.get('breakdown', {}), ensure_ascii=False))
++        aboba.train_log.append('\n'.join(details))
+     if event.get('error_code') or not quality or not quality['training_allowed']:
+         aboba._preflight_block = _block_key(aboba)
+         aboba._preflight_block_reason = 'Проверка данных заблокировала обучение; обновите данные или параметры'
+@@ -507,7 +600,7 @@
+         process = aboba.train_proc
+         reasons = '\n'.join(f'{issue["message"]} ({issue["code"]}): {issue["count"]}' for issue in quality['issues'])
+         answer = QMessageBox.question(aboba, 'Предупреждения перед обучением',
+-                                      f'Preflight: WARN\n{reasons}\n\nПодробная диагностика доступна в журнале. Продолжить обучение?',
++                                      f'Проверка данных: предупреждение\n{reasons}\n\nПодробная диагностика доступна в журнале. Продолжить обучение?',
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+         if aboba.train_proc is not process or not getattr(aboba, '_training_active', False):
+             return
+@@ -545,9 +638,10 @@
+         try:
+             atomic_json(aboba._experiment_store.directory / result['artifact'], result)
+         except OSError:
+-            aboba.history_notice.setText('Не удалось записать artifact запуска; проверьте доступ к каталогу настроек.')
++            _history_notice(aboba, 'Не удалось записать файл результата; проверьте доступ к каталогу настроек.')
+     _save_history(aboba, result)
+-    _show_result(aboba, result)
++    _log_result(aboba, result)
++    _receive_data_counts(aboba, result, 'used' if result['status'] == 'completed' else 'ready')
+     if hasattr(aboba, 'training_progress'):
+         aboba._progress_event.update(stage='finished' if result['status'] == 'completed' else result['status'],
+                                       total_seconds=result.get('total_seconds', 0))
+@@ -584,30 +678,33 @@
+     if (exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0 and result and result.get('published')
+             and result.get('postpublish_validation') and not result.get('error_code')):
+         set_status_ok(aboba, 'Обучение завершено')
+-        aboba.train_log.append(f'Обучение успешно завершено. Опубликована generation: {result["published_generation"]}')
++        _receive_data_counts(aboba, result, 'used')
+     elif exit_code == 130 or getattr(aboba, '_cancel_requested', False):
+         set_status_ok(aboba, 'Обучение отменено')
+         aboba.train_log.append('Обучение отменено до публикации.')
+-        if not result:
+-            _show_result(aboba, {}, research=False)
+     else:
+         code = (result or getattr(aboba, '_train_preflight_result', None) or {}).get('error_code')
+-        reasons = {'QUALITY_BLOCK': 'Обучение заблокировано quality gate; причины указаны в журнале',
+-                   'PREPARATION_FAILED': 'Не удалось подготовить canonical данные; проверьте Mindbox storage и каталог',
+-                   'PREFLIGHT_CHANGED': 'Canonical batch изменился после preflight; запустите проверку заново',
+-                   'LOCKED': 'Другой процесс уже выполняет production training',
++        reasons = {'QUALITY_BLOCK': 'Обучение заблокировано проверкой качества; причины указаны в журнале',
++                   'PREPARATION_FAILED': 'Не удалось подготовить данные; проверьте хранилище Mindbox и каталог',
++                   'PREFLIGHT_CHANGED': 'Пакет данных изменился после проверки; запустите проверку заново',
++                   'LOCKED': 'Другой процесс уже обучает рабочую модель',
+                    'REPORT_FAILED': 'Не удалось записать отчёт; состояние публикации указано в журнале'}
+         message = reasons.get(code, f'Обучение завершилось с ошибкой (код {exit_code})')
+         set_status_error(aboba, message)
+         aboba.train_log.append(message)
+-        if not result:
+-            _show_result(aboba, {}, research=False)
++    completed = (exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0 and result and result.get('published')
++                 and result.get('postpublish_validation') and not result.get('error_code'))
+     if hasattr(aboba, 'training_progress'):
+-        success = result and result.get('published') and result.get('postpublish_validation') and not result.get('error_code')
+-        aboba._progress_event.update(stage='finished' if success else 'cancelled' if
++        aboba._progress_event.update(stage='finished' if completed else 'cancelled' if
+                                       exit_code == 130 or aboba._cancel_requested else 'failed')
+         aboba._progress_event.setdefault('total_seconds', time.monotonic() - aboba._run_started_clock)
+         _update_progress(aboba)
++    summary = dict(result or {})
++    if not completed:
++        summary.update(error_code=summary.get('error_code') or 'RUN_FAILED',
++                       cancelled=exit_code == 130 or getattr(aboba, '_cancel_requested', False))
++        _receive_data_counts(aboba, summary, 'ready')
++    _log_result(aboba, summary, research=False)
+     _release_training(aboba)
+     schedule_status_reset(aboba, 5)
+ 
+--- TRAIN-UI-01/tests/evaluation/test_gui_run.py
++++ TRAIN-UI-02/tests/evaluation/test_gui_run.py
+@@ -71,6 +71,9 @@
+     assert 'ndcg' in result['metrics']['overall']['10'] and 'recall' in result['metrics']['PURCHASE']['20']
+     assert current.read_bytes() == b'production sentinel'
+     assert [p['stage'] for p in progress] == ['preparation', 'training', 'epoch', 'validation']
++    assert progress[1]['training_events'] == len(protocol.validation.history)
++    assert progress[1]['training_events'] == 22  # November/December targets are excluded.
++    assert 'training_events' not in result  # Presentation event does not change persisted result schema.
+ 
+ 
+ def test_test_snapshot_rejected_before_training_or_scoring(fixed_events, monkeypatch):
+@@ -203,7 +206,7 @@
+         assert window._train_research_result['epochs_completed'] == 1
+         assert window._experiment_store.read()[0]['status'] == 'completed'
+         assert current.read_bytes() == b'production sentinel'
+-        assert 'NDCG@10' in window.training_result.text()
++        assert 'NDCG@10' in window.train_log.toPlainText()
+     finally:
+         pulse.stop()
+         timeout.stop()
+--- TRAIN-UI-01/tests/tabs/test_training_research_ui.py
++++ TRAIN-UI-02/tests/tabs/test_training_research_ui.py
+@@ -147,7 +147,7 @@
+     assert not w.training_mode.isEnabled() and not w.w_purchase.isEnabled() and not w.epochs_input.isEnabled()
+     assert not w.start_train.isEnabled() and w.cancel_train.isEnabled()
+     event(w, {'stage': 'epoch', 'epoch': 3, 'epochs': 3, 'loss': .123456, 'device': 'cuda'})
+-    assert w.training_progress.value() == 3 and '0.123456' in w.training_progress_text.text()
++    assert w.training_progress.value() == 3 and '0,123456' in w.training_progress_text.text()
+     record = {**w._research_record, 'status': 'completed', 'finished_at': '2026-10-05T12:00:00+00:00',
+               'device': 'cuda', 'total_seconds': 123, 'metrics': {'overall': {'10': {'ndcg': .01234567, 'recall': .03}},
+               'VIEW': {'10': {'ndcg': .01}}, 'PURCHASE': {'10': {'ndcg': .02}}}}
+@@ -155,11 +155,12 @@
+     finish(w)
+     assert w.training_mode.isEnabled() and w.w_purchase.isEnabled() and w.start_train.isEnabled()
+     assert not w.cancel_train.isEnabled()
+-    assert '0.012346' in w.training_result.text() and '00:02:03' in w.training_result.text()
++    assert '0,012346' in w.train_log.toPlainText() and '00:02:03' in w.train_log.toPlainText()
+     records = ExperimentHistory(w._experiment_store.directory).read()
+     assert len(records) == 1 and records[0]['status'] == 'completed'
++    log = w.train_log.toPlainText()
+     w.experiment_history.selectRow(0)
+-    assert 'PURCHASE NDCG@10' in w.training_result.text()
++    assert w.train_log.toPlainText() == log and 'NDCG@10 (покупки)' in log
+     assert not list(tab.USER_SETTINGS_DIR.glob('train-run-*'))
+ 
+ 
+@@ -201,8 +202,8 @@
+     event(w, {'stage': 'finished', 'published': True, 'postpublish_validation': True,
+               'published_generation': 'b' * 32, 'training_metrics': {'epochs_completed': 2}})
+     finish(w)
+-    assert not w._experiment_store.read() and 'Generation:' in w.training_result.text()
+-    assert 'NDCG' not in w.training_result.text()
++    assert not w._experiment_store.read() and 'Поколение:' in w.train_log.toPlainText()
++    assert 'NDCG' not in w.train_log.toPlainText()
+ 
+ 
+ def test_production_confirmation_and_weights_preserve_hidden_settings(ui, monkeypatch):
+@@ -220,7 +221,7 @@
+     tab.start_training_process(w)
+     assert not Process.instances
+     tab.start_training_process(w)
+-    assert '50' in dialogs[0][2] and 'generation' in dialogs[0][2] and '10' in dialogs[0][2]
++    assert '50' in dialogs[0][2] and 'поколение' in dialogs[0][2] and '10' in dialogs[0][2]
+     cfg = json.loads(Path(w._train_config_path).read_text())
+     assert cfg == {**original, **workflow.input_values(w), 'data_dir': str(tab.INPUT_DATA_DIR)}
+     assert json.loads(path.read_text()) == original
+@@ -278,7 +279,7 @@
+     event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': 'failed',
+                                                       'error_summary': 'BENCHMARK_UNAVAILABLE'}})
+     finish(w, 1)
+-    assert not w.start_train.isEnabled() and 'benchmark недоступен' in w.training_reason.text()
++    assert not w.start_train.isEnabled() and 'валидации недоступен' in w.training_reason.text()
+     w.w_view_item.setValue(1.)
+     assert not w.start_train.isEnabled()
+     monkeypatch.setattr(tab, 'metadata_readiness', lambda *args: (True, 'Updated data', 'b' * 32))
+@@ -321,3 +322,196 @@
+     assert not workflow.metadata_readiness(tmp_path, True)[0]
+     (raw / 'canonical/catalog.json').write_text('{corrupt')
+     assert 'ошибкой' in workflow.metadata_readiness(tmp_path, False)[1]
++
++
++def test_ui02_layout_fields_and_centered_presentation(ui):
++    from PyQt6.QtCore import Qt
++    from PyQt6.QtWidgets import QFrame, QFormLayout, QVBoxLayout, QHeaderView
++    w, widget = ui
++    assert len([f for f in widget.findChildren(QFrame) if f.objectName() == 'vSeparator']) == 1
++    assert len([f for f in widget.findChildren(QFrame) if f.objectName() == 'hSeparator']) == 1
++    headers = [label for label in widget.findChildren(QLabel) if label.property('class') == 'sectionHeader']
++    assert [label.text() for label in headers] == ['Параметры', 'Данные для обучения', 'Процесс обучения', 'История экспериментов']
++    assert all(label.alignment() == Qt.AlignmentFlag.AlignCenter for label in headers)
++    layouts = widget.findChildren(QVBoxLayout)
++    for label in headers:
++        owner = next(layout for layout in layouts if layout.indexOf(label) >= 0)
++        assert owner.itemAt(owner.indexOf(label)).alignment() & Qt.AlignmentFlag.AlignHCenter
++    form = widget.findChild(QFormLayout)
++    assert [form.itemAt(i, form.ItemRole.LabelRole).widget().text() for i in range(5)] == [
++        'Режим обучения:', 'Количество эпох:', 'Вес покупки:', 'Вес избранного:', 'Вес просмотра:']
++    assert [form.itemAt(i, form.ItemRole.FieldRole).widget() for i in range(5)] == [
++        w.training_mode, w.epochs_input, w.w_purchase, w.w_favorite, w.w_view_item]
++    assert [control.text() for control in (w.w_purchase, w.w_favorite, w.w_view_item)] == ['10,00', '2,00', '0,50']
++    assert all(control.decimals() == 2 for control in widget.findChildren(QDoubleSpinBox))
++    assert not hasattr(w, 'training_result') and not hasattr(w, 'mode_description')
++    assert not any('benchmark' in label.text() or label.text() == 'Результат' for label in widget.findChildren(QLabel))
++    assert w.training_progress_text.alignment() == Qt.AlignmentFlag.AlignCenter
++    history_layout = next(layout for layout in layouts if layout.indexOf(w.experiment_history) >= 0)
++    assert history_layout.spacing() <= 4 and w.history_notice.isHidden()
++    table = w.experiment_history
++    assert [table.horizontalHeaderItem(i).text() for i in range(12)] == [
++        'Дата', 'Просмотр', 'Избранное', 'Покупка', 'Эпохи', 'NDCG@10', 'Recall@10',
++        'NDCG@10 (просмотры)', 'NDCG@10 (покупки)', 'Время', 'Устройство', 'Статус']
++    assert all(table.horizontalHeader().sectionResizeMode(i) == QHeaderView.ResizeMode.Interactive for i in range(12))
++    assert not table.horizontalHeader().stretchLastSection()
++    assert table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
++
++
++@pytest.mark.parametrize('status,text', [('running', 'Выполняется'), ('completed', 'Завершено'),
++                                        ('failed', 'Ошибка'), ('cancelled', 'Отменено'), ('interrupted', 'Прервано')])
++def test_ui02_history_v1_precision_localization_and_resize(ui, status, text):
++    w, _ = ui
++    record = {'run_id': 'f' * 32, 'status': status, 'started_at': '2026-10-05T10:00:00+00:00',
++              'hyperparameters': {'w_view_item': .123456789, 'w_purchase': 10.123456789, 'w_favorite': 2.123456789},
++              'device': 'cuda', 'metrics': {'overall': {'10': {'ndcg': .0123456789, 'cases': 98765}}}}
++    tab._save_history(w, record)
++    original = w._experiment_store.path.read_bytes()
++    data = json.loads(original)
++    assert data['schema_version'] == 1 and data['runs'][0]['status'] == status
++    assert data['runs'][0]['hyperparameters'] == record['hyperparameters']
++    assert data['runs'][0]['metrics'] == record['metrics']
++    w.experiment_history.setColumnWidth(0, 233)
++    w.experiment_history.setColumnWidth(11, 177)
++    w.train_log.setPlainText('Журнал текущего запуска')
++    tab._load_history(w)
++    w.experiment_history.selectRow(0)
++    assert w._experiment_store.path.read_bytes() == original
++    assert w.experiment_history.columnWidth(0) == 233 and w.experiment_history.columnWidth(11) == 177
++    assert w.experiment_history.item(0, 11).text() == text and w.experiment_history.item(0, 10).text() == 'CUDA'
++    assert w.experiment_history.item(0, 1).text() == '0,12' and w.experiment_history.item(0, 5).text() == '0,012346'
++    assert w.train_log.toPlainText() == 'Журнал текущего запуска'
++
++
++@pytest.mark.parametrize('ready,reason,expected', [(True, 'Ready', 'Данные готовы'),
++                         (False, 'Нет каталога товаров', 'Данные для обучения отсутствуют'),
++                         (False, 'Проверка metadata завершилась с ошибкой', 'Ошибка проверки данных')])
++def test_ui02_metadata_fallback_and_blocking(ui, monkeypatch, ready, reason, expected):
++    w, _ = ui
++    from Application.evaluation import audit
++    from Application.model import mindbox_production_training as production
++    monkeypatch.setattr(audit, 'load_canonical_events', lambda *a, **k: pytest.fail('UI must not ingest'))
++    monkeypatch.setattr(production, 'preflight_production_training', lambda *a, **k: pytest.fail('UI must not prepare'))
++    monkeypatch.setattr(tab, 'metadata_readiness', lambda *a: (ready, reason, 'b' * 32))
++    tab.refresh_training_state(w)
++    assert w.training_readiness.text() == expected
++    assert w.training_data_counts.text() == 'Взаимодействий: —\nПользователей: —\nТоваров: —'
++    assert w.start_train.isEnabled() == ready
++
++
++@pytest.mark.parametrize('mode', [0, 1])
++def test_ui02_exact_prepared_counts_retained_without_validation_cases(ui, monkeypatch, mode):
++    w, widget = ui
++    w.training_mode.setCurrentIndex(mode)
++    monkeypatch.setattr(tab, '_confirm_production', lambda *a: True)
++    tab.start_training_process(w)
++    dataset = {'bpr_events': 12034, 'users': 123, 'items': 456, 'train_pairs': 987, 'eval_events': 98765}
++    research_counts = {'training_events': 12034, 'training_users': 123, 'training_items': 456, 'training_pairs': 987}
++    if mode:
++        event(w, {'stage': 'preflight', 'dataset': dataset,
++                  'quality': {'level': 'PASS', 'training_allowed': True, 'metrics': {'eval_events': 98765, 'cases': 98765}, 'issues': []}})
++        assert w.training_readiness.text() == 'Данные готовы' and '12 034' in w.training_data_counts.text()
++    event(w, {'stage': 'training', 'device': 'cuda', **({'dataset': dataset} if mode else research_counts),
++              'validation_cases': 98765})
++    expected = 'Взаимодействий: 12 034\nПользователей: 123\nТоваров: 456\nОбучающих пар: 987'
++    assert w.training_readiness.text() == 'Данные используются в обучении'
++    assert w.training_data_counts.text() == expected
++    event(w, {'stage': 'epoch', 'epoch': 50, 'epochs': 50, 'loss': .045248, 'device': 'cuda'})
++    event(w, {'stage': 'validation', 'device': 'cuda', 'validation_cases': 98765})
++    assert w.training_data_counts.text() == expected
++    if mode:
++        event(w, {'stage': 'finished', 'published': True, 'postpublish_validation': True,
++                  'published_generation': 'b' * 32, 'dataset': dataset, 'training_metrics': {'epochs_completed': 50}})
++    else:
++        event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': 'completed',
++                  'device': 'cuda', 'metrics': {'overall': {'10': {'ndcg': .01, 'recall': .02, 'cases': 98765}}}}})
++    finish(w)
++    assert w.training_readiness.text() == 'Данные использованы'
++    assert w.training_data_counts.text() == expected
++    tab.refresh_training_state(w)
++    assert w.training_data_counts.text() == expected and w.training_readiness.text() == 'Данные использованы'
++    all_text = '\n'.join(label.text() for label in widget.findChildren(QLabel)) + w.train_log.toPlainText()
++    assert not any(text in all_text for text in ('Validation cases', 'validation_cases', '98765', 'eval_events'))
++    assert ('NDCG@10' in w.train_log.toPlainText()) == (mode == 0)
++    assert ('Публикация модели: успешно' in w.train_log.toPlainText()) == (mode == 1)
++    w.training_mode.setCurrentIndex(1 - mode)
++    assert w.training_data_counts.text().count('—') == 3
++    w.training_mode.setCurrentIndex(mode)
++    assert w.training_data_counts.text() == expected
++    monkeypatch.setattr(tab, 'metadata_readiness', lambda *a: (True, 'Changed dataset', 'c' * 32))
++    tab.refresh_training_state(w)
++    assert w.training_data_counts.text().count('—') == 3
++
++
++@pytest.mark.parametrize('stage,expected', [('loading', 'Загрузка данных'), ('preparation', 'Подготовка данных'),
++                    ('training', 'Обучение'), ('epoch', 'Эпоха 14'), ('validation', 'Оценка модели')])
++def test_ui02_log_and_progress_localization(ui, stage, expected):
++    w, _ = ui
++    tab.start_training_process(w)
++    event(w, {'stage': stage, 'epoch': 14, 'epochs': 50, 'loss': .045248, 'device': 'cuda', 'total_seconds': 1292})
++    assert expected in w.train_log.toPlainText()
++    assert 'Время: 00:21:32 · CUDA' in w.training_progress_text.text()
++    if stage == 'epoch':
++        assert w.training_progress_text.text() == 'Эпоха 14 из 50 · Ошибка: 0,045248 · Время: 00:21:32 · CUDA'
++    assert not any(s in w.train_log.toPlainText() + w.training_progress_text.text() for s in ('Loss', 'Validation', 'canonical'))
++    finish(w, 1)
++
++
++@pytest.mark.parametrize('status,expected', [('completed', 'Эксперимент завершён.'),
++                    ('failed', 'Эксперимент завершился с ошибкой.'), ('cancelled', 'Эксперимент отменён.')])
++def test_ui02_single_final_summary_and_new_run_log(ui, status, expected):
++    w, _ = ui
++    w.train_log.setPlainText('Предыдущий журнал')
++    tab.start_training_process(w)
++    assert w.train_log.toPlainText() == 'Новый эксперимент'
++    event(w, {'stage': 'epoch', 'epoch': 50, 'epochs': 50, 'loss': .1, 'device': 'cuda'})
++    event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': status,
++              'total_seconds': 4354, 'device': 'cuda', 'metrics': {'overall': {'10': {'ndcg': .00984, 'recall': .018891}}}}})
++    finish(w, 0 if status == 'completed' else 1)
++    assert w.train_log.toPlainText().count(expected) == 1
++    assert 'Время: 01:12:34\nУстройство: CUDA' in w.train_log.toPlainText()
++    assert w.training_progress_text.text() == f'{tab._STATUS_TEXT[status]} · 50 из 50 эпох · Время: 01:12:34 · CUDA'
++
++
++def test_ui02_new_configuration_drops_previous_counts(ui):
++    w, _ = ui
++    tab._receive_data_counts(w, {'training_events': 100, 'training_users': 10, 'training_items': 20, 'training_pairs': 50}, 'used')
++    assert 'Обучающих пар: 50' in w.training_data_counts.text()
++    tab.start_training_process(w)
++    assert w.training_readiness.text() == 'Данные готовы' and w.training_data_counts.text().count('—') == 3
++    finish(w, 1)
++
++
++def test_ui02_opening_with_real_metadata_never_reads_payloads(ui, monkeypatch):
++    from datetime import datetime, timedelta, timezone
++    from Application.mindbox import canonical_storage as storage
++    from Application.evaluation import audit
++    data = tab.INPUT_DATA_DIR
++    data.mkdir()
++    (data / 'nomenclature.csv').write_text('synthetic catalog', encoding='utf-8')
++    raw = data / 'MindboxRaw'
++    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
++    for name, key in [('customer_merges', 'customerMerges'), ('actions', 'customerActions'), ('orders', 'orders')]:
++        directory = raw / 'staged' / name
++        directory.mkdir(parents=True)
++        (directory / f'{name}_part_001.json').write_text(json.dumps({key: []}), encoding='utf-8')
++        storage.publish(raw, name, since, since + timedelta(days=1), directory)
++    original_open = Path.open
++    def metadata_only(path, *args, **kwargs):
++        if path.is_relative_to(raw / 'canonical/objects') or path == data / 'nomenclature.csv':
++            pytest.fail('Opening the tab read raw payload/catalog rows')
++        return original_open(path, *args, **kwargs)
++    monkeypatch.setattr(Path, 'open', metadata_only)
++    monkeypatch.setattr(audit, 'load_canonical_events', lambda *a, **k: pytest.fail('Unexpected ingestion'))
++    monkeypatch.setattr(tab, 'metadata_readiness', workflow.metadata_readiness)
++    w = QWidget()
++    w.tabs = QTabWidget(w)
++    try:
++        tab.create_train_model_widgets_tab(w)
++        assert not w.start_train.isEnabled()  # January data cannot satisfy November research.
++        w.training_mode.setCurrentIndex(1)
++        assert w.training_readiness.text() == 'Данные готовы' and w.start_train.isEnabled()
++        assert w.training_data_counts.text().count('—') == 3
++    finally:
++        w.close()
++        w.deleteLater()
+--- TRAIN-UI-01/README.md
++++ TRAIN-UI-02/README.md
+@@ -115,11 +115,11 @@
+ python main.py
+ ```
+ 
+-## Обучение из GUI (TRAIN-UI-01)
++## Обучение из GUI (TRAIN-UI-01 / TRAIN-UI-02)
+ 
+ Вкладка «Обучение модели» содержит режим, четыре параметра (веса покупки,
+ избранного, просмотра и количество эпох), состояние данных, запуск/отмену,
+-progress, журнал, результат и историю экспериментов. Начальные значения:
++progress, журнал с итоговой сводкой и историю экспериментов. Начальные значения:
+ 10 / 2 / 0.5 / 50; это provisional research defaults, а не доказанный optimum.
+ Веса конечные, покупка > 0, остальные >= 0, эпохи — целое число 1–10000.
+ Пустые/ошибочные поля блокируют запуск.
+@@ -155,6 +155,16 @@
+ каталога товаров или параметров; обновлённая configuration проходит новый preflight.
+ Полная проверка остаётся в дочернем процессе. Во время run поля заблокированы;
+ структурированные события показывают epoch/loss/device, таймер — elapsed time.
++Слева расположены параметры в порядке режим → эпохи → покупка → избранное →
++просмотр и блок данных; справа — процесс и журнал. Секции разделены линиями,
++история занимает нижнюю область. Веса в GUI отображаются с двумя знаками.
++До подготовки неизвестные counts отображаются как «—»; отдельная загрузка
++canonical events ради счётчиков не выполняется. Уже полученные агрегаты обычной
++подготовки показывают взаимодействия, пользователей, товары и обучающие пары.
++После успешного запуска они сохраняются до смены данных или нового запуска.
++Research взаимодействия — события именно training history выбранного snapshot,
++production взаимодействия — уже рассчитанный bpr_events. Validation cases в GUI
++не отображаются. Отдельная карточка результата и постоянная подсказка удалены.
+ 
+ «Отменить» создаёт cancel signal: worker проверяет его между этапами/эпохами.
+ При задержке до публикации QProcess принудительно завершается через 2 секунды;
+@@ -178,8 +188,11 @@
+ завершённый worker artifact восстанавливает результат, умерший running worker
+ получает interrupted. Повреждённая история не перезаписывается: предупреждение
+ в GUI, новые artifacts сохраняются отдельно; production остаётся доступен.
+-Выбор строки показывает её validation результат. NDCG/Recall отображаются
+-с шестью знаками, время — HH:MM:SS. Inputs между сессиями не сохраняются;
++Итог текущего запуска выводится в журнал; выбор строки истории его не заменяет.
++Подписи и статусы таблицы локализованы, storage codes и JSON v1 сохранены.
++Колонки можно изменять вручную, ширина сохраняется при обновлении таблицы;
++доступна горизонтальная прокрутка. NDCG/Recall отображаются с шестью знаками,
++время — HH:MM:SS. Inputs между сессиями не сохраняются;
+ существующий train_config.json не переписывается. Временный config/cancel signal
+ удаляются после завершения. Audit, GPU-cost, convergence и weight CLI сохранены.
+ 

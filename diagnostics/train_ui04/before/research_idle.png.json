@@ -1,0 +1,94 @@
+{
+  "buttons": {
+    "start": {
+      "geometry": [
+        8,
+        537,
+        392,
+        36
+      ],
+      "size_hint": [
+        191,
+        36
+      ],
+      "margins": [
+        0,
+        0
+      ],
+      "contents": [
+        15,
+        3,
+        362,
+        30
+      ],
+      "enabled": true
+    },
+    "cancel": {
+      "geometry": [
+        406,
+        537,
+        130,
+        36
+      ],
+      "size_hint": [
+        118,
+        36
+      ],
+      "margins": [
+        0,
+        0
+      ],
+      "contents": [
+        15,
+        3,
+        100,
+        30
+      ],
+      "enabled": false
+    }
+  },
+  "charts": {
+    "loss": {
+      "plot": [
+        78.0,
+        42.0,
+        830.0,
+        154.0
+      ],
+      "placeholder": [
+        399,
+        106,
+        139,
+        43
+      ],
+      "viewport": [
+        0,
+        0,
+        937,
+        255
+      ],
+      "tick_interval": 10.0
+    },
+    "metrics": {
+      "plot": [
+        99.0,
+        42.0,
+        809.0,
+        111.0
+      ],
+      "placeholder": [
+        399,
+        105,
+        139,
+        43
+      ],
+      "viewport": [
+        0,
+        0,
+        937,
+        254
+      ],
+      "tick_interval": 10.0
+    }
+  }
+}

@@ -1,0 +1,23 @@
+ M Application/model/BPRMF.py
+ M Application/model/bpr_preparation.py
+ M Application/model/mindbox_production_training.py
+ M Application/model/mindbox_training_preparation.py
+ M Application/model/training_data.py
+ M Application/model/training_metrics.py
+ M Application/tabs/train_model_tab.py
+ M README.md
+ M scripts/mindbox_production_train.py
+ M tests/model/test_bpr_preparation.py
+ M tests/model/test_mindbox_production_training.py
+ M tests/model/test_mindbox_training_preparation.py
+ M tests/model/test_seen_items.py
+ M tests/model/test_training_data.py
+ M tests/tabs/test_train_model_start.py
+?? Application/evaluation/
+?? diagnostics/
+?? docs/
+?? scripts/audit_temporal_evaluation.py
+?? scripts/run_bpr_convergence.py
+?? scripts/run_bpr_gpu_cost.py
+?? scripts/run_bpr_weight_experiment.py
+?? tests/evaluation/

@@ -1,0 +1,2 @@
+name, utilization.gpu [%], memory.used [MiB], memory.total [MiB], power.draw [W]
+NVIDIA GeForce RTX 3050, 0 %, 1408 MiB, 6144 MiB, 7.59 W

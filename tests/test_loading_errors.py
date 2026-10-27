@@ -108,12 +108,12 @@ def test_empty_and_invalid_error_records():
 
 @pytest.mark.parametrize("command", ["customers", "interactions"])
 @pytest.mark.parametrize("expected", ["manual", "unexpected"])
-def test_manual_cli_reports_real_error(monkeypatch, capsys, command, expected):
+def test_manual_cli_keeps_known_safe_error_and_redacts_unknown_details(monkeypatch, capsys, command, expected):
     from scripts.mindbox_manual_import import main
     from Application.mindbox import canonical_customers, manual_import
     def fail(*args, **kwargs):
         cls = manual_import.ManualImportError if expected == "manual" else RuntimeError
-        raise cls("Invalid or unreadable raw JSON part")
+        raise cls("Invalid or unreadable raw JSON part" if expected == "manual" else "PRIVATE_EMAIL_API_KEY")
     if command == "customers":
         monkeypatch.setattr(canonical_customers, "import_full", fail)
         args = [command, "--customers", "unused"]
@@ -123,8 +123,10 @@ def test_manual_cli_reports_real_error(monkeypatch, capsys, command, expected):
     assert main(args) == 1
     error = record(capsys)
     assert error["source"] == ("customers" if command == "customers" else "actions/orders")
-    assert error["message"] == "Invalid or unreadable raw JSON part"
-    assert error["error_type"] == ("ManualImportError" if expected == "manual" else "RuntimeError")
+    assert error["message"] == ("Invalid or unreadable raw JSON part" if expected == "manual" else
+                                "Внутренняя ошибка ручного импорта.")
+    assert error["error_type"] == "ManualImportError"
+    assert "PRIVATE" not in json.dumps(error)
 
 
 def client_stub(monkeypatch):

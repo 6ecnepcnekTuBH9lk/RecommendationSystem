@@ -64,43 +64,48 @@ def adapt_order(
     for index, line in enumerate(
         objects(raw, "lines", required=True)
     ):
-        line_number = integer(line, "number")
-        line_id = identifier(
-            line,
-            "id",
-            required=False,
-        )
-
-        if line_id is None:
-            line_id = f"{order_id}:missing-line:{index}"
-
-        result.append(
-            OrderLineRecord(
-                **common,
-                line_id=line_id,
-                line_number=line_number,
-                product=product_key(
-                    get(line, "product", required=True),
-                    product_namespaces,
-                ),
-                product_name=_product_name(line),
-                quantity=number(
-                    line,
-                    "quantity",
-                ),
-                base_price_per_item=number(
-                    line,
-                    "basePricePerItem",
-                ),
-                price_of_line=number(
-                    line,
-                    "priceOfLine",
-                ),
-                line_status=identifier(
-                    line,
-                    "status.ids.externalId",
-                ),
+        try:
+            line_number = integer(line, "number")
+            line_id = identifier(
+                line,
+                "id",
+                required=False,
             )
-        )
+
+            if line_id is None:
+                line_id = f"{order_id}:missing-line:{index}"
+
+            result.append(
+                OrderLineRecord(
+                    **common,
+                    line_id=line_id,
+                    line_number=line_number,
+                    product=product_key(
+                        get(line, "product", required=True),
+                        product_namespaces,
+                    ),
+                    product_name=_product_name(line),
+                    quantity=number(
+                        line,
+                        "quantity",
+                    ),
+                    base_price_per_item=number(
+                        line,
+                        "basePricePerItem",
+                        required=False,
+                    ),
+                    price_of_line=number(
+                        line,
+                        "priceOfLine",
+                    ),
+                    line_status=identifier(
+                        line,
+                        "status.ids.externalId",
+                    ),
+                )
+            )
+        except AdapterError as exc:
+            exc.line_index = index + 1
+            raise
 
     return tuple(result)

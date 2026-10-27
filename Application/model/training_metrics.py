@@ -1,6 +1,12 @@
 """Immutable observations of the existing training loop."""
 
 from dataclasses import dataclass
+import numpy as np
+
+
+def single_target_metrics(rank: int | None) -> tuple[float, float]:
+    """Existing Recall/HitRate and NDCG contribution for one relevant item."""
+    return (1.0, 1.0 / np.log2(rank + 1)) if rank is not None else (0.0, 0.0)
 
 
 @dataclass(frozen=True)

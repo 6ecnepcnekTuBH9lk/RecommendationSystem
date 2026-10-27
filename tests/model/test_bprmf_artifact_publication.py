@@ -1,5 +1,6 @@
 import json
 import threading
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -84,13 +85,17 @@ def _prepare_current_generation(tmp_path, generation="generation-a"):
     return model_dir, manifest_path, manifest_path.read_bytes()
 
 
-@pytest.fixture
-def lightweight_artifact_preparation(monkeypatch):
-    monkeypatch.setattr(
-        BPRMF,
-        "_build_item_feature_matrix",
-        lambda *args, **kwargs: ({}, None),
-    )
+@pytest.fixture(autouse=True)
+def synthetic_snapshot_payload(monkeypatch):
+    original = BPRMF._saved_feature_payload
+
+    def payload(cfg, maps, model):
+        if isinstance(model, _SyntheticModel):
+            # Model the already prepared payload, independently of ML training.
+            return BPRMF._prepare_item_feature_snapshot(replace(cfg, use_item_features=False), maps)
+        return original(cfg, maps, model)
+
+    monkeypatch.setattr(BPRMF, "_saved_feature_payload", payload)
 
 
 def test_partial_mappings_write_keeps_legacy_model_unchanged(tmp_path, monkeypatch):
@@ -137,7 +142,7 @@ def test_checkpoint_preparation_error_keeps_current_generation(
 
     monkeypatch.setattr(
         BPRMF,
-        "_build_item_feature_matrix",
+        "_saved_feature_payload",
         fail_checkpoint_preparation,
     )
 
@@ -156,7 +161,7 @@ def test_checkpoint_preparation_error_keeps_current_generation(
 
 
 def test_missing_nomenclature_publishes_empty_train_item_meta(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
 
@@ -172,7 +177,7 @@ def test_missing_nomenclature_publishes_empty_train_item_meta(
 
 
 def test_valid_nomenclature_preserves_train_item_meta_semantics(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "synthetic-data"
@@ -227,7 +232,7 @@ def test_valid_nomenclature_preserves_train_item_meta_semantics(
 
 
 def test_valid_empty_nomenclature_publishes_empty_train_item_meta(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "synthetic-data"
@@ -376,7 +381,7 @@ def test_existing_nomenclature_without_item_code_column_is_rejected(
 
 
 def test_partial_torch_save_keeps_current_generation(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     _model_dir, manifest_path, old_manifest_bytes = _prepare_current_generation(
@@ -404,7 +409,7 @@ def test_partial_torch_save_keeps_current_generation(
 
 
 def test_generation_rename_error_does_not_switch_current(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     _model_dir, manifest_path, old_manifest_bytes = _prepare_current_generation(
@@ -431,7 +436,7 @@ def test_generation_rename_error_does_not_switch_current(
 
 
 def test_manifest_replace_error_keeps_old_manifest_and_generation(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     model_dir, manifest_path, old_manifest_bytes = _prepare_current_generation(
@@ -469,7 +474,7 @@ def test_manifest_replace_error_keeps_old_manifest_and_generation(
     assert other_publisher_temp.read_bytes() == other_publisher_bytes
 
 
-def test_explicit_model_directory_return_and_disk_commit_order(tmp_path, monkeypatch, lightweight_artifact_preparation):
+def test_explicit_model_directory_return_and_disk_commit_order(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     target = tmp_path / "isolated-model"
     events = []
@@ -499,7 +504,7 @@ def test_explicit_model_directory_return_and_disk_commit_order(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("corruption", ["torch_bytes", "mappings_json", "mappings_identity", "dimensions"])
-def test_corrupt_serialization_never_becomes_current(tmp_path, monkeypatch, lightweight_artifact_preparation, corruption):
+def test_corrupt_serialization_never_becomes_current(tmp_path, monkeypatch, corruption):
     monkeypatch.chdir(tmp_path)
     root, current, old = _prepare_current_generation(tmp_path)
     save = torch.save
@@ -524,7 +529,7 @@ def test_corrupt_serialization_never_becomes_current(tmp_path, monkeypatch, ligh
 
 
 @pytest.mark.parametrize("point", ["save", "rename", "current"])
-def test_keyboard_interrupt_cleans_unpublished_artifacts(tmp_path, monkeypatch, lightweight_artifact_preparation, point):
+def test_keyboard_interrupt_cleans_unpublished_artifacts(tmp_path, monkeypatch, point):
     monkeypatch.chdir(tmp_path)
     root, current, old = _prepare_current_generation(tmp_path)
     def interrupt(*args, **kwargs):
@@ -555,7 +560,7 @@ def test_cleanup_error_does_not_hide_checkpoint_preparation_error(
 
     monkeypatch.setattr(
         BPRMF,
-        "_build_item_feature_matrix",
+        "_saved_feature_payload",
         fail_checkpoint_preparation,
     )
     monkeypatch.setattr(BPRMF.shutil, "rmtree", fail_cleanup)
@@ -575,7 +580,7 @@ def test_cleanup_error_does_not_hide_checkpoint_preparation_error(
 
 
 def test_successful_save_atomically_switches_to_one_new_generation(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     model_dir, _manifest_path, _old_manifest_bytes = _prepare_current_generation(
@@ -599,7 +604,7 @@ def test_successful_save_atomically_switches_to_one_new_generation(
 
 
 def test_parallel_publishers_use_independent_manifest_temp_files(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     model_dir, _manifest_path, _old_manifest_bytes = _prepare_current_generation(
@@ -706,7 +711,7 @@ def test_loader_falls_back_to_legacy_pair_when_manifest_is_absent(
 
 
 def test_first_successful_generation_preserves_legacy_files(
-    tmp_path, monkeypatch, lightweight_artifact_preparation
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     model_dir = tmp_path / "model"

@@ -1,0 +1,1 @@
+Saved ten synthetic screenshots; no loading/training/inference

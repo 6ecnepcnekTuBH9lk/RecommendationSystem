@@ -104,6 +104,9 @@ class BprDiagnostics:
     train_pairs_after_aggregation: int
     eval_events: int
     total_train_weight: float
+    interaction_count_eligible_users: int = 0
+    excluded_seen_eval_users: int = 0
+    excluded_seen_eval_rate: float = 0.0
 
 
 @dataclass(repr=False)
@@ -112,6 +115,17 @@ class BprPreparation(PreparedBprData):
 
 
 def prepare_bpr(events: Iterable[BprEvent], config: BprPreparationConfig = BprPreparationConfig()) -> BprPreparation:
+    return _prepare_bpr(events, config, internal_eval=True)
+
+
+def prepare_bpr_training_history(
+    events: Iterable[BprEvent], config: BprPreparationConfig = BprPreparationConfig(),
+) -> BprPreparation:
+    """Explicit research history preparation: every supplied event remains training evidence."""
+    return _prepare_bpr(events, config, internal_eval=False)
+
+
+def _prepare_bpr(events, config, *, internal_eval):
     # Preserve source row order within each type, even for interleaved input.
     grouped = {kind: [] for kind in InteractionType}
     for event in events:
@@ -133,10 +147,16 @@ def prepare_bpr(events: Iterable[BprEvent], config: BprPreparationConfig = BprPr
     # Explicit dtypes also make an empty input produce [0,2] pairs and float weights.
     frame = frame.astype({"u_idx": "int64", "i_idx": "int64", "w": "float64", "_row_id": "int64"})
     ordered_frame = frame.sort_values(["u_idx", "ts", "_row_id"], kind="mergesort")
-    counts = ordered_frame.groupby("u_idx").size()
-    eligible = counts[counts >= config.min_user_interactions_for_eval].index
-    last = ordered_frame[ordered_frame["ts"].notna()].groupby("u_idx").tail(1)
-    last = last[last["u_idx"].isin(eligible)]
+    eligible = []
+    last = ordered_frame.iloc[:0]
+    if internal_eval:
+        counts = ordered_frame.groupby("u_idx").size()
+        eligible = counts[counts >= config.min_user_interactions_for_eval].index
+        last = ordered_frame[ordered_frame["ts"].notna()].groupby("u_idx").tail(1)
+        last = last[last["u_idx"].isin(eligible)]
+        # Only the final event can be held out; repeated final items keep their whole history in train.
+        item_counts = ordered_frame.groupby(["u_idx", "i_idx"])["i_idx"].transform("size")
+        last = last[item_counts.loc[last.index].eq(1)]
     train = ordered_frame.drop(index=last.index)
     # Use the existing pandas sum semantics, including float accumulation precision.
     aggregated = train.groupby(["u_idx", "i_idx"], as_index=False)["w"].sum()
@@ -149,6 +169,9 @@ def prepare_bpr(events: Iterable[BprEvent], config: BprPreparationConfig = BprPr
                        last["i_idx"].to_numpy(dtype=np.int64), positives)
     types = Counter(event.interaction_type for event in ordered)
     diagnostics = BprDiagnostics(len(ordered), types[InteractionType.VIEW], types[InteractionType.FAVORITE],
-                                 types[InteractionType.PURCHASE], len(users), len(items), len(eligible),
-                                 len(train), len(pairs), len(last), float(train_weights.sum()))
+                                 types[InteractionType.PURCHASE], len(users), len(items), len(last),
+                                 len(train), len(pairs), len(last), float(train_weights.sum()),
+                                 interaction_count_eligible_users=len(eligible),
+                                 excluded_seen_eval_users=len(eligible) - len(last),
+                                 excluded_seen_eval_rate=(len(eligible) - len(last)) / len(eligible) if len(eligible) else 0.0)
     return BprPreparation(maps, splits, diagnostics)

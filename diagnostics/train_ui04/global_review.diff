@@ -1,0 +1,3607 @@
+diff --git a/Application/model/BPRMF.py b/Application/model/BPRMF.py
+index 2c1d83e..b457045 100644
+--- a/Application/model/BPRMF.py
++++ b/Application/model/BPRMF.py
+@@ -27,12 +27,12 @@ from difflib import SequenceMatcher
+ if __package__:
+     from .interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
+     from .seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
+-    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics
++    from .training_metrics import TrainingEpochMetrics, TrainingRunMetrics, single_target_metrics
+     from .training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+ else:  # Direct legacy CLI: python Application/model/BPRMF.py --train
+     from interaction_analytics import AnalyticsCollector, AnalyticsError, analytics_from_checkpoint, load_catalog_kinds
+     from seen_items import SeenItemsIndex, SeenItemsError, build_seen_items_index, seen_items_from_checkpoint
+-    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics
++    from training_metrics import TrainingEpochMetrics, TrainingRunMetrics, single_target_metrics
+     from training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+ 
+ # --- make CPU BLAS usage predictable (often important for UI apps on Windows) ---
+@@ -302,6 +302,9 @@ def _train_test_split_last_per_user(events: pd.DataFrame, cfg: TrainConfig, num_
+     dated_events = events_sorted[events_sorted["ts"].notna()]
+     last = dated_events.groupby("u_idx").tail(1)
+     last = last[last["u_idx"].isin(eligible_users)]
++    # Retain all events for users whose final candidate item has appeared before.
++    item_counts = events_sorted.groupby(["u_idx", "i_idx"])["i_idx"].transform("size")
++    last = last[item_counts.loc[last.index].eq(1)]
+ 
+     eval_users = last["u_idx"].astype(int).to_numpy()
+     eval_items = last["i_idx"].astype(int).to_numpy()
+@@ -332,13 +335,12 @@ def _sample_batch(
+         batch_size: int,
+         rng: np.random.Generator,
+ ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
++    """Select positive pairs uniformly; return their confidence weights for loss."""
+ 
+     if len(train_pairs) <= batch_size:
+         return train_pairs[:, 0], train_pairs[:, 1], train_weights.astype(np.float64)
+ 
+-    w = train_weights.astype(np.float64)
+-    w = w / (w.sum() + 1e-12)
+-    idx = rng.choice(len(train_pairs), size=batch_size, replace=False, p=w)
++    idx = rng.choice(len(train_pairs), size=batch_size, replace=False)
+     return train_pairs[idx, 0], train_pairs[idx, 1], train_weights[idx].astype(np.float64)
+ 
+ 
+@@ -350,25 +352,40 @@ def _sample_negatives(
+         n_neg: int = 10,
+         max_tries: int = 25,
+ ) -> np.ndarray:
++    """Uniform unseen negatives with replacement; fail if a user has no candidates."""
+ 
+     n_neg = max(1, int(n_neg))
+     if len(users) == 0:
+         return np.zeros((0, n_neg), dtype=np.int64)
+ 
++    positives = {int(u): list(user_pos_train[int(u)]) for u in users}
++    if any(len(pos) >= num_items for pos in positives.values()):
++        raise ValueError("No candidate negative items for a training user")
+     neg = rng.integers(0, num_items, size=(len(users), n_neg), dtype=np.int64)
+ 
+-    # rejection sampling (keep it deterministic given rng)
+-    for _ in range(max_tries):
++    # Check the initial draw and every redraw, including the last retry.
++    max_tries = max(0, max_tries)
++    for attempt in range(max_tries + 1):
+         bad = np.zeros_like(neg, dtype=bool)
+         for bi, u in enumerate(users):
+-            pos = user_pos_train[int(u)]
++            pos = positives[int(u)]
+             if pos:
+-                # np.isin is fast for small n_neg; convert set -> list once per user
+-                bad[bi] = np.isin(neg[bi], list(pos))
++                bad[bi] = np.isin(neg[bi], pos)
+         if not bad.any():
++            return neg
++        if attempt == max_tries:
+             break
+         neg[bad] = rng.integers(0, num_items, size=int(bad.sum()), dtype=np.int64)
+ 
++    # Only unresolved rows need a complement; reuse it for repeated users in this call.
++    candidates = {}
++    for bi, u in enumerate(users):
++        if not bad[bi].any():
++            continue
++        user = int(u)
++        if user not in candidates:
++            candidates[user] = np.setdiff1d(np.arange(num_items, dtype=np.int64), positives[user], assume_unique=True)
++        neg[bi, bad[bi]] = rng.choice(candidates[user], size=int(bad[bi].sum()), replace=True)
+     return neg
+ 
+ 
+@@ -552,6 +569,9 @@ def _eval_bprmf_recall_ndcg(
+         k: int,
+         device: torch.device,
+ ) -> Tuple[float, float]:
++    for user, item in zip(splits.eval_users, splits.eval_items):
++        if int(item) in splits.user_pos_train[int(user)]:
++            raise PreparedDataError("Evaluation targets must be unseen in training")
+     if len(splits.eval_users) == 0:
+         return 0.0, 0.0
+ 
+@@ -571,34 +591,24 @@ def _eval_bprmf_recall_ndcg(
+         u_emb = model.user_emb(u_t)  # [B, d]
+         scores = u_emb @ item_emb.t()  # [B, I]
+ 
+-        # filter train positives (so we don't recommend already seen items)
+-        # IMPORTANT: if the evaluation target was also seen in train (repeat interaction),
+-        # we do NOT mask the target item so it remains rankable.
++        # Every train positive is excluded; valid targets are naturally unseen.
+         for bi, uu in enumerate(u):
+-            target = int(g[bi])
+             pos = splits.user_pos_train[int(uu)]
+             if pos:
+-                if target in pos:
+-                    idx_list = [x for x in pos if x != target]
+-                else:
+-                    idx_list = list(pos)
+-
+-                if idx_list:
+-                    idx = torch.tensor(idx_list, dtype=torch.long, device=device)
+-                    scores[bi, idx] = -1e9
++                idx = torch.tensor(list(pos), dtype=torch.long, device=device)
++                scores[bi, idx] = -torch.inf
+ 
+         topk_idx = torch.topk(scores, k=min(k, num_items), dim=1).indices.cpu().numpy()
+ 
+         for bi in range(len(u)):
+             target = int(g[bi])
+             row = topk_idx[bi]
+-            if target in row:
+-                rank = int(np.where(row == target)[0][0]) + 1
+-                recalls.append(1.0)
+-                ndcgs.append(1.0 / np.log2(rank + 1))
+-            else:
+-                recalls.append(0.0)
+-                ndcgs.append(0.0)
++            # topk can include masked tails when K exceeds the unseen candidate count.
++            row = row[~np.isin(row, list(splits.user_pos_train[int(u[bi])]))]
++            rank = int(np.where(row == target)[0][0]) + 1 if target in row else None
++            recall, ndcg = single_target_metrics(rank)
++            recalls.append(recall)
++            ndcgs.append(ndcg)
+ 
+     return float(np.mean(recalls)), float(np.mean(ndcgs))
+ 
+@@ -617,11 +627,18 @@ def train_prepared_data(cfg: TrainConfig, prepared_data: PreparedBprData, device
+ 
+ def train_prepared_data_with_metrics(
+     cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
++    *, epoch_observer=None,
+ ) -> Tuple[BPRMF, Splits, TrainingRunMetrics]:
+-    return _train_prepared_data_impl(cfg, prepared_data, device)
++    """Optional research observer receives (model, immutable epoch metrics).
++
++    The observer must only read model state. It runs without gradients after a
++    completed epoch; it cannot select a checkpoint or control early stopping.
++    """
++    return _train_prepared_data_impl(cfg, prepared_data, device, epoch_observer=epoch_observer)
+ 
+ 
+-def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device):
++def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData, device: torch.device,
++                              *, epoch_observer=None):
+     """Train supplied splits as-is; no interaction CSV reads or weight recomputation."""
+     validate_prepared_data(prepared_data)
+     maps, splits = prepared_data.mappings, prepared_data.splits
+@@ -718,7 +735,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData,
+     if metric_name not in ("ndcg", "recall"):
+         metric_name = "ndcg"
+ 
+-    use_early_stop = bool(getattr(cfg, "early_stop", True))
++    has_internal_eval = len(splits.eval_users) > 0
++    use_early_stop = bool(getattr(cfg, "early_stop", True)) and has_internal_eval
+     patience = max(1, int(getattr(cfg, "early_stop_patience", 2)))
+     min_delta = float(getattr(cfg, "early_stop_min_delta", 1e-4))
+     min_epochs = max(1, int(getattr(cfg, "early_stop_min_epochs", 1)))
+@@ -727,6 +745,8 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData,
+     bad_epochs = 0
+     history = []
+     early_stopped = False
++    if not has_internal_eval:
++        print(f"[{_now()}] Внутренняя оценка отсутствует: ранняя остановка отключена, возвращается последняя эпоха.")
+ 
+     for epoch in range(1, cfg.epochs + 1):
+         model.train()
+@@ -767,18 +787,35 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData,
+         recall, ndcg = _eval_bprmf_recall_ndcg(model, splits, num_items, cfg.topk, device)
+         history.append(TrainingEpochMetrics(epoch, total_loss / steps, float(recall), float(ndcg)))
+ 
++        evaluation_label = (f"RECALL@{cfg.topk}={recall:.4f}  NDCG@{cfg.topk}={ndcg:.4f}"
++                            if has_internal_eval else "внутренняя оценка отсутствует")
+         print(
+             f"[{_now()}] Итерация {epoch} из {cfg.epochs}: "
+-            f"loss={total_loss / steps:.4f}  RECALL@{cfg.topk}={recall:.4f}  NDCG@{cfg.topk}={ndcg:.4f}"
++            f"loss={total_loss / steps:.4f}  {evaluation_label}"
+         )
+ 
++        if epoch_observer is not None:
++            was_training = model.training
++            try:
++                with torch.no_grad():
++                    epoch_observer(model, history[-1])
++            finally:
++                model.train(was_training)
++
++        # Empty-evaluation zero placeholders in history are not monitored metrics.
++        # Preserve the existing -1 best-observation sentinel and the full budget.
++        if not has_internal_eval:
++            continue
++
+         cur_metric = ndcg if metric_name == "ndcg" else recall
+         improved = cur_metric > best["metric"] + min_delta
+ 
+         if improved:
+             best["metric"] = float(cur_metric)
+             best["RECALL"], best["NDCG"], best["epoch"] = float(recall), float(ndcg), epoch
+-            best["state"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
++            if use_early_stop:
++                # CPU .cpu() can alias model storage; best checkpoints must not.
++                best["state"] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+             bad_epochs = 0
+         else:
+             if use_early_stop and epoch >= min_epochs:
+@@ -791,13 +828,14 @@ def _train_prepared_data_impl(cfg: TrainConfig, prepared_data: PreparedBprData,
+                     )
+                     break
+ 
+-    if best["state"] is not None:
++    if use_early_stop and best["state"] is not None:
+         model.load_state_dict(best["state"])
+ 
+-    print(
+-        f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
+-        f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
+-    )
++    if has_internal_eval:
++        print(
++            f"[{_now()}] Лучшие показатели метрики {metric_name}@{cfg.topk} на итерации {best['epoch']}: "
++            f"RECALL@{cfg.topk}={best['RECALL']:.4f} NDCG@{cfg.topk}={best['NDCG']:.4f}"
++        )
+     metrics = TrainingRunMetrics(len(history), best["epoch"], best["RECALL"], best["NDCG"],
+                                  metric_name, early_stopped, tuple(history))
+     return model, splits, metrics
+diff --git a/Application/model/bpr_preparation.py b/Application/model/bpr_preparation.py
+index be5eea3..aaeb201 100644
+--- a/Application/model/bpr_preparation.py
++++ b/Application/model/bpr_preparation.py
+@@ -104,6 +104,9 @@ class BprDiagnostics:
+     train_pairs_after_aggregation: int
+     eval_events: int
+     total_train_weight: float
++    interaction_count_eligible_users: int = 0
++    excluded_seen_eval_users: int = 0
++    excluded_seen_eval_rate: float = 0.0
+ 
+ 
+ @dataclass(repr=False)
+@@ -112,6 +115,17 @@ class BprPreparation(PreparedBprData):
+ 
+ 
+ def prepare_bpr(events: Iterable[BprEvent], config: BprPreparationConfig = BprPreparationConfig()) -> BprPreparation:
++    return _prepare_bpr(events, config, internal_eval=True)
++
++
++def prepare_bpr_training_history(
++    events: Iterable[BprEvent], config: BprPreparationConfig = BprPreparationConfig(),
++) -> BprPreparation:
++    """Explicit research history preparation: every supplied event remains training evidence."""
++    return _prepare_bpr(events, config, internal_eval=False)
++
++
++def _prepare_bpr(events, config, *, internal_eval):
+     # Preserve source row order within each type, even for interleaved input.
+     grouped = {kind: [] for kind in InteractionType}
+     for event in events:
+@@ -133,10 +147,16 @@ def prepare_bpr(events: Iterable[BprEvent], config: BprPreparationConfig = BprPr
+     # Explicit dtypes also make an empty input produce [0,2] pairs and float weights.
+     frame = frame.astype({"u_idx": "int64", "i_idx": "int64", "w": "float64", "_row_id": "int64"})
+     ordered_frame = frame.sort_values(["u_idx", "ts", "_row_id"], kind="mergesort")
+-    counts = ordered_frame.groupby("u_idx").size()
+-    eligible = counts[counts >= config.min_user_interactions_for_eval].index
+-    last = ordered_frame[ordered_frame["ts"].notna()].groupby("u_idx").tail(1)
+-    last = last[last["u_idx"].isin(eligible)]
++    eligible = []
++    last = ordered_frame.iloc[:0]
++    if internal_eval:
++        counts = ordered_frame.groupby("u_idx").size()
++        eligible = counts[counts >= config.min_user_interactions_for_eval].index
++        last = ordered_frame[ordered_frame["ts"].notna()].groupby("u_idx").tail(1)
++        last = last[last["u_idx"].isin(eligible)]
++        # Only the final event can be held out; repeated final items keep their whole history in train.
++        item_counts = ordered_frame.groupby(["u_idx", "i_idx"])["i_idx"].transform("size")
++        last = last[item_counts.loc[last.index].eq(1)]
+     train = ordered_frame.drop(index=last.index)
+     # Use the existing pandas sum semantics, including float accumulation precision.
+     aggregated = train.groupby(["u_idx", "i_idx"], as_index=False)["w"].sum()
+@@ -149,6 +169,9 @@ def prepare_bpr(events: Iterable[BprEvent], config: BprPreparationConfig = BprPr
+                        last["i_idx"].to_numpy(dtype=np.int64), positives)
+     types = Counter(event.interaction_type for event in ordered)
+     diagnostics = BprDiagnostics(len(ordered), types[InteractionType.VIEW], types[InteractionType.FAVORITE],
+-                                 types[InteractionType.PURCHASE], len(users), len(items), len(eligible),
+-                                 len(train), len(pairs), len(last), float(train_weights.sum()))
++                                 types[InteractionType.PURCHASE], len(users), len(items), len(last),
++                                 len(train), len(pairs), len(last), float(train_weights.sum()),
++                                 interaction_count_eligible_users=len(eligible),
++                                 excluded_seen_eval_users=len(eligible) - len(last),
++                                 excluded_seen_eval_rate=(len(eligible) - len(last)) / len(eligible) if len(eligible) else 0.0)
+     return BprPreparation(maps, splits, diagnostics)
+diff --git a/Application/model/mindbox_production_training.py b/Application/model/mindbox_production_training.py
+index fbf5d99..c07cc0b 100644
+--- a/Application/model/mindbox_production_training.py
++++ b/Application/model/mindbox_production_training.py
+@@ -218,7 +218,8 @@ def _report(result, config_summary):
+ 
+ 
+ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_path, cfg, device,
+-                                        allow_warn=False, model_dir=None, progress=None):
++                                        allow_warn=False, model_dir=None, progress=None, expected_batch_id=None,
++                                        epoch_observer=None, check_cancel=None, before_publication=None):
+     """Train/publish under an OS lock; failures return safe immutable state.
+ 
+     model_dir is an API/test seam. The CLI always selects the fixed project model.
+@@ -242,6 +243,8 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
+                 result = replace(prepared_result, previous_generation=previous_generation)
+                 if progress:
+                     progress(result)
++                if expected_batch_id is not None and result.batch_id != expected_batch_id:
++                    raise _Failure("PREFLIGHT_CHANGED")
+                 if not result.quality_report.training_allowed:
+                     raise _Failure("QUALITY_BLOCK")
+                 if result.quality_report.level.value == "WARN" and not allow_warn:
+@@ -250,11 +253,18 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
+                     raise _Failure("ARTIFACT_FAILED")
+                 stage = "TRAINING_FAILED"
+                 result = replace(result, training_started=True)
++                if check_cancel:
++                    check_cancel()
++                if progress and epoch_observer is not None:
++                    progress(result)
+                 core._set_seed(cfg.seed)
+-                model, _, metrics = core.train_prepared_data_with_metrics(cfg, data, device)
++                observer_args = {"epoch_observer": epoch_observer} if epoch_observer is not None else {}
++                model, _, metrics = core.train_prepared_data_with_metrics(cfg, data, device, **observer_args)
+                 result = replace(result, training_completed=True, training_metrics=metrics)
+ 
+                 def guard():
++                    if check_cancel:
++                        check_cancel()
+                     try:
+                         changed = _current(model_dir)[1] != previous
+                     except Exception:
+@@ -267,7 +277,13 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
+                 seen = build_seen_items_index(data)
+                 if seen is None or data.analytics is None:
+                     raise _Failure("ARTIFACT_FAILED")
++                if before_publication:
++                    before_publication()
++                if check_cancel:
++                    check_cancel()
+                 result = replace(result, publication_started=True)
++                if progress and before_publication is not None:
++                    progress(result)
+                 generation = core._save_artifacts(cfg, data.mappings, model, seen_items=seen, analytics=data.analytics,
+                                      model_dir=str(model_dir), _before_commit=guard, _publication_state=receipt)
+                 result = replace(result, published=True, published_generation=generation,
+diff --git a/Application/model/mindbox_training_preparation.py b/Application/model/mindbox_training_preparation.py
+index 3711d27..2a4d816 100644
+--- a/Application/model/mindbox_training_preparation.py
++++ b/Application/model/mindbox_training_preparation.py
+@@ -98,7 +98,8 @@ def _prepare_training_data_from_mindbox_sources(
+         weights=BprWeightConfig(view_weight=train_config.w_view_item, favorite_weight=train_config.w_favorite,
+                                 purchase_weight=train_config.w_purchase),
+         min_user_interactions_for_eval=train_config.min_user_interactions_for_eval,
+-        date_mode=DateMode.LEGACY_DATE,
++        # Canonical records retain exact UTC event times; legacy CSV keeps its own date mode.
++        date_mode=DateMode.FULL_TIMESTAMP,
+     )
+     products = ProductResolver(load_catalog(Path(catalog_path)))
+     merge_count = 0
+diff --git a/Application/model/training_data.py b/Application/model/training_data.py
+index e14231c..aef4c87 100644
+--- a/Application/model/training_data.py
++++ b/Application/model/training_data.py
+@@ -85,5 +85,8 @@ def validate_prepared_data(data: PreparedBprData) -> None:
+         if (not isinstance(actual, set) or any(not isinstance(item, (int, np.integer))
+                 or isinstance(item, (bool, np.bool_)) for item in actual) or actual != wanted):
+             raise PreparedDataError("user_pos_train must match train pairs")
++    for user, item in zip(splits.eval_users, splits.eval_items):
++        if int(item) in splits.user_pos_train[int(user)]:
++            raise PreparedDataError("Evaluation targets must be unseen in training")
+     if len(pairs) == 0:
+         raise PreparedDataError("Training set is empty")
+diff --git a/Application/model/training_metrics.py b/Application/model/training_metrics.py
+index b54b2da..c368c74 100644
+--- a/Application/model/training_metrics.py
++++ b/Application/model/training_metrics.py
+@@ -1,6 +1,12 @@
+ """Immutable observations of the existing training loop."""
+ 
+ from dataclasses import dataclass
++import numpy as np
++
++
++def single_target_metrics(rank: int | None) -> tuple[float, float]:
++    """Existing Recall/HitRate and NDCG contribution for one relevant item."""
++    return (1.0, 1.0 / np.log2(rank + 1)) if rank is not None else (0.0, 0.0)
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/Application/statistics_charts.py b/Application/statistics_charts.py
+index 4cea7a6..0bd960a 100644
+--- a/Application/statistics_charts.py
++++ b/Application/statistics_charts.py
+@@ -20,6 +20,50 @@ PRODUCT_LABEL_PADDING = 16
+ NEUTRAL = {False: '#8A8F98', True: '#9BA3AD'}
+ 
+ 
++def style_chart(chart, secondary=False, section_title=False):
++    """Shared Material palette for native statistics and live training charts."""
++    surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
++    background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
++    foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
++    accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
++    dark = surface.lightness() < 128
++    chart.setBackgroundBrush(background)
++    chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
++    chart.setPlotAreaBackgroundVisible(False)
++    chart.setTitleBrush(foreground)
++    font = QFont(QApplication.font())
++    font.setPointSizeF(10)
++    chart.legend().setFont(font)
++    title_font = QFont(font)
++    if section_title:
++        # Same typography as QLabel.statisticsSection in the shared QSS.
++        title_font.setPointSizeF(12)
++        title_font.setItalic(True)
++    chart.setTitleFont(title_font)
++    chart.legend().setLabelColor(foreground)
++    grid = QColor(foreground)
++    grid.setAlpha(40)
++    for axis in chart.axes():
++        axis.setLabelsBrush(foreground)
++        axis.setTitleBrush(foreground)
++        axis.setLinePen(QPen(Qt.PenStyle.NoPen))
++        axis.setGridLinePen(QPen(grid, 1))
++        axis.setMinorGridLineVisible(False)
++    for i, series in enumerate(chart.series()):
++        color = accent if i == 0 and not secondary else QColor(SECONDARY[dark])
++        if isinstance(series, QLineSeries):
++            series.setPen(QPen(color, 2))
++        elif isinstance(series, QPieSeries):
++            for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
++                piece.setBrush(fill)
++                piece.setPen(QPen(background, 1))
++        else:
++            for bars in series.barSets():
++                bars.setColor(color)
++                bars.setBorderColor(color)
++    return background, foreground, accent
++
++
+ def exact_number(value):
+     number = Decimal(str(value))
+     text = format(number, 'f')
+@@ -369,16 +413,8 @@ class StatisticsChart(QChartView):
+                         area.top() + (index + .5) * height - bounds.height() / 2)
+ 
+     def apply_theme(self):
+-        surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
+-        background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
+-        foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
+-        accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
+-        dark = surface.lightness() < 128
+         chart = self.chart()
+-        chart.setBackgroundBrush(background)
+-        chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
+-        chart.setPlotAreaBackgroundVisible(False)
+-        chart.setTitleBrush(foreground)
++        background, foreground, accent = style_chart(chart, self.data.secondary)
+         if self.data.kind == 'horizontal':
+             self._update_categories()
+         for item in self._product_labels:
+@@ -387,30 +423,6 @@ class StatisticsChart(QChartView):
+             item.setBrush(foreground)
+         for item in self._bar_labels:
+             item.setDefaultTextColor(foreground)
+-        font = QFont(QApplication.font())
+-        font.setPointSizeF(10)
+-        chart.setTitleFont(font)
+-        chart.legend().setFont(font)
+-        chart.legend().setLabelColor(foreground)
+-        grid = QColor(foreground)
+-        grid.setAlpha(40)
+-        for axis in chart.axes():
+-            axis.setLabelsBrush(foreground)
+-            axis.setLinePen(QPen(Qt.PenStyle.NoPen))
+-            axis.setGridLinePen(QPen(grid, 1))
+-            axis.setMinorGridLineVisible(False)
+-        for i, series in enumerate(chart.series()):
+-            color = accent if i == 0 and not self.data.secondary else QColor(SECONDARY[dark])
+-            if isinstance(series, QLineSeries):
+-                series.setPen(QPen(color, 2))
+-            elif isinstance(series, QPieSeries):
+-                for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
+-                    piece.setBrush(fill)
+-                    piece.setPen(QPen(background, 1))
+-            else:
+-                for bars in series.barSets():
+-                    bars.setColor(color)
+-                    bars.setBorderColor(color)
+         self.tooltip.setStyleSheet(f'QLabel {{background: {background.name()}; color: {foreground.name()}; '
+                                   f'border: 1px solid {accent.name()}; border-radius: 5px; padding: 7px;}}')
+ 
+diff --git a/Application/tabs/train_model_tab.py b/Application/tabs/train_model_tab.py
+index ee65304..a390b5a 100644
+--- a/Application/tabs/train_model_tab.py
++++ b/Application/tabs/train_model_tab.py
+@@ -1,516 +1,760 @@
+-from Application.paths import ICONS_DIR, INPUT_DATA_DIR, USER_SETTINGS_DIR
++from Application.paths import ICONS_DIR, INPUT_DATA_DIR, USER_SETTINGS_DIR, PROJECT_ROOT
+ import os
+ import sys
+ import json
+ import time
+-
++import tempfile
++import uuid
++from pathlib import Path
+ import pandas as pd
+ import shutil
+-from Application.model import BPRMF as BPRMF_module
+ from functools import partial
+-from PyQt6.QtCore import Qt, QSize, QProcess
+-from PyQt6.QtGui import QIcon, QTextCursor
+-from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+-                             QLineEdit, QComboBox, QSpinBox,
+-                             QDoubleSpinBox, QTextEdit, QFrame, QAbstractSpinBox, QSizePolicy)
+-
+-from Application.settings.settings_and_filter import (update_filter_summary, get_selected_list_values)
+-
++from PyQt6.QtCore import Qt, QSize, QProcess, QTimer, QObject, QEvent, QLocale
++from PyQt6.QtGui import QIcon
++from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
++                             QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QFormLayout,
++                             QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QFrame, QSizePolicy)
++from Application.settings.settings_and_filter import get_selected_list_values
+ from Application.settings.set_status import (set_status_processing, schedule_status_reset,
+                                              set_status_error, set_status_ok)
++from Application.evaluation.experiments.gui_history import ExperimentHistory, now, clean_record, RESEARCH_FIXED
++from Application.mindbox.canonical_storage import atomic_json
++from Application.training_charts import TrainingChart
++from .training_workflow import input_values, metadata_readiness, production_config
++
++
++class _TrainingLifecycle(QObject):
++    """Refresh cheap metadata on entry and keep a running worker owned on close."""
++    def __init__(self, window, tab):
++        super().__init__(window)
++        self.window, self.tab = window, tab
++
++    def eventFilter(self, watched, event):
++        if watched is self.tab and event.type() == QEvent.Type.Show:
++            refresh_training_state(self.window)
++        if watched is self.window and event.type() == QEvent.Type.Close and getattr(self.window, '_training_active', False):
++            cancel_training(self.window)
++            event.ignore()
++            return True
++        return False
+ 
+ 
+-# -------------------------------------------ВКЛАДКА ОБУЧЕНИЕ МОДЕЛИ------------------------------------------------
+ def create_train_model_widgets_tab(aboba):
+     tab = QWidget()
+-
+-    # Главный горизонтальный сплит
+-    root = QHBoxLayout(tab)
++    root = QVBoxLayout(tab)
+     root.setContentsMargins(0, 0, 0, 0)
+     root.setSpacing(0)
+-
+-    # Левая панель
+-    left_wrap = QWidget()
+-    left_layout = QVBoxLayout(left_wrap)
+-
+-    # Правая панель
+-    right_wrap = QWidget()
+-    right_layout = QVBoxLayout(right_wrap)
+-    right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+-
+-    # Вертикальный разделитель
++    top = QHBoxLayout()
++    top.setContentsMargins(0, 0, 0, 0)
++    top.setSpacing(0)
++    root.addLayout(top, 3)
++    left_panel, right_panel = QWidget(), QWidget()
++    left_panel.setObjectName('trainingLeftPanel')
++    right_panel.setObjectName('trainingChartsPanel')
++    left, right = QVBoxLayout(left_panel), QVBoxLayout(right_panel)
++    left.setContentsMargins(8, 0, 8, 8)
++    right.setContentsMargins(8, 0, 8, 8)
++    top.addWidget(left_panel, 4)
+     separator = QFrame()
+-    separator.setObjectName("vSeparator")
++    separator.setObjectName('vSeparator')
+     separator.setFixedWidth(1)
+     separator.setFrameShape(QFrame.Shape.NoFrame)
+-
+-    root.addWidget(left_wrap, 1)
++    top.addWidget(separator)
++    top.addWidget(right_panel, 7)
++
++    def heading(layout, text):
++        label = QLabel(text)
++        label.setProperty('class', 'sectionHeader')
++        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignHCenter)
++        return label
++
++    aboba.heading_enter_parameter = heading(left, 'Параметры')
++    form = QFormLayout()
++    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
++    left.addLayout(form)
++    aboba.training_mode = QComboBox()
++    aboba.training_mode.addItems(['Эксперимент', 'Рабочая модель'])
++    form.addRow('Режим обучения:', aboba.training_mode)
++    aboba.epochs_input = QSpinBox()
++    aboba.epochs_input.setRange(0, 10000)
++    aboba.epochs_input.setValue(50)
++    aboba.epochs_input.setObjectName('epochs_input')
++    form.addRow('Количество эпох:', aboba.epochs_input)
++    for name, label, default in [('w_purchase', 'Вес покупки', 10.), ('w_favorite', 'Вес избранного', 2.),
++                                  ('w_view_item', 'Вес просмотра', .5)]:
++        widget = QDoubleSpinBox()
++        widget.setDecimals(2)
++        widget.setLocale(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
++        widget.setRange(0, 1000000)
++        widget.setValue(default)
++        widget.setObjectName(name)
++        setattr(aboba, name, widget)
++        form.addRow(label + ':', widget)
++    aboba.training_reason = QLabel()
++    aboba.training_reason.setWordWrap(True)
++    aboba.start_train = QPushButton(QIcon(str(ICONS_DIR / 'start_training.png')), 'Начать эксперимент')
++    aboba.start_train.setIconSize(QSize(17, 17))
++    aboba.start_train.clicked.connect(lambda: start_training_process(aboba))
++    aboba.cancel_train = QPushButton(QIcon(str(ICONS_DIR / 'failure.png')), 'Отменить')
++    aboba.cancel_train.setIconSize(QSize(17, 17))
++    aboba.cancel_train.setEnabled(False)
++    aboba.cancel_train.clicked.connect(lambda: cancel_training(aboba))
++    buttons = QHBoxLayout()
++    buttons.setContentsMargins(0, 0, 0, 0)
++    for button, stretch in ((aboba.start_train, 3), (aboba.cancel_train, 1)):
++        button.setFixedHeight(36)
++        button.setContentsMargins(0, 0, 0, 0)
++        button.setStyleSheet('QPushButton {margin: 0px; padding: 2px 14px;}')
++        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
++        buttons.addWidget(button, stretch, alignment=Qt.AlignmentFlag.AlignVCenter)
++
++    aboba.label_69 = heading(left, 'Процесс обучения')
++    aboba.training_progress_text = QLabel('Ожидание запуска')
++    aboba.training_progress_text.setWordWrap(True)
++    aboba.training_progress_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
++    aboba.training_progress = QProgressBar()
++    aboba.training_progress.setRange(0, 50)
++    aboba.training_progress.setValue(0)
++    left.addWidget(aboba.training_progress_text)
++    left.addWidget(aboba.training_progress)
++    aboba.train_log = QTextEdit()
++    aboba.train_log.setAcceptRichText(False)
++    aboba.train_log.setReadOnly(True)
++    aboba.train_log.setPlaceholderText('Логи подготовки, обучения и оценки появятся здесь…')
++    aboba.train_log.document().setMaximumBlockCount(5000)
++    left.addWidget(aboba.train_log, 1)
++    left.addWidget(aboba.training_reason)
++    left.addLayout(buttons)
++    heading(right, 'Визуализация обучения')
++    aboba.training_loss_chart = TrainingChart('Ошибка обучения', ('Ошибка',), 'Ошибка')
++    aboba.training_metric_chart = TrainingChart('Метрики валидации', ('NDCG@10', 'Recall@10'), 'Значение')
++    right.addWidget(aboba.training_loss_chart, 1)
++    right.addWidget(aboba.training_metric_chart, 1)
++    separator = QFrame()
++    separator.setObjectName('hSeparator')
++    separator.setFixedHeight(1)
++    separator.setFrameShape(QFrame.Shape.NoFrame)
+     root.addWidget(separator)
+-    root.addWidget(right_wrap, 1)
+-
+-    # -------------------- ЛЕВАЯ ЧАСТЬ --------------------
+-
+-    # Заголовок
+-    aboba.heading_enter_parameter = QLabel("Входные параметры")
+-    aboba.heading_enter_parameter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+-    aboba.heading_enter_parameter.setAlignment(Qt.AlignmentFlag.AlignCenter)
+-    aboba.heading_enter_parameter.setProperty("class", "sectionHeader")
+-    left_layout.addWidget(aboba.heading_enter_parameter, alignment=Qt.AlignmentFlag.AlignHCenter)
++    history = QVBoxLayout()
++    history.setSpacing(4)
++    history.setContentsMargins(8, 4, 8, 0)
++    root.addLayout(history, 2)
++    heading(history, 'История экспериментов')
++    aboba.history_notice = QLabel()
++    aboba.history_notice.setWordWrap(True)
++    history.addWidget(aboba.history_notice)
++    aboba.experiment_history = QTableWidget(0, 12)
++    aboba.experiment_history.setHorizontalHeaderLabels([
++        'Дата', 'Просмотр', 'Избранное', 'Покупка', 'Эпохи', 'NDCG@10', 'Recall@10',
++        'NDCG@10 (просмотры)', 'NDCG@10 (покупки)', 'Время', 'Устройство', 'Статус'])
++    aboba.experiment_history.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
++    aboba.experiment_history.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
++    aboba.experiment_history.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
++    aboba.experiment_history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
++    aboba.experiment_history.horizontalHeader().setStretchLastSection(True)
++    aboba.experiment_history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
++    for column, width in enumerate((180, 85, 95, 85, 70, 105, 105, 180, 170, 90, 100, 110)):
++        aboba.experiment_history.setColumnWidth(column, width)
++    aboba.experiment_history.verticalHeader().hide()
++    aboba.experiment_history.setMinimumHeight(130)
++    history.addWidget(aboba.experiment_history, 1)
++    aboba._experiment_store = ExperimentHistory(USER_SETTINGS_DIR / 'research_experiments')
++    aboba._training_active = False
++    aboba._training_timer = QTimer(tab)
++    aboba._training_timer.setInterval(1000)
++    aboba._training_timer.timeout.connect(lambda: _update_progress(aboba))
++    aboba._training_lifecycle = _TrainingLifecycle(aboba, tab)
++    aboba.installEventFilter(aboba._training_lifecycle)
++    tab.installEventFilter(aboba._training_lifecycle)
++    aboba.training_mode.currentIndexChanged.connect(lambda: refresh_training_state(aboba))
++    for widget in (aboba.w_purchase, aboba.w_favorite, aboba.w_view_item, aboba.epochs_input):
++        widget.valueChanged.connect(lambda: refresh_training_state(aboba, metadata=False))
++        widget.lineEdit().textEdited.connect(lambda: refresh_training_state(aboba, metadata=False))
++    _load_history(aboba, recover=True)
++    refresh_training_state(aboba)
++    aboba.tabs.addTab(tab, 'Обучение модели')
++    return tab
++
++
++def _research(aboba):
++    return getattr(aboba, 'training_mode', None) is not None and aboba.training_mode.currentText() == 'Эксперимент'
++
++
++def _block_key(aboba):
++    try:
++        values = tuple(input_values(aboba).items())
++        path = USER_SETTINGS_DIR / 'train_config.json'
++        stat = path.stat() if not _research(aboba) and path.exists() else None
++        settings_stamp = (stat.st_mtime_ns, stat.st_size) if stat else None
++        return _research(aboba), aboba._training_ready[2], values, settings_stamp
++    except (ValueError, OSError):
++        return None
++
++
++def refresh_training_state(aboba, metadata=True):
++    research = _research(aboba)
++    active = getattr(aboba, '_training_active', False)
++    if metadata and not active:
++        aboba._training_ready = metadata_readiness(INPUT_DATA_DIR, research)
++    ready, reason, revision = getattr(aboba, '_training_ready', (False, 'Данные ещё не проверены', None))
++    reason = reason.replace('Temporal validation benchmark', 'Набор данных для валидации').replace('metadata', 'метаданных')
++    reason = reason.replace('Canonical batch', 'Канонический пакет данных')
++    if hasattr(aboba, 'training_mode'):
++        aboba.start_train.setText('Начать эксперимент' if research else 'Обучить рабочую модель')
++    blocker = ''
++    if active:
++        blocker = 'Выполняется обучение' if not getattr(aboba, '_cancel_requested', False) else 'Отмена: ожидаем завершения процесса'
++    elif not ready:
++        blocker = reason
++    elif research and getattr(aboba, '_benchmark_block', None) is not None and aboba._benchmark_block == revision:
++        blocker = 'Набор данных для валидации недоступен; обновите данные'
++    elif getattr(aboba, '_preflight_block', None) is not None and aboba._preflight_block == _block_key(aboba):
++        blocker = getattr(aboba, '_preflight_block_reason', 'Проверка данных заблокировала обучение; обновите данные или параметры')
++    else:
++        try:
++            values = input_values(aboba)
++            if not research:
++                production_config(values, USER_SETTINGS_DIR, INPUT_DATA_DIR)
++        except (ValueError, TypeError, AttributeError) as error:
++            blocker = str(error) if not isinstance(error, json.JSONDecodeError) else 'Настройки рабочей модели повреждены'
++        except OSError:
++            blocker = 'Настройки рабочей модели недоступны'
++    aboba.start_train.setEnabled(not blocker)
++    if hasattr(aboba, 'training_reason'):
++        aboba.training_reason.setText(blocker)
++        aboba.training_reason.setVisible(bool(blocker) and not active)
++        aboba.training_metric_chart.setVisible(research)
++        aboba.cancel_train.setEnabled(active and not getattr(aboba, '_cancel_requested', False) and not getattr(aboba, '_publishing', False))
++        for widget in (aboba.training_mode, aboba.w_purchase, aboba.w_favorite, aboba.w_view_item, aboba.epochs_input):
++            widget.setEnabled(not active)
++    return not blocker
++
++
++def _log_data_counts(aboba, counts, prepared=False):
++    if not counts:
++        return
++    labels = [('interactions', 'Взаимодействий'), ('users', 'Пользователей'), ('items', 'Товаров')]
++    if prepared:
++        labels.append(('pairs', 'Обучающих пар'))
++    signature = tuple((key, counts.get(key)) for key, _ in labels)
++    logged = getattr(aboba, '_counts_logged', {})
++    if logged.get(prepared) == signature:
++        return
++    logged[prepared] = signature
++    aboba._counts_logged = logged
++    title = 'Подготовка данных завершена.\nДля обучения подготовлено:' if prepared else 'Доступные данные:'
++    aboba.train_log.append(title + '\n' + '\n'.join(
++        f'{label}: {format(counts[key], ",").replace(",", " ") if key in counts else "—"}' for key, label in labels))
+ 
+-    # -------------------- ПАРАМЕТРЫ --------------------
+-    form_wrap = QWidget()
+-    form_wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+ 
+-    form_layout = QVBoxLayout(form_wrap)
+-    form_layout.setContentsMargins(0, 0, 0, 0)
+-    form_layout.setSpacing(7)
++def _receive_data_counts(aboba, event, state='ready', log=None):
++    """No raw reads: both runners deliver counts from their normal preparation."""
++    if not hasattr(aboba, '_training_ready'):
++        return
++    source = event.get('dataset', event)
++    names = {'interactions': ('training_events', 'bpr_events'), 'users': ('training_users', 'users'),
++             'items': ('training_items', 'items'), 'pairs': ('training_pairs', 'train_pairs')}
++    counts = {}
++    for name, keys in names.items():
++        for key in keys:
++            value = source.get(key)
++            if type(value) is int and value >= 0:
++                counts[name] = value
++                break
++    cache = getattr(aboba, '_training_data_by_mode', {})
++    research, revision = _research(aboba), aboba._training_ready[2]
++    previous = cache.get(research, {})
++    if previous.get('revision') != revision:
++        previous = {}
++    cache[research] = {'revision': revision, 'counts': {**previous.get('counts', {}), **counts}, 'state': state}
++    aboba._training_data_by_mode = cache
++    if log is not None and counts:
++        _log_data_counts(aboba, cache[research]['counts'], prepared=log == 'prepared')
++
++
++def _set_training_phase(aboba, stage):
++    timer = getattr(aboba, '_status_reset_timer', None)
++    if timer is not None:
++        timer.stop()
++    phases = {'loading': 'Загрузка данных...', 'preparation': 'Подготовка данных...',
++              'training': 'Выполняется обучение...', 'epoch': 'Выполняется обучение...',
++              'validation': 'Оценка модели...', 'publication': 'Публикация модели...',
++              'preflight': 'Проверка данных перед обучением...'}
++    text = 'Отмена: ожидаем завершения процесса...' if getattr(aboba, '_cancel_requested', False) else phases.get(stage)
++    if text:
++        set_status_processing(aboba, text)
++
++
++def _confirm_production(aboba, values):
++    text = ('Будет выполнено обучение рабочей модели. При успехе новое поколение модели будет опубликовано.\n\n'
++            f'Покупка: {values["w_purchase"]:g}\nИзбранное: {values["w_favorite"]:g}\nПросмотр: {values["w_view_item"]:g}\n'
++            f'Количество эпох: {values["epochs"]}\n\nПродолжить?')
++    return QMessageBox.question(aboba, 'Обучение рабочей модели', text,
++                               QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
++                               QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+ 
+-    def add_param(label_text: str, widget, stretch_after: bool = True):
+-        # строка: [Label][Widget]
+-        row_w = QWidget()
+-        row_l = QHBoxLayout(row_w)
+-        row_l.setContentsMargins(0, 0, 0, 0)
+-        row_l.setSpacing(0)
+ 
+-        lbl = QLabel(label_text)
+-        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+-        lbl.setMinimumWidth(200)
+-        lbl.setToolTip(label_text)
++def start_training_process(aboba):
++    if getattr(aboba, '_training_active', False) or (getattr(aboba, 'train_proc', None) is not None
++                                                   and aboba.train_proc.state() != QProcess.ProcessState.NotRunning):
++        set_status_error(aboba, 'Обучение уже запущено')
++        return
++    aboba._training_active = False
++    aboba._train_config_path = None
++    if not refresh_training_state(aboba):
++        set_status_error(aboba, 'Запуск недоступен: проверьте данные и параметры')
++        return
++    try:
++        values = input_values(aboba)
++        research = _research(aboba)
++        cfg = values if research else production_config(values, USER_SETTINGS_DIR, INPUT_DATA_DIR)
++    except (OSError, ValueError, TypeError):
++        set_status_error(aboba, 'Не удалось подготовить параметры обучения')
++        return
++    if not research and not _confirm_production(aboba, values):
++        return
++    aboba._training_active = True
++    aboba._run_is_research = research
++    aboba._cancel_requested = False
++    aboba._publishing = False
++    aboba._train_publication_result = None
++    aboba._train_preflight_result = None
++    aboba._train_research_result = None
++    aboba._train_output_buffer = b''
++    aboba._run_started_clock = time.monotonic()
++    aboba._progress_event = {}
++    aboba.train_log.clear()
++    aboba.train_log.append('Новый эксперимент' if research else 'Новое обучение рабочей модели')
++    aboba._counts_logged = {}
++    aboba.train_log.append('Проверка данных...\nДанные готовы.')
++    cached = getattr(aboba, '_training_data_by_mode', {}).get(research, {})
++    counts = cached.get('counts', {}) if cached.get('revision') == aboba._training_ready[2] else {}
++    if counts:
++        _log_data_counts(aboba, counts)
++    else:
++        aboba.train_log.append('Точные объёмы будут определены при подготовке.')
++    # Each configuration may produce different training pairs.
++    if hasattr(aboba, '_training_data_by_mode'):
++        aboba._training_data_by_mode.pop(research, None)
++    if hasattr(aboba, 'training_loss_chart'):
++        aboba.training_loss_chart.reset(values['epochs'])
++        aboba.training_metric_chart.reset(values['epochs'])
++    if hasattr(aboba, 'training_progress'):
++        aboba.training_progress.setRange(0, values['epochs'])
++        aboba.training_progress.setValue(0)
++        _update_progress(aboba)
++        aboba._training_timer.start()
++    refresh_training_state(aboba, metadata=False)
++    _set_training_phase(aboba, 'preflight')
++    if research:
++        aboba._research_record = {'run_id': uuid.uuid4().hex, 'started_at': now(), 'status': 'running',
++                                  'hyperparameters': {**RESEARCH_FIXED, **values}, 'epochs_requested': values['epochs'], 'epochs_completed': 0}
++    try:
++        USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
++        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.json', prefix='train-run-',
++                                         dir=USER_SETTINGS_DIR, delete=False) as stream:
++            aboba._train_config_path = stream.name
++            json.dump(cfg, stream, ensure_ascii=False, allow_nan=False, indent=2)
++        aboba._cancel_path = Path(aboba._train_config_path + '.cancel')
++        if research:
++            _save_history(aboba, aboba._research_record)
++    except (OSError, ValueError):
++        set_status_error(aboba, 'Не удалось подготовить параметры обучения')
++        if research:
++            _finish_research(aboba, 1, QProcess.ExitStatus.CrashExit, failed_start=True)
++        _release_training(aboba)
++        return
++    old_process = getattr(aboba, 'train_proc', None)
++    if old_process is not None:
++        old_process.deleteLater()
++    aboba.train_proc = QProcess(aboba)
++    aboba.train_proc.setProgram(sys.executable)
++    script = 'run_gui_research.py' if research else 'mindbox_production_train.py'
++    args = ['-u', '-X', 'utf8', str(PROJECT_ROOT / 'scripts' / script)]
++    args += ['--run-id', aboba._research_record['run_id']] if research else ['gui']
++    args += ['--config', aboba._train_config_path, '--cancel-file', str(aboba._cancel_path),
++             '--raw-root', str(INPUT_DATA_DIR / 'MindboxRaw'), '--catalog', str(INPUT_DATA_DIR / 'nomenclature.csv')]
++    if not research:
++        args += ['--manifest', str(INPUT_DATA_DIR / 'MindboxRaw/canonical/training.json'), '--device', 'auto']
++    aboba.train_proc.setArguments(args)
++    aboba.train_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
++    aboba.train_proc.readyReadStandardOutput.connect(partial(_on_train_output, aboba))
++    aboba.train_proc.finished.connect(partial(_on_train_finished, aboba))
++    aboba.train_proc.errorOccurred.connect(partial(_on_train_error, aboba))
++    if research:
++        aboba.train_proc.started.connect(lambda: _research_started(aboba))
++    aboba.train_proc.setWorkingDirectory(str(PROJECT_ROOT))
++    aboba.train_proc.start()
+ 
+-        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+ 
+-        row_l.addWidget(lbl, 1)
+-        row_l.addWidget(widget, 1)
++def _research_started(aboba):
++    aboba._research_record['pid'] = int(aboba.train_proc.processId())
++    _save_history(aboba, aboba._research_record)
+ 
+-        form_layout.addWidget(row_w)
+ 
+-        # аналог "пустой строки" из grid (делает немного воздуха между реквизитами)
+-        if stretch_after:
+-            form_layout.addSpacing(0)
++def cancel_training(aboba):
++    if (not getattr(aboba, '_training_active', False) or getattr(aboba, '_publishing', False)
++            or getattr(aboba, '_train_research_result', None) is not None):
++        return
++    try:
++        aboba._cancel_path.write_text('CANCELLED', encoding='ascii')
++    except OSError:
++        set_status_error(aboba, 'Не удалось отправить отмену; повторите попытку')
++        return
++    aboba._cancel_requested = True
++    aboba.train_proc.write(b'NO\n')
++    refresh_training_state(aboba, metadata=False)
++    _set_training_phase(aboba, 'epoch')
++    aboba.train_log.append('Отмена запрошена. Ожидаем завершения процесса…')
++    process = aboba.train_proc
+ 
+-    # -------------------- Создание виджетов --------------------
++    def stop():
++        # Single-process runners; there is no multiprocessing training descendant.
++        # Production cannot publish without the GUI publication handshake.
++        if aboba.train_proc is process and getattr(aboba, '_training_active', False) and not aboba._publishing:
++            process.kill()
++    QTimer.singleShot(2000, stop)
+ 
+-    # Параметры BPR-MF
+-    aboba.embedding_dim_input = QComboBox()
+-    aboba.embedding_dim_input.addItems(["16", "32", "64", "128", "256", "512",
+-                                       "1024", "2048", "4096", "8192", "16384"])
+-    aboba.embedding_dim_input.setCurrentText("128")
+ 
+-    aboba.epochs_input = QSpinBox()
+-    aboba.epochs_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.epochs_input.setRange(1, 10000)
+-    aboba.epochs_input.setSingleStep(10)
+-    aboba.epochs_input.setValue(200)
+-
+-    aboba.batch_size_input = QComboBox()
+-    aboba.batch_size_input.addItems(["16", "32", "64", "128", "256", "512",
+-                                    "1024", "2048", "4096", "8192", "16384"])
+-    aboba.batch_size_input.setCurrentText("256")
+-
+-    aboba.lr_input = QDoubleSpinBox()
+-    aboba.lr_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.lr_input.setRange(0, 1)
+-    aboba.lr_input.setDecimals(4)
+-    aboba.lr_input.setSingleStep(0.0001)
+-    aboba.lr_input.setValue(0.0003)
+-
+-    aboba.weight_decay_input = QDoubleSpinBox()
+-    aboba.weight_decay_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.weight_decay_input.setRange(0, 1)
+-    aboba.weight_decay_input.setDecimals(4)
+-    aboba.weight_decay_input.setSingleStep(0.0001)
+-    aboba.weight_decay_input.setValue(0)
+-
+-    aboba.bpr_reg_input = QDoubleSpinBox()
+-    aboba.bpr_reg_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.bpr_reg_input.setRange(0, 1)
+-    aboba.bpr_reg_input.setDecimals(4)
+-    aboba.bpr_reg_input.setSingleStep(0.0001)
+-    aboba.bpr_reg_input.setValue(0.0005)
+-
+-    aboba.seed_input = QSpinBox()
+-    aboba.seed_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.seed_input.setRange(0, 10000)
+-    aboba.seed_input.setSingleStep(1)
+-    aboba.seed_input.setValue(42)
+-
+-    # Остальные параметры
+-    aboba.w_purchase = QDoubleSpinBox()
+-    aboba.w_purchase.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.w_purchase.setRange(0, 10)
+-    aboba.w_purchase.setDecimals(1)
+-    aboba.w_purchase.setSingleStep(0.1)
+-    aboba.w_purchase.setValue(10.0)
+-
+-    aboba.w_favorite = QDoubleSpinBox()
+-    aboba.w_favorite.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.w_favorite.setRange(0, 10)
+-    aboba.w_favorite.setDecimals(1)
+-    aboba.w_favorite.setSingleStep(0.1)
+-    aboba.w_favorite.setValue(2.0)
+-
+-    aboba.w_view_item = QDoubleSpinBox()
+-    aboba.w_view_item.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.w_view_item.setRange(0, 10)
+-    aboba.w_view_item.setDecimals(1)
+-    aboba.w_view_item.setSingleStep(0.1)
+-    aboba.w_view_item.setValue(0.1)
+-
+-    aboba.top_rec = QSpinBox()
+-    aboba.top_rec.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.top_rec.setRange(1, 100)
+-    aboba.top_rec.setSingleStep(1)
+-    aboba.top_rec.setValue(10)
+-
+-    aboba.min_user_interactions_for_eval = QSpinBox()
+-    aboba.min_user_interactions_for_eval.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.min_user_interactions_for_eval.setRange(1, 100)
+-    aboba.min_user_interactions_for_eval.setSingleStep(1)
+-    aboba.min_user_interactions_for_eval.setValue(10)
+-
+-    aboba.n_neg = QSpinBox()
+-    aboba.n_neg.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.n_neg.setRange(1, 100)
+-    aboba.n_neg.setSingleStep(1)
+-    aboba.n_neg.setValue(10)
+-
+-    # -------------------- Early stopping --------------------
+-    aboba.early_stop_metric = QComboBox()
+-    aboba.early_stop_metric.addItems(["NDCG", "RECALL"])
+-    aboba.early_stop_metric.setCurrentText("NDCG")
+-
+-    aboba.early_stop_patience = QSpinBox()
+-    aboba.early_stop_patience.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.early_stop_patience.setRange(0, 1000)
+-    aboba.early_stop_patience.setSingleStep(1)
+-    aboba.early_stop_patience.setValue(8)
+-
+-    aboba.early_stop_min_delta = QDoubleSpinBox()
+-    aboba.early_stop_min_delta.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.early_stop_min_delta.setRange(0, 1)
+-    aboba.early_stop_min_delta.setDecimals(4)
+-    aboba.early_stop_min_delta.setSingleStep(0.0001)
+-    aboba.early_stop_min_delta.setValue(0.0005)
+-
+-    aboba.early_stop_min_epochs = QSpinBox()
+-    aboba.early_stop_min_epochs.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.early_stop_min_epochs.setRange(0, 1000)
+-    aboba.early_stop_min_epochs.setSingleStep(5)
+-    aboba.early_stop_min_epochs.setValue(30)
+-
+-    # -------------------- Признаки номенклатуры --------------------
+-    aboba.max_item_features_input = QSpinBox()
+-    aboba.max_item_features_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.max_item_features_input.setRange(1, 100)
+-    aboba.max_item_features_input.setSingleStep(1)
+-    aboba.max_item_features_input.setValue(32)
+-
+-    aboba.feature_dropout_input = QDoubleSpinBox()
+-    aboba.feature_dropout_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.feature_dropout_input.setRange(0, 0.50)
+-    aboba.feature_dropout_input.setDecimals(2)
+-    aboba.feature_dropout_input.setSingleStep(0.05)
+-    aboba.feature_dropout_input.setValue(0.10)
+-
+-    aboba.feature_scale_input = QDoubleSpinBox()
+-    aboba.feature_scale_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.feature_scale_input.setRange(0.0, 1.0)
+-    aboba.feature_scale_input.setDecimals(2)
+-    aboba.feature_scale_input.setSingleStep(0.05)
+-    aboba.feature_scale_input.setValue(0.20)
+-
+-    aboba.feature_norm_input = QComboBox()
+-    aboba.feature_norm_input.addItems(["SUM", "MEAN", "SQRT"])
+-    aboba.feature_norm_input.setCurrentText("MEAN")
+-
+-    aboba.feat_reg_mult_input = QDoubleSpinBox()
+-    aboba.feat_reg_mult_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+-    aboba.feat_reg_mult_input.setRange(0, 10.00)
+-    aboba.feat_reg_mult_input.setDecimals(2)
+-    aboba.feat_reg_mult_input.setSingleStep(0.10)
+-    aboba.feat_reg_mult_input.setValue(1.00)
+-
+-    # -------------------- Добавляем строки --------------------
+-    add_param("Вес покупки:", aboba.w_purchase)
+-    add_param("Вес избранного:", aboba.w_favorite)
+-    add_param("Вес просмотра:", aboba.w_view_item)
+-    add_param("Количество рекомендаций:", aboba.top_rec)
+-
+-    add_param("Количество эпох:", aboba.epochs_input)
+-    add_param("Скорость обучения:", aboba.lr_input)
+-
+-    add_param("Количество отрицательных примеров:", aboba.n_neg)
+-
+-    add_param("Инициализатор случайных чисел:", aboba.seed_input)
+-    add_param("Регуляризация BPR:", aboba.bpr_reg_input)
+-    add_param("Регуляризация L2:", aboba.weight_decay_input)
+-
+-    add_param("Минимум действий для оценки:", aboba.min_user_interactions_for_eval)
+-    add_param("Размер обучающего пакета:", aboba.batch_size_input)
+-    add_param("Размерность векторов:", aboba.embedding_dim_input)
+-
+-    add_param("Количество эпох без улучшения:", aboba.early_stop_patience)
+-    add_param("Минимальный прирост метрики:", aboba.early_stop_min_delta)
+-    add_param("Минимум эпох до остановки:", aboba.early_stop_min_epochs)
+-    add_param("Метрика для ранней остановки:", aboba.early_stop_metric)
+-
+-    add_param("Максимальное число признаков номенклатуры:", aboba.max_item_features_input)
+-    add_param("Случайное отключение признаков номенклатуры:", aboba.feature_dropout_input)
+-    add_param("Вес признаков номенклатуры в модели:", aboba.feature_scale_input)
+-    add_param("Сила регуляризации признаков номенклатуры:", aboba.feat_reg_mult_input)
+-    add_param("Способ объединения признаков номенклатуры:", aboba.feature_norm_input, stretch_after=False)
+-
+-    # чтобы лишняя высота уходила вниз (а не растягивала поля)
+-    form_layout.addStretch(1)
+-
+-    # Добавляем растягиваемую форму в левый layout (она съедает свободную высоту)
+-    left_layout.addWidget(form_wrap, 1)
+-
+-    # -------------------- Поля под формой (фиксированные по высоте) --------------------
+-    aboba.item_feature_cols_input = QLineEdit()
+-    aboba.item_feature_cols_input.setText(
+-        "Признаки номенклатуры: вид номенклатуры, вид ассортимента, марка, "
+-        "коллекция, сезон носки, пол, группа составов, категория на сайте, "
+-        "стилевая группа"
+-    )
+-    aboba.item_feature_cols_input.setCursorPosition(0)
+-    aboba.item_feature_cols_input.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+-    aboba.item_feature_cols_input.setCursor(Qt.CursorShape.IBeamCursor)
+-    aboba.item_feature_cols_input.setReadOnly(True)
+-    aboba.item_feature_cols_input.setStyleSheet("""QLineEdit { margin: 3px 0px 0px 0px; }""")
+-    left_layout.addWidget(aboba.item_feature_cols_input, 0)
+-
+-    # Сводка параметров обучения (обновляется из update_filter_summary)
+-    aboba.train_filter_summary = QLineEdit()
+-    aboba.train_filter_summary.setReadOnly(True)
+-    aboba.train_filter_summary.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+-    aboba.train_filter_summary.setCursor(Qt.CursorShape.IBeamCursor)
+-    aboba.train_filter_summary.setPlaceholderText("Отбор не установлен")
+-    aboba.train_filter_summary.setStyleSheet("""QLineEdit { margin: 5px 0px 0px 0px; }""")
+-    left_layout.addWidget(aboba.train_filter_summary, 0)  # стоит перед кнопками
+-    update_filter_summary(aboba)
+-
+-    # --- Кнопки (две штуки снизу) ---
+-    btns = QHBoxLayout()
+-    btns.setSpacing(10)
+-
+-    aboba.btn_settings = QPushButton(QIcon(str(ICONS_DIR / "default_settings.png")), " Стандартные настройки")
+-    aboba.btn_settings.setIconSize(QSize(17, 17))
+-    aboba.btn_settings.clicked.connect(lambda: standart_settigs(aboba))
+-    aboba.btn_settings.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
+-
+-    aboba.start_train = QPushButton(QIcon(str(ICONS_DIR / "start_training.png")), " Начать обучение")
+-    aboba.start_train.setIconSize(QSize(17, 17))
+-    aboba.start_train.clicked.connect(lambda: start_training_process(aboba))
+-    aboba.start_train.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
++def _duration(seconds):
++    seconds = max(0, int(seconds or 0))
++    return f'{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}'
+ 
+-    btns.addWidget(aboba.btn_settings)
+-    btns.addWidget(aboba.start_train)
+ 
+-    left_layout.addLayout(btns, 0)
++def _metric(record, label, name):
++    value = record.get('metrics', {}).get(label, {}).get('10', {}).get(name)
++    return '—' if value is None else f'{value:.6f}'.replace('.', ',')
+ 
+-    # -------------------- ПРАВАЯ ЧАСТЬ --------------------
+-    # Заголовок (новый текст)
+-    aboba.label_69 = QLabel("Процесс обучения")
+-    aboba.label_69.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+-    aboba.label_69.setAlignment(Qt.AlignmentFlag.AlignCenter)
+-    aboba.label_69.setProperty("class", "sectionHeader")
+-    right_layout.addWidget(aboba.label_69, alignment=Qt.AlignmentFlag.AlignHCenter)
+ 
+-    # Поле для логов обучения (пока просто вывод)
+-    aboba.train_log = QTextEdit()
+-    aboba.train_log.setReadOnly(True)
+-    aboba.train_log.setPlaceholderText("Логи обучения будут отображаться здесь...")
+-    aboba.train_log.setStyleSheet("""QTextEdit {margin: 0px 0px 0px 0px;}""")
+-    right_layout.addWidget(aboba.train_log, 1)
+-
+-    # Название вкладки
+-    aboba.tabs.addTab(tab, "Обучение модели")
+-    
+-    
+-# //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+-# -------------------------------------------СТАНДАРТНЫЕ НАСТРОЙКИ------------------------------------------------------
+-def standart_settigs(aboba):
+-    # чтобы не дергались лишние обработчики, если они есть
+-    widgets = [
+-        aboba.embedding_dim_input,
+-        aboba.epochs_input,
+-        aboba.batch_size_input,
+-        aboba.lr_input,
+-        aboba.n_neg,
+-        aboba.weight_decay_input,
+-        aboba.bpr_reg_input,
+-        aboba.seed_input,
+-        aboba.w_view_item,
+-        aboba.w_favorite,
+-        aboba.w_purchase,
+-        aboba.top_rec,
+-        aboba.min_user_interactions_for_eval,
+-        aboba.early_stop_metric,
+-        aboba.early_stop_patience,
+-        aboba.early_stop_min_delta,
+-        aboba.early_stop_min_epochs,
+-        aboba.max_item_features_input,
+-        aboba.feature_dropout_input,
+-        aboba.feature_scale_input,
+-        aboba.feat_reg_mult_input,
+-        aboba.feature_norm_input,
+-    ]
+-
+-    for w in widgets:
+-        try:
+-            w.blockSignals(True)
+-        except Exception:
+-            pass
++_STATUS_TEXT = {'completed': 'Завершено', 'running': 'Выполняется', 'cancelled': 'Отменено',
++                'failed': 'Ошибка', 'interrupted': 'Прервано'}
+ 
+-    aboba.embedding_dim_input.setCurrentText("128")
+-    aboba.epochs_input.setValue(200)
+-    aboba.batch_size_input.setCurrentText("256")
+-    aboba.lr_input.setValue(0.0003)
+-    aboba.n_neg.setValue(10)
+-    aboba.weight_decay_input.setValue(0.0)
+-    aboba.bpr_reg_input.setValue(0.0005)
+-    aboba.seed_input.setValue(42)
+-    aboba.w_view_item.setValue(0.1)
+-    aboba.w_favorite.setValue(2.0)
+-    aboba.w_purchase.setValue(10.0)
+-    aboba.top_rec.setValue(10)
+-    aboba.min_user_interactions_for_eval.setValue(10)
+-    aboba.early_stop_metric.setCurrentText("NDCG")
+-    aboba.early_stop_patience.setValue(8)
+-    aboba.early_stop_min_delta.setValue(0.0005)
+-    aboba.early_stop_min_epochs.setValue(30)
+-    aboba.max_item_features_input.setValue(32)
+-    aboba.feature_dropout_input.setValue(0.10)
+-    aboba.feature_scale_input.setValue(0.20)
+-    aboba.feat_reg_mult_input.setValue(1.00)
+-    aboba.feature_norm_input.setCurrentText("MEAN")
+-
+-    for w in widgets:
+-        try:
+-            w.blockSignals(False)
+-        except Exception:
+-            pass
+ 
+-    set_status_ok(aboba, "Применены стандартные настройки параметров")
+-    schedule_status_reset(aboba, 5)
+-    
++def _log_result(aboba, record, research=True):
++    if research:
++        status = record.get('status', 'failed')
++        text = {'completed': 'Эксперимент завершён.', 'cancelled': 'Эксперимент отменён.',
++                'interrupted': 'Эксперимент прерван.', 'failed': 'Эксперимент завершился с ошибкой.'}.get(status, 'Эксперимент выполняется.')
++        if status == 'completed':
++            text += (f'\nNDCG@10: {_metric(record, "overall", "ndcg")}\nRecall@10: {_metric(record, "overall", "recall")}\n'
++                     f'NDCG@10 (просмотры): {_metric(record, "VIEW", "ndcg")}\nNDCG@10 (покупки): {_metric(record, "PURCHASE", "ndcg")}')
++        text += (f'\nВыполнено эпох: {record.get("epochs_completed") or 0}\nВремя: {_duration(record.get("total_seconds"))}\n'
++                 f'Устройство: {(record.get("device") or "—").upper()}')
++    else:
++        progress = getattr(aboba, '_progress_event', {})
++        epochs = (record.get('training_metrics') or {}).get('epochs_completed', progress.get('epoch', 0))
++        success = record.get('published') and record.get('postpublish_validation') and not record.get('error_code')
++        text = ('Обучение рабочей модели завершено.' if success else 'Обучение рабочей модели отменено.' if
++                record.get('cancelled') else 'Обучение рабочей модели завершилось с ошибкой.')
++        text += (f'\nВыполнено эпох: {epochs}\nВремя: {_duration(progress.get("total_seconds"))}\n'
++                 f'Устройство: {(progress.get("device") or "—").upper()}\n'
++                 f'Публикация модели: {"успешно" if success else "не завершена"}\n'
++                 f'Поколение: {record.get("published_generation") or "—"}')
++    aboba.train_log.append('\n' + text)
++
++
++def _pid_alive(pid):
++    if not pid:
++        return False
++    if os.name == 'nt':
++        import ctypes
++        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
++        kernel.OpenProcess.restype = ctypes.c_void_p
++        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
++        kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
++        handle = kernel.OpenProcess(0x1000, False, pid)
++        if handle:
++            try:
++                code = ctypes.c_ulong()
++                return not kernel.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259
++            finally:
++                kernel.CloseHandle(handle)
++        return ctypes.get_last_error() == 5  # Access denied is not evidence of death.
++    try:
++        os.kill(pid, 0)
++        return True
++    except ProcessLookupError:
++        return False
++    except PermissionError:
++        return True
+ 
+-# -------------------------------------------ОБУЧЕНИЕ МОДЕЛИ------------------------------------------------------------
+-def start_training_process(aboba):
+ 
+-    # защита от повторного запуска
+-    if hasattr(aboba, "train_proc") and aboba.train_proc is not None:
+-        if aboba.train_proc.state() != QProcess.ProcessState.NotRunning:
+-            set_status_error(aboba, "Обучение уже запущено")
+-            schedule_status_reset(aboba, 5)
+-            return
++def _save_history(aboba, record):
++    try:
++        aboba._experiment_store.upsert(record)
++        _load_history(aboba)
++    except (ValueError, OSError):
++        _history_notice(aboba, 'Не удалось сохранить историю. Исходный файл сохранён; результат доступен в файле запуска.')
+ 
+-    set_status_processing(aboba, "Идёт обучение модели...")
+-    aboba.start_train.setEnabled(False)
+ 
+-    aboba.status_label.repaint()
+-    aboba.status_icon.repaint()
+-    QApplication.processEvents()
++def _history_notice(aboba, text):
++    aboba.history_notice.setText(text)
++    aboba.history_notice.setVisible(bool(text))
+ 
+-    # очищаем лог
+-    if hasattr(aboba, "train_log"):
+-        aboba.train_log.clear()
+-        aboba.train_log.append("Запуск обучения нейросетевой модели BPR-MF...\n")
+ 
+-        filt_le = getattr(aboba, "train_filter_summary", None)
+-        if filt_le is not None:
+-            aboba.train_log.append(filt_le.text() + "\n\n")
+-        else:
+-            # запасной вариант, если поле на вкладке обучения ещё не создано
+-            le = getattr(aboba, "filter_summary", None)
+-            if le is not None:
+-                aboba.train_log.append(le.text() + "\n\n")
++def _load_history(aboba, recover=False):
++    if not hasattr(aboba, '_experiment_store'):
++        return
++    try:
++        records = aboba._experiment_store.recover(_pid_alive) if recover else aboba._experiment_store.read()
++        _history_notice(aboba, '')
++    except (ValueError, OSError):
++        records = []
++        _history_notice(aboba, 'История экспериментов недоступна. Исходный файл сохранён; новые результаты остаются в файлах запусков.')
++    aboba._history_records = records
++    table = aboba.experiment_history
++    table.setRowCount(len(records))
++    for row, record in enumerate(records):
++        cfg = record['hyperparameters']
++        weights = ['—' if cfg.get(key) is None else f'{cfg[key]:.2f}'.replace('.', ',')
++                   for key in ('w_view_item', 'w_favorite', 'w_purchase')]
++        values = [record.get('started_at', '')[:19].replace('T', ' '), *weights,
++                  f'{record.get("epochs_completed") or 0}/{record.get("epochs_requested") or "—"}',
++                  _metric(record, 'overall', 'ndcg'), _metric(record, 'overall', 'recall'),
++                  _metric(record, 'VIEW', 'ndcg'), _metric(record, 'PURCHASE', 'ndcg'),
++                  _duration(record.get('total_seconds')), (record.get('device') or '—').upper(), _STATUS_TEXT[record['status']]]
++        for col, value in enumerate(values):
++            table.setItem(row, col, QTableWidgetItem(str(value)))
++
++
++def _update_progress(aboba):
++    if not hasattr(aboba, 'training_progress_text'):
++        return
++    event = aboba._progress_event
++    epoch = event.get('epoch', 0)
++    epochs = event.get('epochs', aboba.epochs_input.value())
++    loss = event.get('loss')
++    elapsed = event.get('total_seconds', time.monotonic() - aboba._run_started_clock)
++    aboba.training_progress.setValue(epoch)
++    stage = event.get('stage')
++    phase = {'loading': 'Загрузка данных', 'preparation': 'Подготовка данных', 'training': 'Обучение',
++             'validation': 'Валидация', 'publication': 'Публикация', 'finished': 'Завершено',
++             'cancelled': 'Отменено', 'failed': 'Ошибка', 'interrupted': 'Прервано'}.get(stage, 'Обучение')
++    text = (f'Эпоха {epoch} из {epochs}' if stage == 'epoch' else f'{phase} · {epoch} из {epochs} эпох'
++            if stage in {'finished', 'cancelled', 'failed', 'interrupted', 'training'} else phase)
++    if stage in {'epoch', 'training'} and loss is not None:
++        text += f' · Ошибка: {loss:.6f}'.replace('.', ',')
++    aboba.training_progress_text.setText(text + f' · Время: {_duration(elapsed)} · {(event.get("device") or "—").upper()}')
+ 
+-    py = sys.executable
+-    script = os.path.abspath(BPRMF_module.__file__)
+ 
+-    aboba.train_proc = QProcess(aboba)
+-    aboba.train_proc.setProgram(py)
+-    # --- build train config from UI and pass to trainer ---
++def _on_train_output(aboba):
++    buffer = getattr(aboba, '_train_output_buffer', b'') + bytes(aboba.train_proc.readAllStandardOutput())
++    lines = buffer.split(b'\n')
++    aboba._train_output_buffer = lines.pop()
++    for line in lines:
++        _handle_train_line(aboba, line.decode('utf-8', errors='replace').rstrip('\r'))
++
++
++def _handle_train_line(aboba, line):
++    from scripts.mindbox_production_train import EVENT_PREFIX
++    if not line.startswith(EVENT_PREFIX):
++        # CLI emits only safe aggregate/plain diagnostics; no exception traceback.
++        if any(key in line.lower() for key in ('validation cases', 'validation_cases', 'eval events', 'eval_events')):
++            return
++        for original, translated in (('Report:', 'Отчёт:'), ('Error code:', 'Код ошибки:')):
++            if line.startswith(original):
++                line = translated + line[len(original):]
++                break
++        aboba.train_log.append(line)
++        return
+     try:
+-
+-        # актуализируем строку отбора (чтобы поле на вкладке обучения тоже обновилось)
+-        update_filter_summary(aboba)
+-
+-        # готовим папку данных для обучения с учётом отбора
+-        train_data_dir = _prepare_training_data_dir(aboba)
+-
+-        cfg_data = {
+-            "data_dir": train_data_dir,
+-            "filter_summary": getattr(aboba, "filter_summary", None).text()
+-            if hasattr(aboba, "filter_summary") else "",
+-
+-            # веса implicit
+-            "w_view_item": float(aboba.w_view_item.value()),
+-            "w_favorite": float(aboba.w_favorite.value()),
+-            "w_purchase": float(aboba.w_purchase.value()),
+-
+-            # BPR-MF
+-            "embedding_dim": int(aboba.embedding_dim_input.currentText()),
+-            "epochs": int(aboba.epochs_input.value()),
+-            "batch_size": int(aboba.batch_size_input.currentText()),
+-            "lr": float(aboba.lr_input.value()),
+-            "n_neg": int(aboba.n_neg.value()),
+-            "weight_decay": float(aboba.weight_decay_input.value()),
+-            "bpr_reg": float(aboba.bpr_reg_input.value()),
+-            "seed": int(aboba.seed_input.value()),
+-
+-            # eval
+-            "topk": int(aboba.top_rec.value()),
+-            "min_user_interactions_for_eval": int(aboba.min_user_interactions_for_eval.value()),
+-
+-            # early stopping
+-            "early_stop_metric": str(aboba.early_stop_metric.currentText()).strip().lower(),
+-            "early_stop_patience": int(aboba.early_stop_patience.value()),
+-            "early_stop_min_delta": float(aboba.early_stop_min_delta.value()),
+-            "early_stop_min_epochs": int(aboba.early_stop_min_epochs.value()),
+-
+-            # -------- признаки номенклатуры --------
+-            "max_item_features": int(aboba.max_item_features_input.value()),
+-            "feature_dropout": float(aboba.feature_dropout_input.value()),
+-            "feature_scale": float(aboba.feature_scale_input.value()),
+-            "feature_norm": str(aboba.feature_norm_input.currentText()).strip().lower(),
+-            "feat_reg_mult": float(aboba.feat_reg_mult_input.value()),
+-        }
+-
+-        cfg_dir = os.path.join(os.getcwd(), USER_SETTINGS_DIR.name)
+-        os.makedirs(cfg_dir, exist_ok=True)
+-        cfg_path = os.path.join(cfg_dir, "train_config.json")
+-        with open(cfg_path, "w", encoding="utf-8") as f:
+-            json.dump(cfg_data, f, ensure_ascii=False, indent=2)
+-    except Exception as e:
+-        if hasattr(aboba, "train_log"):
+-            aboba.train_log.append(f"Не удалось сформировать перечень входных параметров обучения из формы: {e}\n")
+-        set_status_error(aboba, "Не удалось подготовить параметры обучения")
+-        schedule_status_reset(aboba, 5)
+-        aboba.start_train.setEnabled(True)
++        event = json.loads(line[len(EVENT_PREFIX):])
++        stage = event['stage']
++    except (ValueError, KeyError, TypeError):
++        aboba.train_log.append('Не удалось прочитать диагностику процесса обучения.')
++        return
++    if stage == 'publication_ready':
++        if getattr(aboba, '_cancel_requested', False):
++            aboba.train_proc.write(b'NO\n')
++        else:
++            aboba._publishing = True
++            refresh_training_state(aboba, metadata=False)
++            aboba.train_proc.write(b'PUBLISH\n')
++        return
++    if stage == 'research_started':
++        record = event['result']
++        if record['run_id'] == aboba._research_record['run_id']:
++            aboba._research_record.update(record)
++            _save_history(aboba, aboba._research_record)
++        return
++    if stage == 'validation_checkpoint':
++        if getattr(aboba, '_run_is_research', False):
++            if hasattr(aboba, 'training_metric_chart'):
++                for name, key in (('NDCG@10', 'ndcg'), ('Recall@10', 'recall')):
++                    aboba.training_metric_chart.add_point(name, event.get('epoch'), event.get(key))
++            aboba.train_log.append((f'Валидация после эпохи {event["epoch"]}: '
++                                   f'NDCG@10: {event["ndcg"]:.6f} · Recall@10: {event["recall"]:.6f}').replace('.', ','))
++            if event['epoch'] < aboba.epochs_input.value():
++                aboba._progress_event.update(stage='epoch')
++                _update_progress(aboba)
++                _set_training_phase(aboba, 'epoch')
++        return
++    if stage in {'loading', 'preparation', 'training', 'epoch', 'validation', 'publication', 'timing'}:
++        aboba._progress_event.update(event)
++        if stage in {'preparation', 'training'}:
++            _receive_data_counts(aboba, event, 'using' if stage == 'training' else 'ready', log='prepared')
++        if stage == 'epoch' and hasattr(aboba, 'training_loss_chart'):
++            aboba.training_loss_chart.add_point('Ошибка', event.get('epoch'), event.get('loss'))
++        _update_progress(aboba)
++        _set_training_phase(aboba, stage)
++        if getattr(aboba, '_run_is_research', False):
++            if stage == 'epoch':
++                aboba._research_record['epochs_completed'] = event['epoch']
++            if stage == 'training':
++                aboba._research_record.update({k: v for k, v in event.items() if k in
++                                               {'training_users', 'training_items', 'training_pairs', 'hyperparameters'}})
++            aboba._research_record['device'] = event.get('device', aboba._research_record.get('device', 'unknown'))
++            if stage in {'training', 'epoch'}:
++                _save_history(aboba, aboba._research_record)
++        aboba.train_log.append((f'Эпоха {event["epoch"]} из {event["epochs"]}. Ошибка: ' + f'{event["loss"]:.6f}'.replace('.', ',')) if stage == 'epoch' else
++                               {'loading': 'Загрузка данных…', 'preparation': 'Подготовка данных…', 'training': 'Обучение начато.',
++                                'validation': 'Оценка модели…', 'publication': 'Публикация модели…', 'timing': 'Завершение запуска…'}[stage])
+         return
++    if stage == 'research_finished':
++        aboba._train_research_result = event['result']
++        if event['result'].get('error_summary') == 'BENCHMARK_UNAVAILABLE':
++            aboba._benchmark_block = aboba._training_ready[2]
++        if hasattr(aboba, 'cancel_train'):
++            aboba.cancel_train.setEnabled(False)
++        return
++    if stage == 'finished':
++        aboba._train_publication_result = event
++        return
++    if stage != 'preflight':
++        return
++    aboba._train_preflight_result = event
++    _receive_data_counts(aboba, event, log='available')
++    quality = event.get('quality')
++    aboba.train_log.append('Проверка данных: ' + {'PASS': 'Допущено', 'WARN': 'Предупреждение', 'BLOCK': 'Заблокировано'}.get(
++        (quality or {}).get('level'), 'Ошибка'))
++    if quality:
++        # Quality diagnostics remain available without evaluation-case counters.
++        metrics = {key: value for key, value in quality.get('metrics', {}).items()
++                   if key not in {'cases', 'validation_cases', 'eval_events'}}
++        details = ['Показатели проверки: ' + json.dumps(metrics, ensure_ascii=False)]
++        for issue in quality.get('issues', []):
++            details.append(f'{issue["message"]} ({issue["code"]}): {issue["count"]}; '
++                           + json.dumps(issue.get('breakdown', {}), ensure_ascii=False))
++        aboba.train_log.append('\n'.join(details))
++    if event.get('error_code') or not quality or not quality['training_allowed']:
++        aboba._preflight_block = _block_key(aboba)
++        aboba._preflight_block_reason = 'Проверка данных заблокировала обучение; обновите данные или параметры'
++        set_status_error(aboba, 'Проверка данных заблокировала обучение')
++    elif quality['level'] == 'WARN':
++        process = aboba.train_proc
++        reasons = '\n'.join(f'{issue["message"]} ({issue["code"]}): {issue["count"]}' for issue in quality['issues'])
++        answer = QMessageBox.question(aboba, 'Предупреждения перед обучением',
++                                      f'Проверка данных: предупреждение\n{reasons}\n\nПодробная диагностика доступна в журнале. Продолжить обучение?',
++                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
++        if aboba.train_proc is not process or not getattr(aboba, '_training_active', False):
++            return
++        process.write(b'YES\n' if answer == QMessageBox.StandardButton.Yes and not aboba._cancel_requested else b'NO\n')
++    else:
++        _set_training_phase(aboba, 'preflight')
++
++
++def _release_training(aboba):
++    aboba._training_active = False
++    if hasattr(aboba, '_training_timer'):
++        aboba._training_timer.stop()
++    for name in ('_train_config_path', '_cancel_path'):
++        path = getattr(aboba, name, None)
++        if path:
++            try:
++                Path(path).unlink(missing_ok=True)
++            except OSError:
++                aboba.train_log.append('Не удалось удалить временные параметры запуска.')
++            setattr(aboba, name, None)
++    refresh_training_state(aboba)
++    schedule_status_reset(aboba, 5)
+ 
+-    args = ["-u", script, "--train"]
+-    args += ["--config", cfg_path]
+ 
+-    aboba.train_proc.setArguments(args)
++def _finish_research(aboba, exit_code, exit_status, failed_start=False):
++    result = getattr(aboba, '_train_research_result', None)
++    normal = exit_status == QProcess.ExitStatus.NormalExit
++    if result and result.get('status') == 'completed' and not (normal and exit_code == 0):
++        result = None
++    if result is None:
++        status = 'cancelled' if getattr(aboba, '_cancel_requested', False) else 'failed'
++        result = {**aboba._research_record, 'status': status, 'finished_at': now(),
++                  'total_seconds': time.monotonic() - aboba._run_started_clock,
++                  'error_summary': 'CANCELLED' if status == 'cancelled' else 'FAILED_TO_START' if failed_start else 'RUN_FAILED'}
++        result = clean_record(result)
++        try:
++            atomic_json(aboba._experiment_store.directory / result['artifact'], result)
++        except OSError:
++            _history_notice(aboba, 'Не удалось записать файл результата; проверьте доступ к каталогу настроек.')
++    _save_history(aboba, result)
++    _log_result(aboba, result)
++    _receive_data_counts(aboba, result, 'used' if result['status'] == 'completed' else 'ready')
++    if hasattr(aboba, 'training_progress'):
++        aboba._progress_event.update(stage='finished' if result['status'] == 'completed' else result['status'],
++                                      total_seconds=result.get('total_seconds', 0))
++        _update_progress(aboba)
++    if result['status'] == 'completed':
++        set_status_ok(aboba, 'Эксперимент завершён')
++    elif result['status'] == 'cancelled':
++        set_status_ok(aboba, 'Эксперимент отменён')
++    else:
++        set_status_error(aboba, 'Эксперимент завершился с ошибкой; проверьте данные и журнал')
+ 
+-    # чтобы stdout+stderr шли одним потоком
+-    aboba.train_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+ 
+-    aboba.train_proc.readyReadStandardOutput.connect(partial(_on_train_output, aboba))
+-    aboba.train_proc.finished.connect(partial(_on_train_finished, aboba))
++def _on_train_error(aboba, error):
++    if error == QProcess.ProcessError.FailedToStart and getattr(aboba, '_training_active', False):
++        if getattr(aboba, '_run_is_research', False):
++            _finish_research(aboba, 1, QProcess.ExitStatus.CrashExit, failed_start=True)
++        elif hasattr(aboba, 'training_progress'):
++            aboba._progress_event.update(stage='failed', total_seconds=time.monotonic() - aboba._run_started_clock)
++            _update_progress(aboba)
++        _release_training(aboba)
++        set_status_error(aboba, 'Не удалось запустить обучение')
++        aboba.train_log.append('Не удалось запустить процесс обучения модели.')
+ 
+-    aboba.train_proc.setWorkingDirectory(os.getcwd())
+-    aboba.train_proc.start()
+ 
+-    if not aboba.train_proc.waitForStarted(2000):
+-        set_status_error(aboba, "Не удалось запустить обучение")
+-        aboba.start_train.setEnabled(True)
+-        if hasattr(aboba, "train_log"):
+-            aboba.train_log.append("Не удалось запустить обучение модели\n")
++def _on_train_finished(aboba, exit_code, exit_status):
++    if not getattr(aboba, '_training_active', False):
++        return
++    _on_train_output(aboba)
++    if getattr(aboba, '_train_output_buffer', b''):
++        _handle_train_line(aboba, aboba._train_output_buffer.decode('utf-8', errors='replace'))
++        aboba._train_output_buffer = b''
++    if getattr(aboba, '_run_is_research', False):
++        _finish_research(aboba, exit_code, exit_status)
++        _release_training(aboba)
++        return
++    result = getattr(aboba, '_train_publication_result', None)
++    if (exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0 and result and result.get('published')
++            and result.get('postpublish_validation') and not result.get('error_code')):
++        set_status_ok(aboba, 'Обучение завершено')
++        _receive_data_counts(aboba, result, 'used')
++    elif exit_code == 130 or getattr(aboba, '_cancel_requested', False):
++        set_status_ok(aboba, 'Обучение отменено')
++        aboba.train_log.append('Обучение отменено до публикации.')
++    else:
++        code = (result or getattr(aboba, '_train_preflight_result', None) or {}).get('error_code')
++        reasons = {'QUALITY_BLOCK': 'Обучение заблокировано проверкой качества; причины указаны в журнале',
++                   'PREPARATION_FAILED': 'Не удалось подготовить данные; проверьте хранилище Mindbox и каталог',
++                   'PREFLIGHT_CHANGED': 'Пакет данных изменился после проверки; запустите проверку заново',
++                   'LOCKED': 'Другой процесс уже обучает рабочую модель',
++                   'REPORT_FAILED': 'Не удалось записать отчёт; состояние публикации указано в журнале'}
++        message = reasons.get(code, f'Обучение завершилось с ошибкой (код {exit_code})')
++        set_status_error(aboba, message)
++        aboba.train_log.append(message)
++    completed = (exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0 and result and result.get('published')
++                 and result.get('postpublish_validation') and not result.get('error_code'))
++    if hasattr(aboba, 'training_progress'):
++        aboba._progress_event.update(stage='finished' if completed else 'cancelled' if
++                                      exit_code == 130 or aboba._cancel_requested else 'failed')
++        aboba._progress_event.setdefault('total_seconds', time.monotonic() - aboba._run_started_clock)
++        _update_progress(aboba)
++    summary = dict(result or {})
++    if not completed:
++        summary.update(error_code=summary.get('error_code') or 'RUN_FAILED',
++                       cancelled=exit_code == 130 or getattr(aboba, '_cancel_requested', False))
++        _receive_data_counts(aboba, summary, 'ready')
++    _log_result(aboba, summary, research=False)
++    _release_training(aboba)
+ 
+ 
+ def _get_store_city_map(aboba) -> dict:
+@@ -908,35 +1152,3 @@ def _get_current_order_filters(aboba) -> dict:
+     }
+ 
+ 
+-# -------------------------------------------ОБРАБОТКА ВЫВОДА ПРОЦЕССА ОБУЧЕНИЯ-----------------------------------------
+-def _on_train_output(aboba):
+-    if not hasattr(aboba, "train_log"):
+-        return
+-
+-    data = aboba.train_proc.readAllStandardOutput()
+-    text = bytes(data).decode("utf-8", errors="replace")
+-
+-    # пишем без лишних "append" переносов
+-    aboba.train_log.moveCursor(QTextCursor.MoveOperation.End)
+-    aboba.train_log.insertPlainText(text)
+-    aboba.train_log.moveCursor(QTextCursor.MoveOperation.End)
+-
+-
+-# -------------------------------------------ЗАВЕРШЕНИЕ ОБУЧЕНИЯ--------------------------------------------------------
+-def _on_train_finished(aboba, exit_code: int, exit_status: QProcess.ExitStatus):
+-    aboba.start_train.setEnabled(True)
+-
+-    if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
+-        set_status_ok(aboba, "Обучение завершено")
+-        schedule_status_reset(aboba, 5)
+-        if hasattr(aboba, "train_log"):
+-            aboba.train_log.append("Обучение успешно завершено.")
+-    else:
+-        set_status_error(aboba, f"Обучение завершилось с ошибкой (код {exit_code})")
+-        if hasattr(aboba, "train_log"):
+-            aboba.train_log.append(f"Обучение завершилось с ошибкой (код {exit_code}).")
+-
+-
+-
+-
+-
+diff --git a/README.md b/README.md
+index 2d6e532..d8a935f 100644
+--- a/README.md
++++ b/README.md
+@@ -115,6 +115,97 @@ pip install -r requirements.txt
+ python main.py
+ ```
+ 
++## Обучение из GUI (TRAIN-UI-01 / TRAIN-UI-02 / TRAIN-UI-03)
++
++Вкладка «Обучение модели» содержит режим, четыре параметра (веса покупки,
++избранного, просмотра и количество эпох), запуск/отмену, progress,
++журнал, графики и историю экспериментов. Начальные значения:
++10 / 2 / 0.5 / 50; это provisional research defaults, а не доказанный optimum.
++Веса конечные, покупка > 0, остальные >= 0, эпохи — целое число 1–10000.
++Пустые/ошибочные поля блокируют запуск.
++
++**Эксперимент** выбран по умолчанию: один запуск seed=42, одно обучение до
++заданного бюджета, затем external validation. Используются существующие
++canonical loader, temporal protocol, BPR adapter и evaluator: история до
++2025-11-01 UTC, validation [2025-11-01, 2025-12-01) UTC, min_history_events=10.
++Blind test не оценивается, не доступен в GUI и не записывается в историю.
++Early stopping и item features отключены. Frozen параметры заданы общим
++research contract: dimension=128, batch=256, n_neg=10, lr=0.0003,
++bpr_reg=0.0005, weight_decay=0. Автоматических sweep, следующих seeds,
++выбора победителя и публикации нет.
++
++**Рабочая модель** использует существующий production CLI `gui`:
++canonical storage → preflight → preparation → trainer → publication.
++Четыре значения формы перекрывают соответствующие поля существующего
++`user_settings/train_config.json`; скрытые параметры валидирует штатный
++TrainConfig loader, отсутствующие значения берутся из TrainConfig defaults.
++Существующие early stopping и item-feature settings сохраняются.
++Перед стартом требуется подтверждение weights/epochs и новой generation;
++WARN отдельно требует согласия, PASS разрешает обучение, BLOCK запрещает.
++Analysis filters и legacy interaction CSV в этот маршрут не входят.
++Publication lock, staging, disk validation, атомарное переключение
++`model/current.json`, readback и rollback сохранены. Production не использует
++research temporal split и не добавляется в историю экспериментов.
++
++Оба режима работают в отдельном QProcess, тем же Python, что приложение.
++Открытие вкладки проверяет только metadata и имена canonical part files,
++не читает raw payload. Отсутствующий/повреждённый batch, недоступный benchmark,
++невалидные параметры и активный процесс блокируют start с объяснением.
++После обнаруженного preflight BLOCK запуск закрыт до изменения revision данных,
++каталога товаров или параметров; обновлённая configuration проходит новый preflight.
++Полная проверка остаётся в дочернем процессе. Во время run поля заблокированы;
++структурированные события показывают epoch/loss/device, таймер — elapsed time.
++Слева расположены параметры в порядке режим → эпохи → покупка → избранное →
++просмотр и процесс с журналом; справа — графики (stretch 4:7).
++Секции разделены соединёнными линиями, история занимает нижнюю область.
++Веса в GUI отображаются с двумя знаками. Отдельного блока данных нет:
++readiness управляет кнопкой запуска, известные counts и точные агрегаты обычной
++подготовки попадают в журнал. Дополнительного чтения canonical events ради
++счётчиков нет; без metadata counts точные объёмы определяются при подготовке.
++Research взаимодействия — события именно training history выбранного snapshot,
++production взаимодействия — уже рассчитанный bpr_events. Validation cases в GUI
++не отображаются. Loss chart получает точку после каждой эпохи. Research chart
++показывает overall NDCG/Recall@10 на sparse checkpoints: для budgets до 10 —
++каждая эпоха; для больших — 1, 10/20/40/60/80/100% бюджета, с округлением и
++удалением duplicates (50 эпох: 1, 5, 10, 20, 30, 40, 50). Observer read-only,
++test blind, early_stop=False; итоговые метрики относятся к final requested epoch.
++Последняя точка использует штатную final validation без повторного scoring.
++Production показывает только loss. Графики, включая partial trajectory после
++отмены/ошибки, остаются до следующего запуска; новая траектория очищается при
++старте. Графики используют уже установленный QtCharts и общий стиль статистики.
++Общий статус отражает фактический этап и возвращается в idle общим таймером.
++
++«Отменить» создаёт cancel signal: worker проверяет его между этапами/эпохами.
++При задержке до публикации QProcess принудительно завершается через 2 секунды;
++training не создаёт отдельного multiprocessing worker. Перед publication
++CLI ждёт handshake от GUI. GUI сначала отключает cancel, затем разрешает
++публикацию; в короткой критической секции отмена недоступна. Это не позволяет
++принятой отмене активировать новую модель. Закрытие окна во время run сначала
++отменяет его и ждёт завершения; после завершения окно можно закрыть.
++
++История: `user_settings/research_experiments/history.json`, schema_version=1,
++массив runs с уникальным run_id. Aggregate-only result artifacts:
++`user_settings/research_experiments/runs/<run_id>/result.json`.
++Хранятся timestamps, status, weights/frozen config, epochs, benchmark identity,
++users/items/pairs, validation overall и type metrics @5/@10/@20, duration,
++device, torch/CUDA build, git HEAD/dirty, artifact reference и safe error code.
++PII, raw payload, exception text и test metrics не сохраняются.
++Состояние running и выполненные эпохи тоже сохраняются; неизвестные runtime
++агрегаты при ошибке запуска записываются как null. JSON обновляется под OS lock через unique temporary file → flush/fsync →
++atomic replace. Повторная запись run_id обновляет одну запись; порядок newest-first.
++Completed, failed и cancelled остаются в истории. При повторном открытии
++завершённый worker artifact восстанавливает результат, умерший running worker
++получает interrupted. Повреждённая история не перезаписывается: предупреждение
++в GUI, новые artifacts сохраняются отдельно; production остаётся доступен.
++Итог текущего запуска выводится в журнал; выбор строки истории его не заменяет.
++Подписи и статусы таблицы локализованы, storage codes и JSON v1 сохранены.
++Обычные колонки можно изменять вручную, ширина сохраняется при refresh;
++последняя колонка заполняет остаток viewport. При увеличении суммарной ширины
++доступна горизонтальная прокрутка. NDCG/Recall отображаются с шестью знаками,
++время — HH:MM:SS. Inputs между сессиями не сохраняются;
++существующий train_config.json не переписывается. Временный config/cancel signal
++удаляются после завершения. Audit, GPU-cost, convergence и weight CLI сохранены.
++
+ 
+ ## Локальные файлы
+ 
+diff --git a/assets/icons/start_training.png b/assets/icons/start_training.png
+index 6a55494..1cbaddc 100644
+Binary files a/assets/icons/start_training.png and b/assets/icons/start_training.png differ
+diff --git a/main.py b/main.py
+index 0cc5a48..bea5af4 100644
+--- a/main.py
++++ b/main.py
+@@ -53,7 +53,6 @@ class MainWindow(QMainWindow):
+         self.label_123 = None
+         self.train_log = None
+         self.start_train = None
+-        self.btn_settings = None
+         self.label_69 = None
+         self.heading_enter_parameter = None
+         self.prefix = None
+@@ -215,7 +214,6 @@ class MainWindow(QMainWindow):
+     def apply_static_widget_styles(self):
+ 
+         self.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
+-        self.btn_settings.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
+         self.start_train.setStyleSheet("""QPushButton { margin: 5px 0px 0px 0px; }""")
+         self.purchases_table.setStyleSheet("""QTableWidget { margin: 0px 0px 10px 10px; }""")
+         self.recs_table.setStyleSheet("""QTableWidget { margin: 0px 10px 10px 0px; }""")
+diff --git a/scripts/mindbox_production_train.py b/scripts/mindbox_production_train.py
+index cd62b7b..19141b2 100644
+--- a/scripts/mindbox_production_train.py
++++ b/scripts/mindbox_production_train.py
+@@ -1,10 +1,99 @@
+ """Explicit offline Mindbox production preflight/publish commands."""
+ 
+ import argparse
++import json
+ from pathlib import Path
+ import sys
++import time
+ 
+ PROJECT_ROOT = Path(__file__).resolve().parents[1]
++EVENT_PREFIX = "TRAINING_EVENT "
++
++
++def _event(result, stage, stream):
++    quality = result.quality_report
++    payload = {
++        "stage": stage, "batch_id": result.batch_id,
++        "interaction_window": dict(result.interaction_window), "dataset": dict(result.dataset),
++        "quality": None if quality is None else {
++            "level": quality.level.value, "training_allowed": quality.training_allowed,
++            "metrics": dict(quality.metrics), "issues": [
++                {"code": issue.code, "level": issue.level.value, "count": issue.count,
++                 "message": issue.message, "rate": issue.rate, "breakdown": dict(issue.breakdown)}
++                for issue in quality.issues]},
++        **{name: getattr(result, name) for name in (
++            "error_code", "cancelled", "training_started", "training_completed", "publication_started", "published",
++            "previous_generation", "published_generation", "prepublish_disk_validation",
++            "postpublish_validation", "rolled_back", "cleanup_failed")},
++        "training_metrics": None if result.training_metrics is None else {
++            name: getattr(result.training_metrics, name) for name in (
++                "epochs_completed", "best_epoch", "best_recall", "best_ndcg", "best_metric_name", "early_stopped")},
++    }
++    print(EVENT_PREFIX + json.dumps(payload, ensure_ascii=False), file=stream, flush=True)
++
++
++def _gui_training(args, kwargs, stream):
++    from Application.model.mindbox_production_training import (
++        preflight_production_training, train_and_publish_production_model,
++    )
++    started = time.monotonic()
++    managed = bool(args.cancel_file)
++
++    def emit(payload):
++        print(EVENT_PREFIX + json.dumps(payload, ensure_ascii=False), file=stream, flush=True)
++
++    def check_cancel():
++        if args.cancel_file and args.cancel_file.exists():
++            raise KeyboardInterrupt
++
++    def observer(model, epoch):
++        emit({"stage": "epoch", "epoch": epoch.epoch, "epochs": kwargs["cfg"].epochs,
++              "loss": epoch.loss, "device": str(kwargs["device"])})
++        check_cancel()
++
++    def before_publication():
++        check_cancel()
++        if args.cancel_file:
++            # GUI stops accepting cancellation BEFORE granting publication.
++            # No artifact/current write starts until this explicit handshake.
++            emit({"stage": "publication_ready"})
++            if sys.stdin.readline().strip() != "PUBLISH":
++                raise KeyboardInterrupt
++        check_cancel()
++
++    def progress(value):
++        check_cancel()
++        emit({"stage": "publication" if value.publication_started else "training" if value.training_started else "preparation",
++              "device": str(kwargs["device"]), "dataset": dict(value.dataset)})
++
++    check_cancel()
++    if managed:
++        emit({"stage": "loading", "device": str(kwargs["device"])})
++    result = preflight_production_training(args.manifest, **kwargs)
++    check_cancel()
++    _event(result, "preflight", stream)
++    if result.error_code or result.quality_report is None:
++        return 130 if result.cancelled else 1
++    allow_warn = False
++    if result.quality_report.level.value == "WARN":
++        # stdin stays open in QProcess; EOF/rejection never grants permission.
++        allow_warn = sys.stdin.readline().strip() == "YES"
++        if not allow_warn:
++            print("Обучение отменено до запуска тренера.", file=stream, flush=True)
++            return 130
++    print("Обучение BPR-MF и безопасная публикация модели...", file=stream, flush=True)
++    result = train_and_publish_production_model(
++        args.manifest, **kwargs, allow_warn=allow_warn, expected_batch_id=result.batch_id,
++        **({"epoch_observer": observer, "check_cancel": check_cancel,
++            "before_publication": before_publication, "progress": progress} if managed else {}),
++    )
++    if managed:
++        emit({"stage": "timing", "device": str(kwargs["device"]), "total_seconds": time.monotonic() - started})
++    _event(result, "finished", stream)
++    if result.report_path:
++        print(f"Report: production_training/{Path(result.report_path).parent.name}/report.json",
++              file=stream, flush=True)
++    return 130 if result.cancelled else 1 if result.error_code or not result.published else 0
+ 
+ 
+ def _show(result, stream):
+@@ -27,24 +116,33 @@ def main(argv=None):
+     if str(PROJECT_ROOT) not in sys.path:
+         sys.path.insert(0, str(PROJECT_ROOT))
+     import torch
+-    from Application.model.BPRMF import TrainConfig
++    from Application.model.BPRMF import TrainConfig, _load_train_config_from_json
+     from Application.model.mindbox_production_training import preflight_production_training, train_and_publish_production_model
+ 
+     parser = argparse.ArgumentParser(description=__doc__)
+     commands = parser.add_subparsers(dest="command", required=True)
+-    for command in ("preflight", "publish"):
++    for command in ("preflight", "publish", "gui"):
+         sub = commands.add_parser(command)
+         sub.add_argument("--manifest", type=Path, required=True)
+         sub.add_argument("--catalog", type=Path, default=PROJECT_ROOT / "input_data" / "nomenclature.csv")
+         sub.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "input_data" / "MindboxRaw")
+-        sub.add_argument("--device", choices=("cpu",), default="cpu")
++        sub.add_argument("--device", choices=("cpu", "auto"), default="cpu")
++        sub.add_argument("--config", type=Path)
++        if command == "gui":
++            sub.add_argument("--cancel-file", type=Path)
+         if command == "publish":
+             sub.add_argument("--allow-warn", action="store_true")
+     args = parser.parse_args(argv)
+     terminal = sys.stdout
+     try:
+-        cfg = TrainConfig(data_dir=str(args.catalog.resolve().parent))
+-        kwargs = dict(raw_root=args.raw_root, catalog_path=args.catalog, cfg=cfg, device=torch.device(args.device))
++        cfg = (_load_train_config_from_json(str(args.config)) if args.config
++               else TrainConfig(data_dir=str(args.catalog.resolve().parent)))
++        if Path(cfg.data_dir).resolve() != args.catalog.resolve().parent:
++            raise ValueError("Config and product catalog must use the same directory")
++        device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
++        kwargs = dict(raw_root=args.raw_root, catalog_path=args.catalog, cfg=cfg, device=torch.device(device))
++        if args.command == "gui":
++            return _gui_training(args, kwargs, terminal)
+         if args.command == "preflight":
+             result = preflight_production_training(args.manifest, **kwargs)
+             _show(result, terminal)
+@@ -67,6 +165,9 @@ def main(argv=None):
+         print("Error code: CANCELLED", file=sys.stderr)
+         return 130
+     except Exception:
++        if args.command == "gui":
++            print(EVENT_PREFIX + json.dumps({"stage": "preflight", "error_code": "PREPARATION_FAILED", "quality": None}),
++                  file=terminal, flush=True)
+         print("Error code: PREPARATION_FAILED", file=sys.stderr)
+         return 1
+ 
+diff --git a/tests/model/test_bpr_preparation.py b/tests/model/test_bpr_preparation.py
+index e3d2506..bf5d6cf 100644
+--- a/tests/model/test_bpr_preparation.py
++++ b/tests/model/test_bpr_preparation.py
+@@ -120,9 +120,11 @@ def test_mixed_events_mapping_split_aggregation_parity(mode, same_timestamp):
+                 [None, Decimal("1.5"), Decimal("15")][index % 3],
+             ))
+     new = assert_parity(records, BprPreparationConfig(date_mode=mode))
+-    assert new.diagnostics.eligible_eval_users == new.diagnostics.eval_events == 2
+-    assert new.diagnostics.train_events_before_aggregation == 30
+-    assert new.diagnostics.train_pairs_after_aggregation < 30
++    assert new.diagnostics.interaction_count_eligible_users == 2
++    assert new.diagnostics.eligible_eval_users == new.diagnostics.eval_events == 0
++    assert new.diagnostics.excluded_seen_eval_users == 2
++    assert new.diagnostics.train_events_before_aggregation == 32
++    assert new.diagnostics.train_pairs_after_aggregation < 32
+ 
+ 
+ def test_legacy_mapping_orders_differ_for_users_and_items():
+@@ -144,25 +146,28 @@ def test_stable_order_of_equal_type_and_timestamp_selects_last_input():
+ def test_date_granularity_changes_holdout_and_full_timestamp_matches_chronology():
+     from Application.files.files_processing import _parse_interaction_date
+ 
+-    records = [resolved(item="early-view", timestamp=BASE + timedelta(hours=8)) for _ in range(9)]
++    records = [resolved(item=f"early-view-{index}", timestamp=BASE + timedelta(hours=8)) for index in range(9)]
+     records.append(resolved(Kind.PURCHASE, item="late-purchase", timestamp=BASE + timedelta(hours=22)))
+     parsed, malformed = _parse_interaction_date(pd.Series(["2026-01-01 08:00:00", "2026-01-01 22:00:00"]))
+     assert malformed == 0
+     assert parsed.iloc[0] == parsed.iloc[1] == pd.Timestamp("2026-01-01")
+     dated = assert_parity(records)
+     precise = assert_parity(records, BprPreparationConfig(date_mode=DateMode.FULL_TIMESTAMP))
+-    assert dated.mappings.idx2item[dated.splits.eval_items[0]] == "early-view"
++    assert dated.mappings.idx2item[dated.splits.eval_items[0]] == "early-view-8"
+     assert precise.mappings.idx2item[precise.splits.eval_items[0]] == "late-purchase"
+     assert to_bpr_event(records[-1]).timestamp.hour == 22
+ 
+ 
+-def test_known_evaluation_item_can_remain_in_train_positives():
++def test_repeated_last_item_is_not_an_evaluation_target():
+     records = [resolved(item="A", timestamp=BASE), *[
+         resolved(item="B", timestamp=BASE + timedelta(days=1)) for _ in range(8)],
+         resolved(Kind.PURCHASE, item="A", timestamp=BASE + timedelta(days=2))]
+     result = assert_parity(records)
+-    user, item = result.splits.eval_users[0], result.splits.eval_items[0]
+-    assert item in result.splits.user_pos_train[user]
++    assert result.splits.eval_users.size == result.splits.eval_items.size == 0
++    assert result.diagnostics.train_events_before_aggregation == 10
++    weights = {result.mappings.idx2item[item]: weight for (_, item), weight
++               in zip(result.splits.train_pairs, result.splits.train_weights)}
++    assert weights == pytest.approx({"A": 10.1, "B": 0.8})
+ 
+ 
+ def test_timezone_offsets_represent_same_utc_instant():
+@@ -200,3 +205,91 @@ def test_naive_timestamp_is_safe_error():
+     with pytest.raises(BprPreparationError) as exc:
+         BprEvent("SECRET_USER", "SECRET_ITEM", datetime(2026, 1, 1), Kind.VIEW, 0.1)
+     assert "SECRET" not in str(exc.value)
++
++
++@pytest.mark.parametrize("latest", [Kind.PURCHASE, Kind.FAVORITE, Kind.VIEW])
++def test_same_day_full_timestamp_holdout_follows_time_with_legacy_characterization(latest):
++    records = [resolved(kind, item=kind.value, timestamp=BASE + timedelta(hours=20 if kind is latest else 8))
++               for kind in Kind]
++    dated = assert_parity(records, BprPreparationConfig(min_user_interactions_for_eval=3))
++    precise = assert_parity(records, BprPreparationConfig(min_user_interactions_for_eval=3,
++                                                        date_mode=DateMode.FULL_TIMESTAMP))
++    assert dated.mappings == precise.mappings
++    assert dated.mappings.idx2item[dated.splits.eval_items[0]] == Kind.VIEW.value
++    assert precise.mappings.idx2item[precise.splits.eval_items[0]] == latest.value
++    assert precise.diagnostics.train_events_before_aggregation == 2
++    assert precise.splits.user_pos_train[0] == set(range(3)) - {precise.splits.eval_items[0]}
++
++
++def test_full_timestamp_exact_ties_keep_type_and_source_row_tiebreak():
++    records = [resolved(Kind.VIEW, item="first-view"), resolved(Kind.PURCHASE, item="purchase"),
++               resolved(Kind.FAVORITE, item="favorite"), resolved(Kind.VIEW, item="last-view")]
++    config = BprPreparationConfig(min_user_interactions_for_eval=3, date_mode=DateMode.FULL_TIMESTAMP)
++    first = assert_parity(records, config)
++    repeated = assert_parity(records, config)
++    assert first.mappings.idx2item[first.splits.eval_items[0]] == "last-view"
++    np.testing.assert_array_equal(first.splits.eval_items, repeated.splits.eval_items)
++    reversed_result = assert_parity(list(reversed(records)), config)
++    assert reversed_result.mappings.idx2item[reversed_result.splits.eval_items[0]] == "first-view"
++
++
++@pytest.mark.parametrize("mode", list(DateMode))
++def test_events_across_midnight_keep_chronological_holdout(mode):
++    records = [resolved(Kind.PURCHASE, item="after-midnight", timestamp=BASE + timedelta(days=1, minutes=10)),
++               resolved(Kind.VIEW, item="before-midnight", timestamp=BASE + timedelta(hours=23, minutes=50))]
++    result = assert_parity(records, BprPreparationConfig(min_user_interactions_for_eval=2, date_mode=mode))
++    assert result.mappings.idx2item[result.splits.eval_items[0]] == "after-midnight"
++
++
++def test_full_timestamp_orders_offsets_by_utc_instant():
++    records = [resolved(Kind.PURCHASE, item="latest", timestamp=BASE + timedelta(hours=21)),
++               resolved(Kind.VIEW, item="earlier", timestamp=datetime(2026, 1, 1, 23, tzinfo=timezone(timedelta(hours=3))))]
++    result = assert_parity(records, BprPreparationConfig(min_user_interactions_for_eval=2,
++                                                       date_mode=DateMode.FULL_TIMESTAMP))
++    assert result.mappings.idx2item[result.splits.eval_items[0]] == "latest"
++
++
++@pytest.mark.parametrize("mode", list(DateMode))
++@pytest.mark.parametrize("history,target", [("ABC", "C"), ("ABA", None), ("ABCB", None), ("AABAC", "C")])
++def test_final_novel_target_only_and_non_eval_history_retention(mode, history, target):
++    records = [resolved(item=item, timestamp=BASE + timedelta(hours=n)) for n, item in enumerate(history)]
++    result = assert_parity(records, BprPreparationConfig(min_user_interactions_for_eval=3, date_mode=mode))
++    assert result.splits.eval_users.tolist() == ([] if target is None else [0])
++    if target is not None:
++        assert result.mappings.idx2item[result.splits.eval_items[0]] == target
++    retained = history if target is None else history[:-1]
++    weights = {result.mappings.idx2item[item]: weight for (_, item), weight
++               in zip(result.splits.train_pairs, result.splits.train_weights)}
++    assert weights == pytest.approx({item: retained.count(item) * 0.1 for item in set(retained)})
++    assert result.diagnostics.train_events_before_aggregation == len(retained)
++    for user, item in zip(result.splits.eval_users, result.splits.eval_items):
++        assert item not in result.splits.user_pos_train[user]
++
++
++@pytest.mark.parametrize("threshold", [2, 3, 4])
++def test_novel_final_item_still_requires_event_count_threshold(threshold):
++    result = assert_parity([resolved(item=item, timestamp=BASE + timedelta(hours=n)) for n, item in enumerate("ABC")],
++                           BprPreparationConfig(min_user_interactions_for_eval=threshold, date_mode=DateMode.FULL_TIMESTAMP))
++    assert len(result.splits.eval_users) == int(threshold <= 3)
++    assert result.diagnostics.train_events_before_aggregation == (2 if threshold <= 3 else 3)
++
++
++def test_evaluation_eligibility_diagnostics_count_excluded_seen_final_items():
++    records = [resolved(user=user, item=item, timestamp=BASE + timedelta(hours=n))
++               for user, history in (("novel", "ABC"), ("repeat", "ABA"), ("leak", "ABCB"), ("short", "AB"))
++               for n, item in enumerate(history)]
++    result = assert_parity(records, BprPreparationConfig(min_user_interactions_for_eval=3,
++                                                        date_mode=DateMode.FULL_TIMESTAMP))
++    d = result.diagnostics
++    assert d.interaction_count_eligible_users == 3
++    assert d.eligible_eval_users == d.eval_events == 1
++    assert d.excluded_seen_eval_users == 2
++    assert d.excluded_seen_eval_rate == pytest.approx(2 / 3)
++    assert d.train_events_before_aggregation == 11
++
++
++def test_empty_eval_diagnostics_have_zero_exclusion_rate():
++    result = prepare_bpr([])
++    assert result.diagnostics.interaction_count_eligible_users == 0
++    assert result.diagnostics.excluded_seen_eval_users == 0
++    assert result.diagnostics.excluded_seen_eval_rate == 0
+diff --git a/tests/model/test_mindbox_production_training.py b/tests/model/test_mindbox_production_training.py
+index d8b262c..2962d9b 100644
+--- a/tests/model/test_mindbox_production_training.py
++++ b/tests/model/test_mindbox_production_training.py
+@@ -1,6 +1,7 @@
+ from dataclasses import FrozenInstanceError
+ from datetime import datetime, timedelta, timezone
+ import json
++import io
+ from pathlib import Path
+ import socket
+ import subprocess
+@@ -11,6 +12,7 @@ import requests
+ import torch
+ 
+ from Application.mindbox import daily_training_batch as daily
++from Application.mindbox import canonical_storage as store
+ from Application.mindbox import customer_profile_snapshot as profiles
+ from Application.mindbox.client import MindboxClient
+ from Application.mindbox.training_batch import TrainingBatchWindow, TrainingBatchExport
+@@ -27,6 +29,53 @@ def forbidden(*args, **kwargs):
+     pytest.fail("Forbidden dependency in production training")
+ 
+ 
++def test_gui_cancellation_at_epoch_preserves_publication(tmp_path):
++    args = source(tmp_path)
++    args['cfg'].epochs = 2
++    old = old_model(production.MODEL_ROOT)
++    epochs = []
++    def observer(model, epoch):
++        epochs.append(epoch.epoch)
++        raise KeyboardInterrupt
++    result = production.train_and_publish_production_model(**args, epoch_observer=observer)
++    assert epochs == [1] and result.cancelled and not result.publication_started
++    assert_old(production.MODEL_ROOT, old)
++
++
++def test_gui_cancellation_during_artifact_precommit_keeps_old_generation(tmp_path, monkeypatch):
++    args = source(tmp_path)
++    old = old_model(production.MODEL_ROOT)
++    cancelled = []
++    save = core._save_artifacts
++    def artifacts(*args, **kwargs):
++        cancelled.append(True)
++        return save(*args, **kwargs)
++    def check():
++        if cancelled:
++            raise KeyboardInterrupt
++    monkeypatch.setattr(core, '_save_artifacts', artifacts)
++    result = production.train_and_publish_production_model(**args, check_cancel=check)
++    assert result.cancelled and result.publication_started and not result.published
++    assert_old(production.MODEL_ROOT, old)
++
++
++@pytest.mark.parametrize('answer,expected', [('NO\n', 130), ('', 130), ('PUBLISH\n', 0)])
++def test_managed_gui_publication_handshake(tmp_path, monkeypatch, capsys, answer, expected):
++    args = canonical_source(tmp_path)
++    old = old_model(production.MODEL_ROOT)
++    monkeypatch.setattr(sys, 'stdin', io.StringIO(answer))
++    assert cli.main(gui_argv(args) + ['--cancel-file', str(tmp_path / 'cancel')]) == expected
++    recorded = events(capsys.readouterr().out)
++    assert any(e['stage'] == 'epoch' and e['epoch'] == 1 for e in recorded)
++    assert any(e['stage'] == 'publication_ready' for e in recorded)
++    result = next(e for e in recorded if e['stage'] == 'finished')
++    if expected:
++        assert result['cancelled'] and not result['published']
++        assert_old(production.MODEL_ROOT, old)
++    else:
++        assert result['published'] and result['postpublish_validation']
++
++
+ @pytest.fixture(autouse=True)
+ def isolate(tmp_path, monkeypatch):
+     monkeypatch.chdir(tmp_path)
+@@ -396,3 +445,160 @@ def test_orphan_cleanup_failure_preserves_current_and_reports_flag(tmp_path, mon
+     assert result.cleanup_failed and not result.published
+     assert (production.MODEL_ROOT / "current.json").read_bytes() == old
+     assert len(list((production.MODEL_ROOT / "runs").iterdir())) == 2
++
++
++def canonical_source(tmp_path, problem="pass"):
++    args = source(tmp_path, problem)
++    batch = daily.load_chunked_training_batch(args["training_manifest"], raw_root=args["raw_root"])
++    with store.storage_lock(args["raw_root"]):
++        for component in batch.components:
++            store.publish(args["raw_root"], component.name, component.since, component.until,
++                          args["raw_root"] / component.export.relative_directory)
++    args["training_manifest"] = args["raw_root"] / "canonical/training.json"
++    return args
++
++
++@pytest.mark.parametrize("entrypoint", ["production", "shadow"])
++def test_canonical_training_entrypoints_use_exact_event_time(tmp_path, monkeypatch, entrypoint):
++    args = source(tmp_path)
++    batch = daily.load_chunked_training_batch(args["training_manifest"], raw_root=args["raw_root"])
++    actions_component = next(c for c in batch.components if c.name == "actions")
++    path = args["raw_root"] / actions_component.export.relative_directory / "actions_part_001.json"
++    raw = json.loads(path.read_text(encoding="utf-8"))
++    # Reverse source order within one type: latest event is the first physical row.
++    raw["customerActions"][0]["dateTimeUtc"] = "2026-01-01T20:00:00Z"
++    raw["customerActions"][2]["dateTimeUtc"] = "2026-01-01T08:00:00Z"
++    path.write_text(json.dumps(raw), encoding="utf-8")
++    with store.storage_lock(args["raw_root"]):
++        for component in batch.components:
++            store.publish(args["raw_root"], component.name, component.since, component.until,
++                          args["raw_root"] / component.export.relative_directory)
++    args["training_manifest"] = args["raw_root"] / "canonical/training.json"
++    args["cfg"].min_user_interactions_for_eval = 2
++    original, calls = core.train_prepared_data_with_metrics, []
++    def checked(cfg, prepared, device):
++        user, item = prepared.splits.eval_users[0], prepared.splits.eval_items[0]
++        assert prepared.mappings.idx2user[user] == "SECRET_A"
++        assert prepared.mappings.idx2item[item] == "123456"
++        assert prepared.splits.user_pos_train[user] == {prepared.mappings.item2idx["123458"]}
++        calls.append(True)
++        return original(cfg, prepared, device)
++    monkeypatch.setattr(core, "train_prepared_data_with_metrics", checked)
++    if entrypoint == "production":
++        result = production.train_and_publish_production_model(**args)
++        assert result.error_code is None and result.published
++    else:
++        from Application.model import mindbox_shadow_training as shadow
++        monkeypatch.setattr(shadow, "REPORT_ROOT", tmp_path / "shadow_reports")
++        result = shadow.shadow_train_daily_manifest(
++            args["training_manifest"], raw_root=args["raw_root"], catalog_path=args["catalog_path"],
++            cfg=args["cfg"], device=args["device"])
++        assert result.error_code is None and result.training_completed
++        assert not production.MODEL_ROOT.exists()
++    assert calls == [True]
++
++
++def gui_argv(args):
++    config = args["catalog_path"].parent / "gui-config.json"
++    config.write_text(json.dumps(vars(args["cfg"]), ensure_ascii=False), encoding="utf-8")
++    return ["gui", "--manifest", str(args["training_manifest"]), "--raw-root", str(args["raw_root"]),
++            "--catalog", str(args["catalog_path"]), "--config", str(config), "--device", "auto"]
++
++
++def events(output):
++    return [json.loads(line[len(cli.EVENT_PREFIX):]) for line in output.splitlines()
++            if line.startswith(cli.EVENT_PREFIX)]
++
++
++@pytest.mark.parametrize("problem,answer,exit_code", [
++    ("pass", "", 0), ("warn", "YES\n", 0), ("warn", "NO\n", 130),
++    ("warn", "", 130), ("block", "YES\n", 1),
++])
++def test_gui_cli_canonical_quality_and_publication(tmp_path, monkeypatch, capsys, problem, answer, exit_code):
++    args = canonical_source(tmp_path, problem)
++    old = old_model(production.MODEL_ROOT)
++    monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
++    if exit_code:
++        monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
++    else:
++        train = core.train_prepared_data_with_metrics
++        def checked(cfg, data, device):
++            assert vars(cfg) == vars(args["cfg"])
++            assert device.type == ("cuda" if torch.cuda.is_available() else "cpu")
++            assert cfg.item_feature_cols == core.TrainConfig().item_feature_cols
++            return train(cfg, data, device)
++        monkeypatch.setattr(core, "train_prepared_data_with_metrics", checked)
++    assert cli.main(gui_argv(args)) == exit_code
++    output = capsys.readouterr()
++    recorded = events(output.out)
++    assert recorded[0]["batch_id"] == store.catalog(args["raw_root"])["revision"]
++    assert recorded[0]["quality"]["level"] == problem.upper()
++    if problem == "warn":
++        issue = recorded[0]["quality"]["issues"][0]
++        assert issue["code"] == "MAPPED_ACTION_WITHOUT_PRODUCT"
++        assert issue["count"] == 1 and issue["rate"] == 0.25
++        assert issue["breakdown"] == {"ProsmotrProdukta": 1}
++    if exit_code:
++        assert len(recorded) == 1
++        assert_old(production.MODEL_ROOT, old)
++    else:
++        result = recorded[-1]
++        assert result["published"] and result["postpublish_validation"] and result["prepublish_disk_validation"]
++        assert production._current(production.MODEL_ROOT)[0] == result["published_generation"]
++        maps, checkpoint = core._load_artifacts(str(production.MODEL_ROOT))
++        model, _, users, items = core._build_model_from_ckpt(checkpoint, torch.device("cpu"))
++        assert (users, items) == (len(maps["idx2user"]), len(maps["idx2item"])) == (2, 3)
++        assert model is not None and production.seen_items_from_checkpoint(checkpoint) is not None
++        assert production.analytics_from_checkpoint(checkpoint) is not None
++        assert (production.MODEL_ROOT / "runs" / OLD / "bprmf.pt").read_bytes() == b"old checkpoint sentinel"
++    assert not any(p.name in ("orders.csv", "views.csv", "favorites.csv") for p in tmp_path.rglob("*.csv"))
++    assert "SECRET" not in output.out + output.err
++
++
++@pytest.mark.parametrize("cancel", [False, True])
++def test_gui_cli_training_failure_preserves_previous_model(tmp_path, monkeypatch, capsys, cancel):
++    args = canonical_source(tmp_path)
++    old = old_model(production.MODEL_ROOT)
++    def fail(*a):
++        raise KeyboardInterrupt() if cancel else RuntimeError("SECRET")
++    monkeypatch.setattr(core, "train_prepared_data_with_metrics", fail)
++    assert cli.main(gui_argv(args)) == (130 if cancel else 1)
++    result = events(capsys.readouterr().out)[-1]
++    assert result["error_code"] == ("CANCELLED" if cancel else "TRAINING_FAILED")
++    assert not result["published"] and result["training_started"]
++    assert_old(production.MODEL_ROOT, old)
++
++
++def test_gui_cli_changed_batch_requires_new_preflight(tmp_path, monkeypatch, capsys):
++    args = canonical_source(tmp_path, "warn")
++    old = old_model(production.MODEL_ROOT)
++    preflight = production.preflight_production_training
++    def changed(*a, **kw):
++        result = preflight(*a, **kw)
++        catalog = store.catalog(args["raw_root"])
++        catalog["revision"] = "b" * 32
++        store.atomic_json(args["raw_root"] / "canonical/catalog.json", catalog)
++        return result
++    monkeypatch.setattr(production, "preflight_production_training", changed)
++    monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
++    monkeypatch.setattr(sys, "stdin", io.StringIO("YES\n"))
++    assert cli.main(gui_argv(args)) == 1
++    assert events(capsys.readouterr().out)[-1]["error_code"] == "PREFLIGHT_CHANGED"
++    assert_old(production.MODEL_ROOT, old)
++
++
++@pytest.mark.parametrize("bad_config", ["missing", "malformed", "other_catalog"])
++def test_gui_cli_invalid_config_never_uses_defaults(tmp_path, monkeypatch, bad_config):
++    args = canonical_source(tmp_path)
++    argv = gui_argv(args)
++    path = Path(argv[argv.index("--config") + 1])
++    if bad_config == "missing":
++        path.unlink()
++    elif bad_config == "malformed":
++        path.write_text("{invalid", encoding="utf-8")
++    else:
++        path.write_text(json.dumps({"data_dir": str(tmp_path / "other")}), encoding="utf-8")
++    monkeypatch.setattr(production, "preflight_production_training", forbidden)
++    monkeypatch.setattr(core, "train_prepared_data_with_metrics", forbidden)
++    assert cli.main(argv) == 1
++    assert not production.MODEL_ROOT.exists()
+diff --git a/tests/model/test_mindbox_training_preparation.py b/tests/model/test_mindbox_training_preparation.py
+index fa16782..406410b 100644
+--- a/tests/model/test_mindbox_training_preparation.py
++++ b/tests/model/test_mindbox_training_preparation.py
+@@ -1,5 +1,6 @@
+ import copy
+ from dataclasses import replace
++from datetime import datetime, timezone
+ import json
+ import socket
+ 
+@@ -10,6 +11,7 @@ import torch
+ 
+ from Application.model import BPRMF as legacy
+ from Application.model import mindbox_training_preparation as pipeline
++from Application.model.bpr_preparation import DateMode
+ from Application.model.training_data import PreparedDataError
+ from Application.mindbox.raw_reader import EXPORT_ROOTS, RawExportError
+ from Application.mindbox.identity import CustomerIdentityError
+@@ -146,8 +148,10 @@ def test_end_to_end_raw_vs_legacy_equal_date_order_and_custom_weights(data, tmp_
+     for field in ("train_pairs", "train_weights", "eval_users", "eval_items"):
+         np.testing.assert_array_equal(getattr(new.splits, field), getattr(old.splits, field))
+     assert new.splits.user_pos_train == old.splits.user_pos_train
+-    assert new.mappings.idx2item[new.splits.eval_items[0]] == "001234"
+-    assert result.diagnostics.bpr.total_train_weight == pytest.approx(8 * cfg.w_view_item + cfg.w_favorite + 5 * cfg.w_purchase)
++    assert new.splits.eval_users.size == new.splits.eval_items.size == 0
++    assert result.diagnostics.bpr.excluded_seen_eval_users == 1
++    assert result.diagnostics.bpr.train_events_before_aggregation == 12
++    assert result.diagnostics.bpr.total_train_weight == pytest.approx(9 * cfg.w_view_item + cfg.w_favorite + 5 * cfg.w_purchase)
+ 
+ 
+ def merge(source, target, index=1):
+@@ -206,6 +210,8 @@ def test_missing_product_names_do_not_change_preparation(data):
+ 
+ def test_custom_eval_threshold_is_used(data):
+     data[0]["actions"] = data[0]["actions"][:3]
++    # Novel final item isolates the event-count threshold from the repeat exclusion rule.
++    data[0]["actions"][-1]["products"][0]["ids"] = {"offline1C": "001235_FULL"}
+     result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=4))
+     assert result.diagnostics.bpr.eval_events == 1
+     assert run(data).diagnostics.bpr.eval_events == 0
+@@ -286,7 +292,16 @@ def test_explicit_none_never_selects_latest(data):
+ 
+ 
+ def test_training_core_integration(data, tmp_path, monkeypatch):
++    # A training user must have an unseen item in the mapped interaction universe.
++    extra = copy.deepcopy(data[0]["actions"][0])
++    extra["ids"]["mindboxId"] = "SECRET_EXTRA_ACTION"
++    extra["customer"]["ids"]["mindboxId"] = "SECRET_C"
++    extra["products"][0]["ids"] = {"offline1C": "001237_FULL"}
++    data[0]["actions"].append(extra)
++    data[2].write_text(data[2].read_text(encoding="utf-8-sig") + "001237\n", encoding="utf-8-sig")
+     result = run(data)
++    assert all(len(items) < len(result.prepared_data.mappings.idx2item)
++               for items in result.prepared_data.splits.user_pos_train)
+     cfg = legacy.TrainConfig(data_dir=str(tmp_path / "no_csv"), use_item_features=False,
+                              epochs=1, embedding_dim=4, n_neg=1, batch_size=4, topk=2)
+     monkeypatch.setattr(torch, "set_num_interop_threads", lambda value: None)
+@@ -297,6 +312,19 @@ def test_training_core_integration(data, tmp_path, monkeypatch):
+     assert not (tmp_path / "model").exists()
+ 
+ 
++def test_training_core_rejects_user_without_negative_candidates(data, tmp_path, monkeypatch):
++    result = run(data)
++    assert any(len(items) == len(result.prepared_data.mappings.idx2item)
++               for items in result.prepared_data.splits.user_pos_train)
++    cfg = legacy.TrainConfig(data_dir=str(tmp_path / "no_csv"), use_item_features=False,
++                             epochs=1, embedding_dim=4, n_neg=1, batch_size=4, topk=2)
++    monkeypatch.setattr(torch, "set_num_interop_threads", lambda value: None)
++    monkeypatch.setattr(legacy.BPRMF, "score", lambda *args: pytest.fail("Invalid BPR comparison must never reach scoring"))
++    with pytest.raises(ValueError, match="No candidate negative items"):
++        legacy.train_prepared_data(cfg, result.prepared_data, torch.device("cpu"))
++    assert not (tmp_path / "model").exists()
++
++
+ @pytest.mark.parametrize("malformed", [False, True])
+ def test_cli_safe_aggregates_and_complete(data, tmp_path, capsys, malformed):
+     if malformed:
+@@ -500,3 +528,91 @@ def test_order_fingerprint_key_order_and_decimal_stability():
+     assert semantic_fingerprint(left) == semantic_fingerprint(right)
+     assert semantic_fingerprint({"x": "1"}) != semantic_fingerprint({"x": 1})
+     assert semantic_fingerprint({"x": True}) != semantic_fingerprint({"x": 1})
++
++
++def _set_temporal_events(data, purchase, favorite, view):
++    raw = data[0]
++    raw["actions"] = [raw["actions"][0], raw["actions"][-1]]
++    for action, stamp in zip(raw["actions"], (view, favorite)):
++        action["dateTimeUtc"] = stamp
++        action["creationDateTimeUtc"] = "2026-01-01T23:59:00Z"  # Event time, not ingestion time, controls the split.
++    raw["orders"] = raw["orders"][:1]
++    raw["orders"][0]["firstAction"]["dateTimeUtc"] = purchase
++
++
++@pytest.mark.parametrize("latest,target", [("purchase", "001236"), ("favorite", "001235"), ("view", "001234")])
++def test_canonical_same_day_uses_full_timestamp_and_preserves_mappings_weights(data, monkeypatch, latest, target):
++    hours = {"purchase": 8, "favorite": 12, "view": 12 if latest == "favorite" else 8}
++    hours[latest] = 20
++    stamps = {kind: f"2026-01-01T{hour:02d}:00:00Z" for kind, hour in hours.items()}
++    _set_temporal_events(data, **stamps)
++    before = copy.deepcopy(data[0])
++    original, captured = pipeline.prepare_bpr, []
++    def checked(events, config):
++        events = list(events)
++        assert config.date_mode is DateMode.FULL_TIMESTAMP
++        captured.extend(events)
++        return original(events, config)
++    monkeypatch.setattr(pipeline, "prepare_bpr", checked)
++    result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=3))
++    prepared = result.prepared_data
++    assert prepared.mappings.idx2user == ["SECRET_A"]
++    assert prepared.mappings.idx2item == ["001236", "001235", "001234"]
++    assert prepared.mappings.idx2item[prepared.splits.eval_items[0]] == target
++    weights = {prepared.mappings.idx2item[item]: weight for (_, item), weight
++               in zip(prepared.splits.train_pairs, prepared.splits.train_weights)}
++    assert weights == {item: weight for item, weight in {"001236": 25., "001235": 2., "001234": 0.1}.items()
++                       if item != target}
++    assert prepared.splits.user_pos_train[0] == {prepared.mappings.item2idx[item] for item in weights}
++    assert {event.timestamp for event in captured} == {
++        datetime.fromisoformat(stamp.replace("Z", "+00:00")) for stamp in stamps.values()}
++    assert all(event.timestamp.tzinfo is timezone.utc for event in captured)
++    assert data[0] == before
++
++
++def test_canonical_full_timestamp_keeps_microseconds(data):
++    _set_temporal_events(data, purchase="2026-01-01T10:00:00.123456Z",
++                         favorite="2026-01-01T08:00:00Z", view="2026-01-01T10:00:00.123455Z")
++    prepared = run(data, legacy.TrainConfig(min_user_interactions_for_eval=3)).prepared_data
++    assert prepared.mappings.idx2item[prepared.splits.eval_items[0]] == "001236"
++
++
++def test_canonical_full_timestamp_normalizes_offsets_and_suffixless_utc(data):
++    _set_temporal_events(data, purchase="2026-01-01T21:00:00Z",
++                         favorite="2026-01-01T19:00:00", view="2026-01-01T23:00:00+03:00")
++    prepared = run(data, legacy.TrainConfig(min_user_interactions_for_eval=3)).prepared_data
++    assert prepared.mappings.idx2item[prepared.splits.eval_items[0]] == "001236"
++
++
++def test_canonical_full_timestamp_retains_all_events_when_final_item_repeats(data):
++    _set_temporal_events(data, purchase="2026-01-01T20:00:00Z",
++                         favorite="2026-01-01T12:00:00Z", view="2026-01-01T08:00:00Z")
++    raw = data[0]
++    raw["actions"].append(copy.deepcopy(raw["actions"][0]))
++    raw["actions"][-1]["ids"]["mindboxId"] = "SECRET_REPEAT"
++    raw["actions"][-1]["dateTimeUtc"] = "2026-01-01T09:00:00Z"
++    # The repeated final purchase makes the whole user history training data.
++    raw["orders"].append(copy.deepcopy(raw["orders"][0]))
++    raw["orders"][-1]["ids"]["mindboxId"] = "SECRET_EARLIER_ORDER"
++    raw["orders"][-1]["firstAction"]["dateTimeUtc"] = "2026-01-01T10:00:00Z"
++    result = run(data, legacy.TrainConfig(min_user_interactions_for_eval=5))
++    prepared = result.prepared_data
++    weights = {prepared.mappings.idx2item[item]: weight for (_, item), weight
++               in zip(prepared.splits.train_pairs, prepared.splits.train_weights)}
++    assert weights == {"001236": 50., "001235": 2., "001234": 0.2}
++    assert prepared.splits.eval_users.size == prepared.splits.eval_items.size == 0
++    assert result.diagnostics.bpr.excluded_seen_eval_users == 1
++    assert result.diagnostics.bpr.train_events_before_aggregation == 5
++    assert result.diagnostics.bpr.train_pairs_after_aggregation == 3
++
++
++@pytest.mark.parametrize("source", ["action", "order"])
++@pytest.mark.parametrize("stamp", [None, "invalid-timestamp"])
++@pytest.mark.parametrize("diagnose", [False, True])
++def test_canonical_required_timestamp_errors_remain_fatal(data, source, stamp, diagnose):
++    if source == "action":
++        data[0]["actions"][0]["dateTimeUtc"] = stamp
++    else:
++        data[0]["orders"][0]["firstAction"]["dateTimeUtc"] = stamp
++    with pytest.raises(AdapterError):
++        run(data, diagnose=diagnose)
+diff --git a/tests/model/test_seen_items.py b/tests/model/test_seen_items.py
+index 3b34918..966142c 100644
+--- a/tests/model/test_seen_items.py
++++ b/tests/model/test_seen_items.py
+@@ -14,7 +14,7 @@ from Application.model.seen_items import SeenItemsIndex, SeenItemsError, build_s
+ 
+ @pytest.fixture
+ def events():
+-    # u1: eval-only c; u2: held-out a repeats a train positive; u3 ineligible.
++    # u1: novel eval-only c; u2: repeated final a keeps all events in train; u3 below threshold.
+     rows = [("u1", "a", "VIEW"), ("u1", "a", "VIEW"), ("u1", "a", "FAVORITE"),
+             ("u1", "a", "PURCHASE"), ("u1", "c", "VIEW"),
+             ("u2", "a", "VIEW"), ("u2", "b", "VIEW"), ("u2", "a", "PURCHASE"),
+@@ -39,6 +39,7 @@ def test_all_pre_holdout_pairs_and_immutable_deterministic_layout(events, prepar
+     np.testing.assert_array_equal(index.indices, [0, 1, 0, 2, 2])
+     assert maps.item2idx["c"] not in prepared.splits.user_pos_train[maps.user2idx["u1"]]
+     assert maps.item2idx["a"] in prepared.splits.user_pos_train[maps.user2idx["u2"]]
++    assert prepared.splits.eval_users.tolist() == [maps.user2idx["u1"]]
+     assert "u1" not in repr(index)
+     with pytest.raises(FrozenInstanceError):
+         index.num_users = 0
+diff --git a/tests/model/test_training_data.py b/tests/model/test_training_data.py
+index 42e1a42..55b51f3 100644
+--- a/tests/model/test_training_data.py
++++ b/tests/model/test_training_data.py
+@@ -4,6 +4,7 @@ import numpy as np
+ import pandas as pd
+ import pytest
+ import torch
++import torch.nn.functional as F
+ 
+ from Application.model import BPRMF as bpr
+ from Application.model.training_data import Mappings, Splits, PreparedBprData, PreparedDataError, validate_prepared_data
+@@ -170,3 +171,297 @@ def test_validation_precedes_training_side_effects(prepared, monkeypatch):
+     monkeypatch.setattr(torch, "set_num_threads", lambda *args: pytest.fail("Must validate first"))
+     with pytest.raises(PreparedDataError):
+         bpr.train_prepared_data(bpr.TrainConfig(), prepared, torch.device("cpu"))
++
++
++@pytest.mark.parametrize("weights", [
++    np.array([1., 10., 100., 2., 0., 50., 3.]),
++    np.zeros(7),
++])
++def test_positive_selection_is_independent_of_weights(weights):
++    pairs = np.column_stack((np.arange(7), np.arange(7) + 20))
++    original_pairs, original_weights = pairs.copy(), weights.copy()
++    uniform_rng, weighted_rng = np.random.default_rng(42), np.random.default_rng(42)
++    for _ in range(100):
++        uniform_users, uniform_items, _ = bpr._sample_batch(pairs, np.ones(7), 3, uniform_rng)
++        users, items, batch_weights = bpr._sample_batch(pairs, weights, 3, weighted_rng)
++        np.testing.assert_array_equal(users, uniform_users)
++        np.testing.assert_array_equal(items, uniform_items)
++        np.testing.assert_array_equal(batch_weights, weights[users])
++        assert len(set(users)) == 3  # Preserve sampling without replacement within a batch.
++        assert batch_weights.dtype == np.float64
++    np.testing.assert_array_equal(pairs, original_pairs)
++    np.testing.assert_array_equal(weights, original_weights)
++
++
++def test_positive_selection_is_uniform_for_unequal_weights():
++    pairs = np.array([[0, 0], [1, 1]])
++    weights = np.array([1., 10.])
++    rng = np.random.default_rng(42)
++    counts = np.zeros(2, dtype=int)
++    for _ in range(20000):
++        users, _, batch_weights = bpr._sample_batch(pairs, weights, 1, rng)
++        counts[users[0]] += 1
++        assert batch_weights[0] == weights[users[0]]
++    np.testing.assert_allclose(counts / counts.sum(), [0.5, 0.5], atol=0.015, rtol=0)
++
++
++@pytest.mark.parametrize("batch_size", [2, 5])
++def test_full_batch_preserves_pairs_weights_and_rng_state(batch_size):
++    pairs = np.array([[3, 8], [1, 5]])
++    weights = np.array([1, 10], dtype=np.int32)
++    rng = np.random.default_rng(42)
++    state = rng.bit_generator.state
++    users, items, batch_weights = bpr._sample_batch(pairs, weights, batch_size, rng)
++    np.testing.assert_array_equal(users, pairs[:, 0])
++    np.testing.assert_array_equal(items, pairs[:, 1])
++    np.testing.assert_array_equal(batch_weights, weights)
++    assert batch_weights.dtype == np.float64
++    assert rng.bit_generator.state == state
++
++
++class _FixedScoreModel(torch.nn.Module):
++    """Known logits for checking the production loop's loss and gradients."""
++
++    def __init__(self, *args, **kwargs):
++        super().__init__()
++        self.user_emb = torch.nn.Embedding(2, 1)
++        self.item_emb = torch.nn.Embedding(3, 1)
++        self.use_item_features = False
++        with torch.no_grad():
++            self.user_emb.weight.fill_(1)
++            self.item_emb.weight.copy_(torch.tensor([[0.], [2.], [1.]]))
++
++    def score(self, users, items):
++        user_vectors = self.user_emb(users)
++        if items.ndim == 2:
++            user_vectors = user_vectors.unsqueeze(1)
++        return (user_vectors * self.item_emb(items)).sum(dim=-1)
++
++
++@pytest.mark.parametrize("weights", [[1., 10.], [10., 1.], [1., 1.], [0., 10.]])
++@pytest.mark.parametrize("bpr_reg", [0., 0.25])
++def test_training_retains_normalized_weighted_loss_and_gradients(tmp_path, monkeypatch, weights, bpr_reg):
++    cfg = bpr.TrainConfig(data_dir=str(tmp_path), epochs=1, embedding_dim=1,
++                           batch_size=2, n_neg=2, use_item_features=False, lr=0., bpr_reg=bpr_reg)
++    prepared = PreparedBprData(
++        Mappings({"u0": 0, "u1": 1}, ["u0", "u1"],
++                 {"i0": 0, "i1": 1, "i2": 2}, ["i0", "i1", "i2"]),
++        Splits(np.array([[0, 0], [1, 1]]), np.array(weights),
++               np.array([], dtype=int), np.array([], dtype=int), [{0}, {1}]),
++    )
++    negatives = np.array([[2, 1], [2, 0]])
++    def fixed_negatives(users, num_items, positives, rng, n_neg):
++        np.testing.assert_array_equal(users, [0, 1])
++        assert num_items == 3 and positives == [{0}, {1}] and n_neg == 2
++        return negatives
++    monkeypatch.setattr(bpr, "BPRMF", _FixedScoreModel)
++    monkeypatch.setattr(bpr, "_sample_negatives", fixed_negatives)
++    monkeypatch.setattr(torch, "set_num_threads", lambda _: None)
++    monkeypatch.setattr(torch, "set_num_interop_threads", lambda _: None)
++    model, splits, metrics = bpr.train_prepared_data_with_metrics(cfg, prepared, torch.device("cpu"))
++    assert splits is prepared.splits
++    np.testing.assert_array_equal(splits.train_weights, weights)
++
++    # Two negatives per pair: deltas [-1, -2] and [1, 2].
++    # Compute the reference via softplus, independently of the loop's logsigmoid.
++    users, positives = torch.tensor([0, 1]), torch.tensor([0, 1])
++    negatives_t = torch.tensor(negatives)
++    delta = model.score(users, positives).unsqueeze(1) - model.score(users, negatives_t)
++    per_pair = F.softplus(-delta).mean(dim=1)
++    weight_t = torch.tensor(weights)
++    expected = (per_pair * weight_t).sum() / weight_t.sum().clamp_min(1e-6)
++    if bpr_reg:
++        reg = (model.user_emb(users).pow(2).sum(dim=-1)
++               + model.item_emb(positives).pow(2).sum(dim=-1)
++               + model.item_emb(negatives_t).pow(2).sum(dim=-1).mean(dim=1)).mean()
++        expected = expected + bpr_reg * reg
++    assert metrics.history[0].loss == pytest.approx(expected.item())
++    expected_grads = torch.autograd.grad(expected, tuple(model.parameters()))
++    for parameter, expected_grad in zip(model.parameters(), expected_grads):
++        torch.testing.assert_close(parameter.grad, expected_grad)
++
++
++def _assert_valid_negatives(users, negatives, num_items, positives):
++    assert negatives.dtype == np.int64
++    assert (negatives >= 0).all() and (negatives < num_items).all()
++    for user, row in zip(users, negatives):
++        assert set(row).isdisjoint(positives[int(user)])
++
++
++@pytest.mark.parametrize("n_neg", [1, 7])
++def test_negative_sampling_sparse_multiple_users_bounds_and_unchanged_inputs(n_neg):
++    users = np.array([0, 1, 0, 2, 3])
++    positives = [{0, 3, 9}, {2, 4}, set(), {1, 7, 11}]
++    original_users, original_positives = users.copy(), [set(items) for items in positives]
++    negatives = bpr._sample_negatives(users, 100, positives, np.random.default_rng(42), n_neg=n_neg)
++    assert negatives.shape == (len(users), n_neg)
++    _assert_valid_negatives(users, negatives, 100, positives)
++    np.testing.assert_array_equal(users, original_users)
++    assert positives == original_positives
++
++
++def test_negative_sampling_last_retry_is_checked():
++    users, positives = np.array([0]), [{0, 1, 2, 3}]
++    negatives = bpr._sample_negatives(users, 5, positives, np.random.default_rng(0), n_neg=10, max_tries=1)
++    # Old implementation deterministically returned six positives in this batch.
++    np.testing.assert_array_equal(negatives, np.full((1, 10), 4))
++
++
++class _CollisionRng:
++    """Force rejection to exhaust retries, then use real uniform fallback draws."""
++
++    def __init__(self, seed=42):
++        self.generator = np.random.default_rng(seed)
++        self.integer_calls = 0
++        self.choice_calls = []
++
++    def integers(self, low, high, size, dtype):
++        self.integer_calls += 1
++        return np.zeros(size, dtype=dtype)
++
++    def choice(self, candidates, size, replace):
++        self.choice_calls.append((candidates.copy(), size, replace))
++        return self.generator.choice(candidates, size=size, replace=replace)
++
++
++@pytest.mark.parametrize("max_tries", [0, 2])
++def test_negative_sampling_forced_dense_fallback_and_duplicates(max_tries):
++    users, positives = np.array([0, 0]), [{0, 1, 2, 3}]
++    rng = _CollisionRng()
++    negatives = bpr._sample_negatives(users, 5, positives, rng, n_neg=7, max_tries=max_tries)
++    np.testing.assert_array_equal(negatives, np.full((2, 7), 4))
++    assert rng.integer_calls == 1 + max_tries
++    assert rng.choice_calls and all(call[2] is True for call in rng.choice_calls)
++    assert positives == [{0, 1, 2, 3}]
++    np.testing.assert_array_equal(users, [0, 0])
++
++
++def test_negative_sampling_fallback_uniform_seeded_and_reuses_user_complement(monkeypatch):
++    users, positives = np.array([0, 1, 0]), [{0, 1, 3}, {0, 2, 4}]
++    calls = []
++    original = np.setdiff1d
++    def track_complement(*args, **kwargs):
++        calls.append(True)
++        return original(*args, **kwargs)
++    monkeypatch.setattr(np, "setdiff1d", track_complement)
++    negatives = bpr._sample_negatives(users, 5, positives, _CollisionRng(42), n_neg=5000, max_tries=0)
++    assert len(calls) == 2  # One complement per unresolved user, even for repeated rows.
++    _assert_valid_negatives(users, negatives, 5, positives)
++    for user in (0, 1):
++        values, counts = np.unique(negatives[users == user], return_counts=True)
++        assert set(values) == set(range(5)) - positives[user]
++        np.testing.assert_allclose(counts / counts.sum(), [0.5, 0.5], atol=0.025, rtol=0)
++    repeated = bpr._sample_negatives(users, 5, positives, _CollisionRng(42), n_neg=5000, max_tries=0)
++    np.testing.assert_array_equal(negatives, repeated)
++
++
++@pytest.mark.parametrize("max_tries", [0, 1, 25])
++def test_negative_sampling_no_unseen_fails_before_draws(max_tries):
++    users, positives = np.array([0, 1]), [{0}, set(range(5))]
++    rng = _CollisionRng()
++    with pytest.raises(ValueError, match="No candidate negative items") as caught:
++        bpr._sample_negatives(users, 5, positives, rng, n_neg=4, max_tries=max_tries)
++    assert str(caught.value) == "No candidate negative items for a training user"
++    assert rng.integer_calls == 0 and rng.choice_calls == []
++    np.testing.assert_array_equal(users, [0, 1])
++    assert positives == [{0}, set(range(5))]
++
++
++@pytest.mark.parametrize("max_tries", [0, 1, 25])
++def test_negative_sampling_reproducible_with_numpy_generator(max_tries):
++    users, positives = np.array([0, 1, 0]), [{0, 1, 2, 3}, {1, 4}]
++    first = bpr._sample_negatives(users, 5, positives, np.random.default_rng(42), n_neg=20, max_tries=max_tries)
++    second = bpr._sample_negatives(users, 5, positives, np.random.default_rng(42), n_neg=20, max_tries=max_tries)
++    np.testing.assert_array_equal(first, second)
++    _assert_valid_negatives(users, first, 5, positives)
++
++
++def test_negative_sampling_fast_path_does_not_build_complements(monkeypatch):
++    def forbidden(*args, **kwargs):
++        pytest.fail("Sparse fast path must not build item complements")
++    monkeypatch.setattr(np, "setdiff1d", forbidden)
++    users, positives = np.array([0, 1]), [{0, 1}, {2, 3}]
++    negatives = bpr._sample_negatives(users, 1000, positives, np.random.default_rng(42), n_neg=10)
++    _assert_valid_negatives(users, negatives, 1000, positives)
++
++
++def test_negative_sampling_fallback_preserves_already_valid_draws():
++    class MixedRng(_CollisionRng):
++        def integers(self, low, high, size, dtype):
++            self.integer_calls += 1
++            return np.array([[0, 4, 0, 4]], dtype=dtype)
++    rng = MixedRng()
++    negatives = bpr._sample_negatives(np.array([0]), 5, [{0, 1, 2}], rng, n_neg=4, max_tries=0)
++    np.testing.assert_array_equal(negatives[0, [1, 3]], [4, 4])
++    _assert_valid_negatives([0], negatives, 5, [{0, 1, 2}])
++    assert len(rng.choice_calls) == 1 and rng.choice_calls[0][1] == 2
++
++
++def test_negative_sampling_empty_batch_and_no_positive_user():
++    rng = _CollisionRng()
++    empty = bpr._sample_negatives(np.array([], dtype=int), 0, [], rng, n_neg=3)
++    assert empty.shape == (0, 3) and empty.dtype == np.int64 and rng.integer_calls == 0
++    negatives = bpr._sample_negatives(np.array([0]), 1, [set()], np.random.default_rng(42), n_neg=3)
++    np.testing.assert_array_equal(negatives, [[0, 0, 0]])
++
++
++def test_training_comparisons_use_train_positives_and_valid_negatives(tmp_path, monkeypatch):
++    pairs = np.array([[0, 0], [0, 1], [1, 1]])
++    prepared = PreparedBprData(
++        Mappings({"u0": 0, "u1": 1}, ["u0", "u1"],
++                 {"i0": 0, "i1": 1, "i2": 2}, ["i0", "i1", "i2"]),
++        Splits(pairs, np.array([0.1, 2., 10.]), np.array([], dtype=int), np.array([], dtype=int), [{0, 1}, {1}]),
++    )
++    comparisons = []
++    sampler = bpr._sample_negatives
++    def checked(users, num_items, positives, rng, n_neg):
++        result = sampler(users, num_items, positives, rng, n_neg=n_neg, max_tries=0)
++        _assert_valid_negatives(users, result, num_items, positives)
++        comparisons.extend(zip(users, result))
++        return result
++    monkeypatch.setattr(bpr, "_sample_negatives", checked)
++    monkeypatch.setattr(torch, "set_num_threads", lambda _: None)
++    monkeypatch.setattr(torch, "set_num_interop_threads", lambda _: None)
++    cfg = bpr.TrainConfig(data_dir=str(tmp_path), use_item_features=False, epochs=1,
++                         embedding_dim=4, batch_size=2, n_neg=3, topk=2)
++    bpr.train_prepared_data_with_metrics(cfg, prepared, torch.device("cpu"))
++    assert len(comparisons) == 4
++    assert all(item in prepared.splits.user_pos_train[user] for user, item in pairs)
++
++
++@pytest.mark.parametrize("consumer", ["validator", "trainer", "evaluator"])
++def test_seen_eval_target_fails_before_training_or_scoring(prepared, monkeypatch, consumer):
++    prepared.splits.eval_items[0] = 0
++    monkeypatch.setattr(torch, "set_num_threads", lambda *args: pytest.fail("Must validate before training"))
++    with pytest.raises(PreparedDataError, match="Evaluation targets must be unseen in training") as caught:
++        if consumer == "validator":
++            validate_prepared_data(prepared)
++        elif consumer == "trainer":
++            bpr.train_prepared_data(bpr.TrainConfig(), prepared, torch.device("cpu"))
++        else:
++            bpr._eval_bprmf_recall_ndcg(object(), prepared.splits, 3, 1, torch.device("cpu"))
++    assert str(caught.value) == "Evaluation targets must be unseen in training"
++
++
++@pytest.mark.parametrize("k,expected", [(1, (0., 0.)), (2, (1., 1 / np.log2(3))), (10, (1., 1 / np.log2(3)))])
++def test_evaluator_masks_all_train_positives_and_keeps_metric_formulas(k, expected, monkeypatch):
++    model = bpr.BPRMF(1, 4, 1)
++    with torch.no_grad():
++        model.user_emb.weight.fill_(1)
++        # Seen item ranks highest; unseen scores are below the old -1e9 masking sentinel.
++        model.item_emb.weight.copy_(torch.tensor([[100.], [-3e9], [-2e9], [90.]]))
++    splits = Splits(np.array([[0, 0], [0, 3]]), np.ones(2), np.array([0]), np.array([1]), [{0, 3}])
++    original, calls = torch.topk, []
++    def checked(scores, *args, **kwargs):
++        assert torch.isneginf(scores[0, [0, 3]]).all()
++        calls.append(True)
++        return original(scores, *args, **kwargs)
++    monkeypatch.setattr(torch, "topk", checked)
++    result = bpr._eval_bprmf_recall_ndcg(model, splits, 4, k, torch.device("cpu"))
++    assert result == pytest.approx(expected)
++    assert calls == [True]
++
++
++def test_evaluator_empty_eval_does_not_score(prepared):
++    prepared.splits.eval_users = prepared.splits.eval_items = np.array([], dtype=np.int64)
++    assert bpr._eval_bprmf_recall_ndcg(object(), prepared.splits, 3, 2, torch.device("cpu")) == (0., 0.)
+diff --git a/tests/tabs/test_train_model_completion.py b/tests/tabs/test_train_model_completion.py
+index 52a7071..3bc70ce 100644
+--- a/tests/tabs/test_train_model_completion.py
++++ b/tests/tabs/test_train_model_completion.py
+@@ -30,9 +30,16 @@ class _Log:
+     ],
+ )
+ def test_train_finished_never_reports_success_for_failed_process(
+-    exit_code, exit_status, monkeypatch
++    exit_code, exit_status, monkeypatch, tmp_path
+ ):
+-    window = SimpleNamespace(start_train=_Button(), train_log=_Log())
++    window = SimpleNamespace(start_train=_Button(), train_log=_Log(), _training_active=True,
++                             train_proc=SimpleNamespace(readAllStandardOutput=lambda: b''),
++                             w_purchase=SimpleNamespace(value=lambda: 10.),
++                             w_favorite=SimpleNamespace(value=lambda: 2.),
++                             w_view_item=SimpleNamespace(value=lambda: .5),
++                             epochs_input=SimpleNamespace(value=lambda: 50))
++    monkeypatch.setattr(train_model_tab, 'metadata_readiness', lambda *args: (True, 'Synthetic ready', 'a' * 32))
++    monkeypatch.setattr(train_model_tab, 'USER_SETTINGS_DIR', tmp_path)
+     ok_statuses = []
+     error_statuses = []
+ 
+diff --git a/tests/tabs/test_train_model_start.py b/tests/tabs/test_train_model_start.py
+index 4daf5ca..fe2b8f9 100644
+--- a/tests/tabs/test_train_model_start.py
++++ b/tests/tabs/test_train_model_start.py
+@@ -1,4 +1,5 @@
+ import json
++from pathlib import Path
+ from types import SimpleNamespace
+ from unittest.mock import Mock
+ 
+@@ -8,6 +9,14 @@ import pytest
+ from Application.tabs import train_model_tab
+ 
+ 
++@pytest.fixture(autouse=True)
++def training_paths(tmp_path, monkeypatch):
++    monkeypatch.setattr(train_model_tab, "INPUT_DATA_DIR", tmp_path / "input_data")
++    monkeypatch.setattr(train_model_tab, "USER_SETTINGS_DIR", tmp_path / "user_settings")
++    monkeypatch.setattr(train_model_tab, "metadata_readiness", lambda *args: (True, "Synthetic metadata ready", "a" * 32))
++    monkeypatch.setattr(train_model_tab, "_confirm_production", lambda *args: True)
++
++
+ class _Button:
+     def __init__(self):
+         self.enabled = True
+@@ -42,17 +51,6 @@ class _ValueWidget:
+         return self._value
+ 
+ 
+-class _TextWidget:
+-    def __init__(self, text):
+-        self._text = text
+-
+-    def text(self):
+-        return self._text
+-
+-    def currentText(self):
+-        return self._text
+-
+-
+ class _Signal:
+     def __init__(self):
+         self.callbacks = []
+@@ -60,8 +58,15 @@ class _Signal:
+     def connect(self, callback):
+         self.callbacks.append(callback)
+ 
++    def emit(self, *args):
++        for callback in self.callbacks:
++            callback(*args)
++
+ 
+ class _FakeProcess:
++    ProcessState = train_model_tab.QProcess.ProcessState
++    ProcessError = train_model_tab.QProcess.ProcessError
++    ExitStatus = train_model_tab.QProcess.ExitStatus
+     class ProcessChannelMode:
+         MergedChannels = object()
+ 
+@@ -75,6 +80,9 @@ class _FakeProcess:
+         self.started = False
+         self.readyReadStandardOutput = _Signal()
+         self.finished = _Signal()
++        self.errorOccurred = _Signal()
++        self.output = b""
++        self.written = []
+         self.__class__.instances.append(self)
+ 
+     def setProgram(self, program):
+@@ -92,8 +100,18 @@ class _FakeProcess:
+     def start(self):
+         self.started = True
+ 
+-    def waitForStarted(self, timeout):
+-        return self.started
++    def state(self):
++        return self.ProcessState.NotRunning
++
++    def readAllStandardOutput(self):
++        data, self.output = self.output, b""
++        return data
++
++    def write(self, data):
++        self.written.append(data)
++
++    def deleteLater(self):
++        self.deleted = True
+ 
+ 
+ def _window_with_training_values():
+@@ -105,25 +123,7 @@ def _window_with_training_values():
+         w_view_item=_ValueWidget(0.1),
+         w_favorite=_ValueWidget(2.0),
+         w_purchase=_ValueWidget(10.0),
+-        embedding_dim_input=_TextWidget("128"),
+         epochs_input=_ValueWidget(5),
+-        batch_size_input=_TextWidget("256"),
+-        lr_input=_ValueWidget(0.0003),
+-        n_neg=_ValueWidget(10),
+-        weight_decay_input=_ValueWidget(0.0),
+-        bpr_reg_input=_ValueWidget(0.0005),
+-        seed_input=_ValueWidget(42),
+-        top_rec=_ValueWidget(10),
+-        min_user_interactions_for_eval=_ValueWidget(10),
+-        early_stop_metric=_TextWidget("NDCG"),
+-        early_stop_patience=_ValueWidget(8),
+-        early_stop_min_delta=_ValueWidget(0.0005),
+-        early_stop_min_epochs=_ValueWidget(30),
+-        max_item_features_input=_ValueWidget(32),
+-        feature_dropout_input=_ValueWidget(0.1),
+-        feature_scale_input=_ValueWidget(0.2),
+-        feature_norm_input=_TextWidget("MEAN"),
+-        feat_reg_mult_input=_ValueWidget(1.0),
+     )
+ 
+ 
+@@ -131,11 +131,6 @@ def _patch_training_ui(monkeypatch):
+     errors = []
+     _FakeProcess.instances.clear()
+     monkeypatch.setattr(train_model_tab, "QProcess", _FakeProcess)
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "QApplication",
+-        SimpleNamespace(processEvents=lambda: None),
+-    )
+     monkeypatch.setattr(train_model_tab, "set_status_processing", lambda *args: None)
+     monkeypatch.setattr(train_model_tab, "schedule_status_reset", lambda *args: None)
+     monkeypatch.setattr(
+@@ -143,31 +138,21 @@ def _patch_training_ui(monkeypatch):
+         "set_status_error",
+         lambda window, message: errors.append(message),
+     )
+-    monkeypatch.setattr(train_model_tab, "update_filter_summary", lambda window: None)
+     return errors
+ 
+ 
+-def test_training_data_preparation_error_does_not_start_process(monkeypatch):
++def test_invalid_form_parameters_do_not_start_process(monkeypatch):
+     window = _window_with_training_values()
+     errors = _patch_training_ui(monkeypatch)
+ 
+-    def fail_preparation(window):
+-        raise RuntimeError("synthetic data preparation error")
+-
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_prepare_training_data_dir",
+-        fail_preparation,
+-    )
++    window.w_purchase = _ValueWidget(0)
+ 
+     train_model_tab.start_training_process(window)
+ 
+-    assert window.start_train.enabled is True
++    assert window.start_train.enabled is False
+     assert errors
+-    assert any("synthetic data preparation error" in msg for msg in window.train_log.messages)
+-    assert len(_FakeProcess.instances) == 1
+-    assert _FakeProcess.instances[0].started is False
+-    assert _FakeProcess.instances[0].arguments is None
++    assert window._training_active is False
++    assert _FakeProcess.instances == []
+ 
+ 
+ def test_store_city_map_uses_existing_in_memory_map(tmp_path, monkeypatch):
+@@ -261,226 +246,292 @@ def test_store_city_map_unexpected_json_structure_raises(tmp_path, monkeypatch):
+         train_model_tab._get_store_city_map(window)
+ 
+ 
+-def test_broken_store_city_settings_does_not_start_training(tmp_path, monkeypatch):
+-    monkeypatch.chdir(tmp_path)
+-    input_dir = tmp_path / "input_data"
+-    input_dir.mkdir()
+-    (input_dir / "orders.csv").write_text(
+-        "Магазин|Дата\nМагазин 1|2025-01-01\n",
+-        encoding="utf-8",
+-    )
+-    settings_dir = tmp_path / "user_settings"
+-    settings_dir.mkdir()
+-    settings_path = settings_dir / "filter_settings.json"
+-    settings_path.write_text(
+-        "synthetic existing settings",
+-        encoding="utf-8",
+-    )
+-
++def test_config_write_error_does_not_start_process(tmp_path, monkeypatch):
+     window = _window_with_training_values()
+-    window._store_city_map = {}
+     errors = _patch_training_ui(monkeypatch)
+-    successes = []
+-
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_any_order_filters_set",
+-        lambda current_window: True,
+-    )
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_get_current_order_filters",
+-        lambda current_window: {
+-            "date_from": "",
+-            "date_to": "",
+-            "kinds": [],
+-            "stores": [],
+-            "kind_mode": "В группе",
+-            "store_mode": "В группе",
+-        },
+-    )
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "set_status_ok",
+-        lambda current_window, message: successes.append(message),
+-    )
+-
+-    real_open = open
+-
+-    def fail_open(file, *args, **kwargs):
+-        if str(file) == str(settings_path):
+-            raise PermissionError("synthetic unreadable settings")
+-        return real_open(file, *args, **kwargs)
+-
+-    monkeypatch.setattr(train_model_tab, "open", fail_open, raising=False)
+-
++    monkeypatch.setattr(train_model_tab.json, "dump", Mock(side_effect=OSError("config write error")))
+     train_model_tab.start_training_process(window)
+-
+-    assert window.start_train.enabled is True
+-    assert window.start_train.enabled_calls == [False, True]
+-    assert errors == ["Не удалось подготовить параметры обучения"]
+-    assert successes == []
+-    assert any("synthetic unreadable settings" in msg for msg in window.train_log.messages)
+-    assert len(_FakeProcess.instances) == 1
+-    assert _FakeProcess.instances[0].started is False
+-    assert _FakeProcess.instances[0].arguments is None
++    assert window.start_train.enabled and not window._training_active
++    assert errors and _FakeProcess.instances == []
++    assert not list((tmp_path / "user_settings").glob("train-run-*"))
+ 
+ 
+-def test_config_write_error_does_not_start_process(tmp_path, monkeypatch):
++def test_canonical_start_without_interaction_csv_preserves_form_config(tmp_path, monkeypatch):
+     window = _window_with_training_values()
+     errors = _patch_training_ui(monkeypatch)
++    forbidden = Mock(side_effect=AssertionError("CSV pipeline must not run"))
++    monkeypatch.setattr(train_model_tab, "_prepare_training_data_dir", forbidden)
++    monkeypatch.setattr(pd, "read_csv", forbidden)
++    monkeypatch.setattr(pd.DataFrame, "to_csv", forbidden)
++    # Analysis filters must not become training filters.
++    window.analysis_filter = SimpleNamespace(date_from="2020-01-01", stores=("analysis-only",))
++    settings = tmp_path / "user_settings"
++    settings.mkdir()
++    original = b'{"embedding_dim":128,"batch_size":256,"lr":0.0003,"n_neg":10,"weight_decay":0.0,"bpr_reg":0.0005,"seed":42,"topk":10,"min_user_interactions_for_eval":10,"early_stop_metric":"ndcg","early_stop_patience":8,"early_stop_min_delta":0.0005,"early_stop_min_epochs":30,"max_item_features":32,"feature_dropout":0.1,"feature_scale":0.2,"feature_norm":"mean","feat_reg_mult":1.0}'
++    (settings / "train_config.json").write_bytes(original)
+     monkeypatch.chdir(tmp_path)
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_prepare_training_data_dir",
+-        lambda window: "synthetic-data",
+-    )
++    train_model_tab.start_training_process(window)
++    process = _FakeProcess.instances[0]
++    assert errors == [] and process.started
++    assert "gui" in process.arguments and "--train" not in process.arguments
++    args = process.arguments
++    assert args[args.index("--manifest") + 1] == str(tmp_path / "input_data/MindboxRaw/canonical/training.json")
++    assert args[args.index("--raw-root") + 1] == str(tmp_path / "input_data/MindboxRaw")
++    assert args[args.index("--catalog") + 1] == str(tmp_path / "input_data/nomenclature.csv")
++    assert args[args.index("--device") + 1] == "auto"
++    config = json.loads(Path(window._train_config_path).read_text(encoding="utf-8"))
++    assert config == {
++        "data_dir": str(tmp_path / "input_data"), "w_view_item": 0.1, "w_favorite": 2.0, "w_purchase": 10.0,
++        "embedding_dim": 128, "epochs": 5, "batch_size": 256, "lr": 0.0003, "n_neg": 10,
++        "weight_decay": 0.0, "bpr_reg": 0.0005, "seed": 42, "topk": 10,
++        "min_user_interactions_for_eval": 10, "early_stop_metric": "ndcg", "early_stop_patience": 8,
++        "early_stop_min_delta": 0.0005, "early_stop_min_epochs": 30, "max_item_features": 32,
++        "feature_dropout": 0.1, "feature_scale": 0.2, "feature_norm": "mean", "feat_reg_mult": 1.0,
++    }
++    forbidden.assert_not_called()
++    assert not list(tmp_path.rglob("*.csv"))
++    assert not (tmp_path / "filtered_data").exists()
++    assert (settings / "train_config.json").read_bytes() == original
++
++
++def _preflight_event(level):
++    return {
++        "stage": "preflight", "batch_id": "a" * 32, "error_code": "QUALITY_BLOCK" if level == "BLOCK" else None,
++        "dataset": {"users": 2, "items": 3}, "interaction_window": {"since": "2026-01-01", "until": "2026-01-02"},
++        "quality": {"level": level, "training_allowed": level != "BLOCK", "metrics": {"malformed_rate": 0.2},
++                    "issues": [{"message": "Исключены действия без товара", "code": "MAPPED_ACTION_WITHOUT_PRODUCT",
++                                "count": 1, "rate": 0.2, "breakdown": {"ProsmotrProdukta": 1}}]},
++    }
+ 
+-    def fail_open(*args, **kwargs):
+-        raise OSError("synthetic config write error")
+ 
+-    monkeypatch.setattr(train_model_tab, "open", fail_open, raising=False)
++def _send_event(window, event):
++    from scripts.mindbox_production_train import EVENT_PREFIX
++    window.train_proc.output = (EVENT_PREFIX + json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
++    window.train_proc.readyReadStandardOutput.emit()
++
+ 
++@pytest.mark.parametrize("level", ["PASS", "BLOCK"])
++def test_preflight_pass_block_diagnostics_without_dialog(monkeypatch, level):
++    window = _window_with_training_values()
++    errors = _patch_training_ui(monkeypatch)
++    dialog = Mock(side_effect=AssertionError("Only WARN asks for confirmation"))
++    monkeypatch.setattr(train_model_tab.QMessageBox, "question", dialog)
+     train_model_tab.start_training_process(window)
++    event = _preflight_event(level)
++    _send_event(window, event)
++    assert window._train_preflight_result == event
++    assert window.train_proc.written == []
++    assert bool(errors) == (level == "BLOCK")
++    assert any("malformed_rate" in message and "ProsmotrProdukta" in message for message in window.train_log.messages)
++    dialog.assert_not_called()
+ 
+-    assert window.start_train.enabled is True
+-    assert errors
+-    assert any("synthetic config write error" in msg for msg in window.train_log.messages)
+-    assert len(_FakeProcess.instances) == 1
+-    assert _FakeProcess.instances[0].started is False
+-    assert _FakeProcess.instances[0].arguments is None
++
++@pytest.mark.parametrize("accepted", [True, False])
++def test_warn_requires_explicit_confirmation(monkeypatch, accepted):
++    window = _window_with_training_values()
++    _patch_training_ui(monkeypatch)
++    yes, no = train_model_tab.QMessageBox.StandardButton.Yes, train_model_tab.QMessageBox.StandardButton.No
++    dialog = Mock(return_value=yes if accepted else no)
++    monkeypatch.setattr(train_model_tab.QMessageBox, "question", dialog)
++    train_model_tab.start_training_process(window)
++    _send_event(window, _preflight_event("WARN"))
++    assert window.train_proc.written == [b"YES\n" if accepted else b"NO\n"]
++    assert dialog.call_args.args[-1] == no
++    assert "MAPPED_ACTION_WITHOUT_PRODUCT" in dialog.call_args.args[2]
++    assert window._training_active
+ 
+ 
+-def test_successful_config_preparation_always_starts_with_config(tmp_path, monkeypatch):
++def test_output_handles_split_json_and_utf8(monkeypatch):
++    window = _window_with_training_values()
++    _patch_training_ui(monkeypatch)
++    monkeypatch.setattr(train_model_tab.QMessageBox, "question", lambda *args: train_model_tab.QMessageBox.StandardButton.No)
++    train_model_tab.start_training_process(window)
++    from scripts.mindbox_production_train import EVENT_PREFIX
++    event = _preflight_event("WARN")
++    data = (EVENT_PREFIX + json.dumps(event, ensure_ascii=False) + "\r\n").encode("utf-8")
++    # Feed bytes separately, including inside multibyte Cyrillic characters.
++    for byte in data:
++        window.train_proc.output = bytes([byte])
++        window.train_proc.readyReadStandardOutput.emit()
++    assert window._train_preflight_result == event
++    assert window.train_proc.written == [b"NO\n"]
++    assert window._train_output_buffer == b""
++
++
++def test_failed_start_restores_ui_and_cleans_config(tmp_path, monkeypatch):
+     window = _window_with_training_values()
+     errors = _patch_training_ui(monkeypatch)
+-    monkeypatch.chdir(tmp_path)
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_prepare_training_data_dir",
+-        lambda window: "synthetic-data",
+-    )
+-
+     train_model_tab.start_training_process(window)
++    window.train_proc.errorOccurred.emit(_FakeProcess.ProcessError.FailedToStart)
++    assert window.start_train.enabled and not window._training_active
++    assert errors == ["Не удалось запустить обучение"]
++    assert not list((tmp_path / "user_settings").glob("train-run-*"))
+ 
+-    process = _FakeProcess.instances[0]
+-    assert errors == []
+-    assert process.started is True
+-    assert process.arguments[2] == "--train"
+-    assert process.arguments.count("--config") == 1
+-    assert len(process.arguments) == 5
+-    config_path = process.arguments[process.arguments.index("--config") + 1]
+-    with open(config_path, "r", encoding="utf-8") as config_file:
+-        config = json.load(config_file)
+-    assert config["data_dir"] == "synthetic-data"
+-
+-
+-def test_degraded_weather_preparation_still_starts_qprocess(tmp_path, monkeypatch):
+-    monkeypatch.chdir(tmp_path)
+-    input_dir = tmp_path / "input_data"
+-    input_dir.mkdir()
+-    pd.DataFrame(
+-        [
+-            {
+-                "MindboxID": "client-1",
+-                "КодНоменклатуры": "item-1",
+-                "Магазин": "STORE-1",
+-                "Дата": "2025-01-15",
+-            }
+-        ]
+-    ).to_csv(input_dir / "orders.csv", sep="|", index=False)
+-    pd.DataFrame(
+-        columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
+-    ).to_csv(input_dir / "views.csv", sep="|", index=False)
+-    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
+-        input_dir / "favorites.csv", sep="|", index=False
+-    )
+-    pd.DataFrame(
+-        [{"Дата": "2025-01-15", "ПогодныеУсловия": "Ясно"}]
+-    ).to_csv(input_dir / "weather.csv", sep="|", index=False)
+ 
++def test_repeated_start_is_blocked_while_preflight_or_warn_pending(monkeypatch):
+     window = _window_with_training_values()
+-    window._store_city_map = {"STORE-1": "Москва"}
+     errors = _patch_training_ui(monkeypatch)
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_any_order_filters_set",
+-        lambda current_window: True,
+-    )
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_get_current_order_filters",
+-        lambda current_window: {
+-            "date_from": "",
+-            "date_to": "",
+-            "kinds": [],
+-            "stores": [],
+-            "kind_mode": "В группе",
+-            "store_mode": "В группе",
+-        },
+-    )
+-
+     train_model_tab.start_training_process(window)
++    train_model_tab.start_training_process(window)
++    assert len(_FakeProcess.instances) == 1
++    assert errors == ["Обучение уже запущено"]
+ 
+-    process = _FakeProcess.instances[0]
+-    assert errors == []
+-    assert process.started is True
+-    assert any("погод" in message.lower() for message in window.train_log.messages)
+ 
++@pytest.mark.parametrize("published", [True, False])
++def test_zero_exit_requires_verified_publication(tmp_path, monkeypatch, published):
++    window = _window_with_training_values()
++    errors = _patch_training_ui(monkeypatch)
++    successes = []
++    monkeypatch.setattr(train_model_tab, "set_status_ok", lambda window, message: successes.append(message))
++    train_model_tab.start_training_process(window)
++    if published:
++        # Completion handler must drain output even if readyRead has not arrived.
++        from scripts.mindbox_production_train import EVENT_PREFIX
++        event = {"stage": "finished", "published": True, "postpublish_validation": True,
++                 "published_generation": "b" * 32, "error_code": None}
++        window.train_proc.output = (EVENT_PREFIX + json.dumps(event) + "\n").encode()
++    window.train_proc.finished.emit(0, _FakeProcess.ExitStatus.NormalExit)
++    assert bool(successes) == published and bool(errors) != published
++    assert window.start_train.enabled and not window._training_active
++    assert not list((tmp_path / "user_settings").glob("train-run-*"))
++    old_process = window.train_proc
++    train_model_tab.start_training_process(window)
++    assert old_process.deleted and len(_FakeProcess.instances) == 2
+ 
+-def test_duplicate_normalized_weather_headers_still_start_qprocess(
+-    tmp_path,
+-    monkeypatch,
+-):
+-    monkeypatch.chdir(tmp_path)
+-    input_dir = tmp_path / "input_data"
+-    input_dir.mkdir()
+-    pd.DataFrame(
+-        [
+-            {
+-                "MindboxID": "client-1",
+-                "КодНоменклатуры": "item-1",
+-                "Магазин": "STORE-1",
+-                "Дата": "2025-01-15",
+-            }
+-        ]
+-    ).to_csv(input_dir / "orders.csv", sep="|", index=False)
+-    pd.DataFrame(
+-        columns=["MindboxID", "КодНоменклатуры", "ТипТовара"]
+-    ).to_csv(input_dir / "views.csv", sep="|", index=False)
+-    pd.DataFrame(columns=["MindboxID", "КодНоменклатуры"]).to_csv(
+-        input_dir / "favorites.csv", sep="|", index=False
+-    )
+-    (input_dir / "weather.csv").write_text(
+-        "Дата| Дата |Город|ПогодныеУсловия|СредняяТемпература|КоличествоОсадков\n"
+-        "2025-01-15|2025-01-15|Москва|Ясно|1.5|0\n",
+-        encoding="utf-8",
+-    )
+ 
++def test_warn_declined_reports_cancellation(monkeypatch):
+     window = _window_with_training_values()
+-    window._store_city_map = {"STORE-1": "Москва"}
+     errors = _patch_training_ui(monkeypatch)
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_any_order_filters_set",
+-        lambda current_window: True,
+-    )
+-    monkeypatch.setattr(
+-        train_model_tab,
+-        "_get_current_order_filters",
+-        lambda current_window: {
+-            "date_from": "",
+-            "date_to": "",
+-            "kinds": [],
+-            "stores": [],
+-            "kind_mode": "В группе",
+-            "store_mode": "В группе",
+-        },
+-    )
+-
++    statuses = []
++    monkeypatch.setattr(train_model_tab, "set_status_ok", lambda window, message: statuses.append(message))
+     train_model_tab.start_training_process(window)
++    window.train_proc.finished.emit(130, _FakeProcess.ExitStatus.NormalExit)
++    assert statuses == ["Обучение отменено"] and not errors
++    assert window.start_train.enabled and not window._training_active
+ 
+-    process = _FakeProcess.instances[0]
+-    assert errors == []
+-    assert process.started is True
+-    assert any("повтор" in message.lower() for message in window.train_log.messages)
++
++def test_process_exit_while_warn_dialog_open_never_sends_confirmation(monkeypatch):
++    window = _window_with_training_values()
++    _patch_training_ui(monkeypatch)
++    def process_died(*args):
++        window.train_proc.finished.emit(1, _FakeProcess.ExitStatus.CrashExit)
++        return train_model_tab.QMessageBox.StandardButton.Yes
++    monkeypatch.setattr(train_model_tab.QMessageBox, "question", process_died)
++    train_model_tab.start_training_process(window)
++    _send_event(window, _preflight_event("WARN"))
++    assert window.train_proc.written == []
++    assert window.start_train.enabled and not window._training_active
++
++
++@pytest.mark.parametrize("level,accept", [("PASS", True), ("WARN", True), ("WARN", False), ("BLOCK", True)])
++def test_real_qprocess_canonical_training(tmp_path, monkeypatch, level, accept):
++    """Real Qt signals/stdin and real training, with all writes in the test directory."""
++    from datetime import datetime, timedelta, timezone
++    from PyQt6.QtCore import QEventLoop, QTimer
++    from PyQt6.QtWidgets import QApplication, QWidget
++    from Application.mindbox import canonical_storage as store
++    from Application.model import BPRMF as core
++    import torch
++
++    app = QApplication.instance() or QApplication([])
++    raw = tmp_path / "input_data/MindboxRaw"
++    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
++    until = since + timedelta(days=1)
++    actions = [
++        {"ids": {"mindboxId": str(index)}, "customer": {"ids": {"mindboxId": user}},
++         "actionTemplate": {"ids": {"systemName": "ProsmotrProdukta"}},
++         "dateTimeUtc": since.isoformat(), "creationDateTimeUtc": since.isoformat(),
++         "products": [{"ids": {"offline1C": item}}]}
++        for index, (user, item) in enumerate([("A", "123456"), ("B", "123457"), ("A", "123458")])
++    ]
++    if level != "PASS":
++        actions.append({**actions[0], "products": [] if level == "WARN" else [{"ids": {"offline1C": "999999"}}]})
++    with store.storage_lock(raw):
++        for name, key, records in (("customer_merges", "customerMerges", []),
++                                   ("actions", "customerActions", actions), ("orders", "orders", [])):
++            directory = raw / "staged" / name
++            directory.mkdir(parents=True)
++            (directory / f"{name}_part_001.json").write_text(json.dumps({key: records}), encoding="utf-8")
++            store.publish(raw, name, since, until, directory)
++    (tmp_path / "input_data/nomenclature.csv").write_text(
++        "КодНоменклатуры|Коллекция|СезонНоски\n123456|collection-a|winter\n"
++        "123457|collection-b|summer\n123458|collection-a|summer\n", encoding="utf-8-sig")
++    model_root = tmp_path / "model"
++    run = model_root / "runs" / ("1" * 32)
++    run.mkdir(parents=True)
++    (run / "bprmf.pt").write_bytes(b"previous checkpoint")
++    (model_root / "current.json").write_text(json.dumps({"generation": "1" * 32}), encoding="utf-8")
++    old_current = (model_root / "current.json").read_bytes()
++    # Test-only CLI wrapper redirects the production output root, never the GUI command's public options.
++    script = tmp_path / "scripts/mindbox_production_train.py"
++    script.parent.mkdir()
++    script.write_text(
++        f"import sys\nfrom pathlib import Path\nsys.path.insert(0, {str(train_model_tab.PROJECT_ROOT)!r})\n"
++        "from Application.model import mindbox_production_training as production\n"
++        "from Application.model import BPRMF as core\n"
++        "def forbidden(*args, **kwargs):\n    raise AssertionError('GUI must not use CSV preparation')\n"
++        "core.prepare_training_data_from_csv = forbidden\n"
++        f"production.MODEL_ROOT = Path({str(model_root)!r})\n"
++        f"production.REPORT_ROOT = Path({str(tmp_path / 'reports')!r})\n"
++        "from scripts.mindbox_production_train import main\nraise SystemExit(main())\n", encoding="utf-8")
++    monkeypatch.setattr(train_model_tab, "PROJECT_ROOT", tmp_path)
++    errors, successes = [], []
++    monkeypatch.setattr(train_model_tab, "set_status_processing", lambda *args: None)
++    monkeypatch.setattr(train_model_tab, "schedule_status_reset", lambda *args: None)
++    monkeypatch.setattr(train_model_tab, "set_status_error", lambda w, message: errors.append(message))
++    monkeypatch.setattr(train_model_tab, "set_status_ok", lambda w, message: successes.append(message))
++    monkeypatch.setattr(train_model_tab.QMessageBox, "question", lambda *args:
++                        train_model_tab.QMessageBox.StandardButton.Yes if accept else train_model_tab.QMessageBox.StandardButton.No)
++    window = QWidget()
++    for name, value in vars(_window_with_training_values()).items():
++        setattr(window, name, value)
++    window.epochs_input = _ValueWidget(1)
++    # Hidden production configuration now belongs to the existing config layer,
++    # rather than widgets removed by TRAIN-UI-01.
++    settings = tmp_path / 'user_settings'
++    settings.mkdir(exist_ok=True)
++    (settings / 'train_config.json').write_text(json.dumps({
++        'embedding_dim': 4, 'batch_size': 2, 'n_neg': 1, 'topk': 2}), encoding='utf-8')
++    loop = QEventLoop()
++    timeout = QTimer()
++    timeout.setSingleShot(True)
++    timeout.timeout.connect(loop.quit)
++    pulse = QTimer()
++    ticks = []
++    pulse.timeout.connect(lambda: ticks.append(True))
++    pulse.start(10)
++    try:
++        train_model_tab.start_training_process(window)
++        window.train_proc.finished.connect(loop.quit)
++        window.train_proc.errorOccurred.connect(loop.quit)
++        timeout.start(30000)
++        loop.exec()
++        assert not window._training_active, window.train_log.messages
++        assert ticks and window.start_train.enabled == (level != 'BLOCK')
++        assert window._train_preflight_result["quality"]["level"] == level
++        if level == "BLOCK" or not accept:
++            assert (model_root / "current.json").read_bytes() == old_current
++            assert window._train_publication_result is None
++            assert bool(errors) == (level == "BLOCK")
++            if not accept:
++                assert successes == ["Обучение отменено"]
++        else:
++            assert successes == ["Обучение завершено"] and not errors
++            maps, checkpoint = core._load_artifacts(str(model_root))
++            core._build_model_from_ckpt(checkpoint, torch.device("cpu"))
++            assert (len(maps["idx2user"]), len(maps["idx2item"])) == (2, 3)
++            assert window._train_publication_result["training_metrics"]["epochs_completed"] == 1
++            features = checkpoint["feat2idx"]
++            assert any("Коллекция" in key for key in features) and any("СезонНоски" in key for key in features)
++        assert (run / "bprmf.pt").read_bytes() == b"previous checkpoint"
++        assert not list((tmp_path / "user_settings").glob("train-run-*"))
++        assert not any(p.name in ("orders.csv", "views.csv", "favorites.csv") for p in tmp_path.rglob("*.csv"))
++    finally:
++        pulse.stop()
++        timeout.stop()
++        if window.train_proc.state() != train_model_tab.QProcess.ProcessState.NotRunning:
++            window.train_proc.kill()
++            window.train_proc.waitForFinished(5000)
++        window.close()
++        window.deleteLater()
++        app.processEvents()

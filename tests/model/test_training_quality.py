@@ -114,3 +114,98 @@ def test_invalid_diagnostics_rejected(prepared):
     with pytest.raises(ValueError):
         TrainingQualityDiagnostics(actions_view=2, malformed_mapped_actions=1,
                                   malformed_action_system_names={"ProsmotrProdukta": 2})
+
+
+@pytest.mark.parametrize('count,attempts,level', [
+    (0, 0, QualityLevel.PASS), (0, 10000, QualityLevel.PASS),
+    (20, 1206884, QualityLevel.WARN), (1, 10000, QualityLevel.WARN),
+    (1, 1000, QualityLevel.WARN), (1, 999, QualityLevel.BLOCK), (5, 10, QualityLevel.BLOCK),
+    (10000, 10000000, QualityLevel.WARN), (10001, 20000000, QualityLevel.BLOCK),
+    (5224, 8243333, QualityLevel.WARN), (111, 1610992, QualityLevel.WARN),
+])
+def test_catalog_miss_rate_and_absolute_guard(prepared, count, attempts, level):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        unresolved_products=count, unknown_candidate_products=count, invalid_product_ids=0,
+        product_resolution_attempts=attempts, actions_view=3000000, unmapped_actions=5000000))
+    assert report.level is level and report.training_allowed == (level is not QualityLevel.BLOCK)
+    assert report.metrics['product_resolution_attempts'] == attempts
+    assert report.metrics['unresolved_product_rate'] == (count / attempts if attempts else 0)
+    if count:
+        assert report.issues[0].code == 'UNRESOLVED_PRODUCT' and report.issues[0].rate == count / attempts
+    assert 'SECRET' not in repr(report)
+
+
+@pytest.mark.parametrize('invalid,unsupported,code', [(1, 0, 'INVALID_PRODUCT_ID'), (0, 1, 'UNSUPPORTED_PRODUCT_NAMESPACE')])
+def test_identity_contract_failures_block_even_microscopic_rate(prepared, invalid, unsupported, code):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        unresolved_products=invalid + unsupported, unsupported_products=unsupported,
+        unknown_candidate_products=0, invalid_product_ids=invalid, product_resolution_attempts=10000000))
+    assert report.level is QualityLevel.BLOCK and not report.training_allowed
+    assert any(issue.code == code and issue.level is QualityLevel.BLOCK for issue in report.issues)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('unknown_candidate_max_rate', -1), ('unknown_candidate_max_rate', 1.01),
+    ('unknown_candidate_max_rate', float('nan')), ('unknown_candidate_max_rate', float('inf')),
+    ('unknown_candidate_max_rate', True), ('unknown_candidate_max_rate', '0.0001'),
+    ('unknown_candidate_max_count', True), ('unknown_candidate_max_count', -1),
+    ('unknown_candidate_max_count', 1.5), ('unknown_candidate_max_count', '100'),
+])
+def test_catalog_policy_config_is_typed_and_finite(field, value):
+    with pytest.raises(ValueError):
+        TrainingQualityConfig(**{field: value})
+
+
+@pytest.mark.parametrize('values', [
+    {'product_resolution_attempts': 10},
+    {'product_resolution_attempts': True, 'unknown_candidate_products': 0, 'invalid_product_ids': 0},
+    {'product_resolution_attempts': 1, 'unknown_candidate_products': 2, 'invalid_product_ids': 0, 'unresolved_products': 2},
+    {'product_resolution_attempts': 10, 'unknown_candidate_products': 1, 'invalid_product_ids': 0},
+])
+def test_inconsistent_detailed_resolution_counters_rejected(values):
+    with pytest.raises(ValueError):
+        TrainingQualityDiagnostics(**values)
+
+
+def test_catalog_loss_does_not_dilute_or_block_productless_action_warning(prepared):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        actions_view=2732459, malformed_mapped_actions=2732459,
+        unresolved_products=20, unknown_candidate_products=20, invalid_product_ids=0,
+        product_resolution_attempts=1206884))
+    assert report.level is QualityLevel.WARN and report.training_allowed
+    assert report.metrics['malformed_rate'] == 1
+    assert report.metrics['unresolved_product_rate'] == 20 / 1206884
+    assert {issue.code for issue in report.issues} == {'MAPPED_ACTION_WITHOUT_PRODUCT', 'UNRESOLVED_PRODUCT'}
+
+
+@pytest.mark.parametrize('verified,level', [(False, QualityLevel.BLOCK), (True, QualityLevel.WARN)])
+def test_conflicts_warn_only_for_verified_first_in_period_policy(prepared, verified, level):
+    report = evaluate_training_quality(prepared, TrainingQualityDiagnostics(
+        orders_duplicate_conflicting=1553, first_snapshot_policy_verified=verified))
+    assert report.level is level
+    assert report.issues[0].count == 1553
+    assert report.metrics['first_snapshot_policy_verified'] is verified
+
+
+def test_warns_never_override_invalid_identity_or_prepared_data(prepared):
+    diagnostics = TrainingQualityDiagnostics(actions_view=100, malformed_mapped_actions=10,
+        orders_duplicate_conflicting=2, first_snapshot_policy_verified=True,
+        product_resolution_attempts=100000, unresolved_products=2,
+        unknown_candidate_products=1, invalid_product_ids=1)
+    report = evaluate_training_quality(prepared, diagnostics)
+    assert report.level is QualityLevel.BLOCK and not report.training_allowed
+    assert {i.code for i in report.issues if i.level is QualityLevel.WARN} == {
+        'CONFLICTING_ORDER_SNAPSHOTS', 'MAPPED_ACTION_WITHOUT_PRODUCT', 'UNRESOLVED_PRODUCT'}
+    assert any(i.code == 'INVALID_PRODUCT_ID' and i.level is QualityLevel.BLOCK for i in report.issues)
+    prepared.splits.train_weights[0] = float('nan')
+    assert any(i.code == 'INVALID_PREPARED_DATA' for i in evaluate_training_quality(prepared, diagnostics).issues)
+
+
+def test_policy_remains_configurable_and_proof_typed(prepared):
+    diagnostics = TrainingQualityDiagnostics(product_resolution_attempts=2000000,
+        unresolved_products=111, unknown_candidate_products=111, invalid_product_ids=0)
+    assert evaluate_training_quality(prepared, diagnostics).level is QualityLevel.WARN
+    assert evaluate_training_quality(prepared, diagnostics, TrainingQualityConfig(
+        unknown_candidate_max_count=100, unknown_candidate_max_rate=.0001)).level is QualityLevel.BLOCK
+    with pytest.raises(ValueError):
+        TrainingQualityDiagnostics(first_snapshot_policy_verified=1)

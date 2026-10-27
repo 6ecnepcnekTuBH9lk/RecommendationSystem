@@ -185,7 +185,7 @@ def current_batch(root):
         window, "0" * 64, components, True, MindboxSelectionConfig(**data["selection"]), "CANONICAL")
 
 
-def validate_interactions(name, directory, resolver, selection, *, cancelled=None, progress=None, store_collector=None):
+def validate_interactions(name, directory, resolver, selection, *, cancelled=None, progress=None, store_collector=None, diagnostics=None):
     """Shared streaming validation for API and manual raw; never filter the stored file."""
     from .adapters import adapt_order, adapt_action
     from .adapters.actions import adapt_action_system_name
@@ -193,17 +193,30 @@ def validate_interactions(name, directory, resolver, selection, *, cancelled=Non
     from Application.interactions import classify_action_system_name
     rules = selection.interaction_rules()
     count = 0
-    for raw in iter_export(name, input_dir=directory):
-        check_cancel(cancelled)
-        if name == "orders":
-            if store_collector is not None:
-                store_collector.add(raw)
-            adapt_order(raw, resolver, product_namespaces=selection.order_product_namespaces)
-        elif classify_action_system_name(adapt_action_system_name(raw), rules) is not None:
-            adapt_action(raw, resolver, product_namespaces=selection.action_product_namespaces)
-        count += 1
-        if progress and count % VALIDATION_PROGRESS_EVERY == 0:
-            progress(f"Проверка {name}: {count} записей")
+    records = iter_export(name, input_dir=directory) if diagnostics is None else diagnostics.records(part_files(directory, name))
+    try:
+        for raw in records:
+            check_cancel(cancelled)
+            try:
+                if name == "orders":
+                    if store_collector is not None:
+                        store_collector.add(raw)
+                    adapt_order(raw, resolver, product_namespaces=selection.order_product_namespaces)
+                elif classify_action_system_name(adapt_action_system_name(raw), rules) is not None:
+                    adapt_action(raw, resolver, product_namespaces=selection.action_product_namespaces)
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                if diagnostics is not None:
+                    diagnostics.fail(exc)
+                raise
+            count += 1
+            if progress and count % VALIDATION_PROGRESS_EVERY == 0:
+                progress(f"Проверка {name}: {count} записей")
+    finally:
+        close = getattr(records, "close", None)
+        if close is not None:
+            close()
     if progress:
         progress(f"Проверка {name} завершена → {count} записей")
 

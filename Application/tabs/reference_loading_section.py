@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 
 from Application.paths import ICONS_DIR
 from Application.files.reference_import import REFERENCE_TYPES
+from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING
 
 
 def create_csv_loading_section(aboba):
@@ -19,7 +20,7 @@ def create_csv_loading_section(aboba):
     section = QWidget()
     left_layout = QVBoxLayout(section)
     left_layout.setContentsMargins(0, 0, 0, 0)
-    left_layout.setSpacing(12)
+    left_layout.setSpacing(BLOCK_SPACING)
 
     # Заголовок CSV-раздела
     aboba.heading_load_data = QLabel("Загрузка справочников")
@@ -44,8 +45,8 @@ def create_csv_loading_section(aboba):
     aboba.reference_status_overrides = {}
 
     fields = QGridLayout()
-    fields.setVerticalSpacing(10)
-    fields.setHorizontalSpacing(12)
+    fields.setContentsMargins(0, 0, 0, 0)
+    fields.setSpacing(CONTROL_SPACING)
 
     button_specs = (
         (
@@ -162,7 +163,7 @@ def create_csv_loading_section(aboba):
         0,
         0,
     )
-    aboba.status_files_layout.setSpacing(0)
+    aboba.status_files_layout.setSpacing(CONTROL_SPACING)
 
     aboba.status_files_container = QWidget()
     aboba.status_files_container.setLayout(
@@ -177,7 +178,7 @@ def create_csv_loading_section(aboba):
         0,
         0,
     )
-    load_status_row.setSpacing(12)
+    load_status_row.setSpacing(BLOCK_SPACING)
 
     load_status_row.addWidget(
         aboba.btn_load,
@@ -218,14 +219,13 @@ def update_file_status(aboba):
 
     # Префикс
     aboba.prefix = QLabel("Статус загрузки:")
-    aboba.prefix.setStyleSheet("""padding: 0px 3px 0px 0px;""")
     aboba.status_files_layout.addWidget(aboba.prefix, 0, Qt.AlignmentFlag.AlignLeft)
 
     # Основная часть
     right_widget = QWidget()
     right_layout = QHBoxLayout()
     right_layout.setContentsMargins(0, 0, 0, 0)
-    right_layout.setSpacing(3)
+    right_layout.setSpacing(CONTROL_SPACING)
     right_widget.setLayout(right_layout)
 
     ok_path = str(ICONS_DIR / "success.png")
@@ -238,12 +238,13 @@ def update_file_status(aboba):
         exists = getattr(aboba, "reference_status_overrides", {}).get(kind, exists)
 
         block = QWidget()
+        block.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         block_l = QHBoxLayout()
         block_l.setContentsMargins(0, 0, 0, 0)
-        block_l.setSpacing(2)  # расстояние между словом и иконкой
+        block_l.setSpacing(COMPACT_SPACING)
         block.setLayout(block_l)
 
-        text_lbl = QLabel(title)
+        text_lbl = QLabel(title.strip())
 
         icon_lbl = QLabel()
         pix = QPixmap(ok_path if exists else fail_path)
@@ -259,6 +260,8 @@ def update_file_status(aboba):
 
         # Добавляем блок в правую часть
         right_layout.addWidget(block, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    right_layout.addStretch(1)
 
 
     # добавляем правую часть с растягивающим коэффициентом

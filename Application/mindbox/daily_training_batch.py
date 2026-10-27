@@ -406,19 +406,32 @@ def finalize_chunked_training_batch_prefix(client, *, state_path, raw_root, poll
             raise TrainingBatchError("Prefix finalization failed; source batch unchanged") from None
 
 
-def prepare_training_data_from_chunked_batch(batch, *, raw_root, catalog_path, train_config, diagnose=False):
+def prepare_training_data_from_chunked_batch(batch, *, raw_root, catalog_path, train_config, diagnose=False,
+                                           read_only=False):
     from Application.model.mindbox_training_preparation import _prepare_training_data_from_mindbox_sources
+    if type(read_only) is not bool:
+        raise ValueError("read_only must be boolean")
 
     if batch.source_kind == "CANONICAL":
-        from .canonical_storage import storage_lock
-        with storage_lock(raw_root):
+        from contextlib import nullcontext
+        from .canonical_storage import storage_lock, catalog as canonical_catalog, current_batch
+        with nullcontext() if read_only else storage_lock(raw_root):
             validate_chunked_training_batch(batch, raw_root=raw_root, require_complete=True)
             root = Path(raw_root).resolve()
-            return _prepare_training_data_from_mindbox_sources(
+            metadata = canonical_catalog(root)
+            files = [p for c in batch.components for p in part_files(root / c.export.relative_directory, c.name)]
+            files.append(Path(catalog_path))
+            before = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in files}
+            prepared = _prepare_training_data_from_mindbox_sources(
                 actions_export_dirs=tuple(root / c.export.relative_directory for c in batch.components if c.name == "actions"),
                 orders_export_dirs=tuple(root / c.export.relative_directory for c in batch.components if c.name == "orders"),
                 customer_merges_export_dir=root / batch.components[0].export.relative_directory,
-                catalog_path=catalog_path, train_config=train_config, diagnose=diagnose, selection=batch.selection)
+                catalog_path=catalog_path, train_config=train_config, diagnose=diagnose, selection=batch.selection,
+                interaction_window=batch.window)
+            if (canonical_catalog(root) != metadata or current_batch(root) != batch
+                    or any((p.stat().st_size, p.stat().st_mtime_ns) != value for p, value in before.items())):
+                raise TrainingBatchError("Canonical input changed during preparation")
+            return prepared
 
     validate_chunked_training_batch(batch, raw_root=raw_root, require_complete=True)
     root = Path(raw_root).resolve()
@@ -426,4 +439,5 @@ def prepare_training_data_from_chunked_batch(batch, *, raw_root, catalog_path, t
         return tuple(_directory(root, c.export) for c in batch.components if c.name == name)
     return _prepare_training_data_from_mindbox_sources(actions_export_dirs=directories("actions"),
         orders_export_dirs=directories("orders"), customer_merges_export_dir=directories("customer_merges")[0],
-        catalog_path=catalog_path, train_config=train_config, diagnose=diagnose, selection=batch.selection)
+        catalog_path=catalog_path, train_config=train_config, diagnose=diagnose, selection=batch.selection,
+        interaction_window=batch.window)

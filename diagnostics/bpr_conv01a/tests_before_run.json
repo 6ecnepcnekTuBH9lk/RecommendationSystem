@@ -1,0 +1,22 @@
+{
+  "status": "passed",
+  "sys_executable": "C:\\Users\\Ermolenko.i\\PycharmProjects\\\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f\u0421\u0438\u0441\u0442\u0435\u043c\u0430\\.venv312\\Scripts\\python.exe",
+  "torch_version": "2.5.1+cu124",
+  "passed_counts": {
+    "full_pytest": 2061,
+    "evaluation_model": 690,
+    "targeted": 39
+  },
+  "full_pytest_warnings": 112,
+  "ruff": "passed",
+  "git_diff_check": "passed",
+  "source_sha256": {
+    "Application/model/BPRMF.py": "5c1e97a8182684f73bee3a330604615be9cdb6eefdf055c576af4a684bf27645",
+    "scripts/run_bpr_convergence.py": "9b289f6aa344a0c5705f6ab177fc6c40afee709eb3263b911e437bee775287bf",
+    "tests/evaluation/test_bpr_convergence.py": "389f899f95c2e09d3f0a60485621d54ee5a02dc91a7ce90e272249a5e2f58658",
+    "Application/evaluation/bpr.py": "a620a2a5b91103390241a941c06b1a35cafea284fa7982b4b976dff8454e2a02",
+    "Application/evaluation/ranking.py": "186136674692138223695e03016ca466439453c9eac5a794cc45ce32fc57be51",
+    "Application/evaluation/temporal.py": "188de6a3cdc53f5837b11e20b782a489c607afe6c2565c44fc9f178edae4cee6",
+    "Application/evaluation/experiments/bpr_weights.py": "34f1c9f463778afee6e6a53632e1db29fc0be6a6fd4c1e0e2caaf9da4cb0186b"
+  }
+}

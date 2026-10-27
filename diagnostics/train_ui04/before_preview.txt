@@ -1,0 +1,1 @@
+Saved four synthetic previews; no child process/training/model writes

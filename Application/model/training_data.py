@@ -85,5 +85,8 @@ def validate_prepared_data(data: PreparedBprData) -> None:
         if (not isinstance(actual, set) or any(not isinstance(item, (int, np.integer))
                 or isinstance(item, (bool, np.bool_)) for item in actual) or actual != wanted):
             raise PreparedDataError("user_pos_train must match train pairs")
+    for user, item in zip(splits.eval_users, splits.eval_items):
+        if int(item) in splits.user_pos_train[int(user)]:
+            raise PreparedDataError("Evaluation targets must be unseen in training")
     if len(pairs) == 0:
         raise PreparedDataError("Training set is empty")

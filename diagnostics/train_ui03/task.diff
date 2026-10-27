@@ -1,0 +1,1079 @@
+--- TRAIN-UI-02/Application/statistics_charts.py
++++ TRAIN-UI-03/Application/statistics_charts.py
+@@ -18,6 +18,45 @@
+ MAX_PRODUCT_LABEL_WIDTH = 420
+ PRODUCT_LABEL_PADDING = 16
+ NEUTRAL = {False: '#8A8F98', True: '#9BA3AD'}
++
++
++def style_chart(chart, secondary=False):
++    """Shared Material palette for native statistics and live training charts."""
++    surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
++    background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
++    foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
++    accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
++    dark = surface.lightness() < 128
++    chart.setBackgroundBrush(background)
++    chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
++    chart.setPlotAreaBackgroundVisible(False)
++    chart.setTitleBrush(foreground)
++    font = QFont(QApplication.font())
++    font.setPointSizeF(10)
++    chart.setTitleFont(font)
++    chart.legend().setFont(font)
++    chart.legend().setLabelColor(foreground)
++    grid = QColor(foreground)
++    grid.setAlpha(40)
++    for axis in chart.axes():
++        axis.setLabelsBrush(foreground)
++        axis.setTitleBrush(foreground)
++        axis.setLinePen(QPen(Qt.PenStyle.NoPen))
++        axis.setGridLinePen(QPen(grid, 1))
++        axis.setMinorGridLineVisible(False)
++    for i, series in enumerate(chart.series()):
++        color = accent if i == 0 and not secondary else QColor(SECONDARY[dark])
++        if isinstance(series, QLineSeries):
++            series.setPen(QPen(color, 2))
++        elif isinstance(series, QPieSeries):
++            for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
++                piece.setBrush(fill)
++                piece.setPen(QPen(background, 1))
++        else:
++            for bars in series.barSets():
++                bars.setColor(color)
++                bars.setBorderColor(color)
++    return background, foreground, accent
+ 
+ 
+ def exact_number(value):
+@@ -369,16 +408,8 @@
+                         area.top() + (index + .5) * height - bounds.height() / 2)
+ 
+     def apply_theme(self):
+-        surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
+-        background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
+-        foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
+-        accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
+-        dark = surface.lightness() < 128
+         chart = self.chart()
+-        chart.setBackgroundBrush(background)
+-        chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
+-        chart.setPlotAreaBackgroundVisible(False)
+-        chart.setTitleBrush(foreground)
++        background, foreground, accent = style_chart(chart, self.data.secondary)
+         if self.data.kind == 'horizontal':
+             self._update_categories()
+         for item in self._product_labels:
+@@ -387,30 +418,6 @@
+             item.setBrush(foreground)
+         for item in self._bar_labels:
+             item.setDefaultTextColor(foreground)
+-        font = QFont(QApplication.font())
+-        font.setPointSizeF(10)
+-        chart.setTitleFont(font)
+-        chart.legend().setFont(font)
+-        chart.legend().setLabelColor(foreground)
+-        grid = QColor(foreground)
+-        grid.setAlpha(40)
+-        for axis in chart.axes():
+-            axis.setLabelsBrush(foreground)
+-            axis.setLinePen(QPen(Qt.PenStyle.NoPen))
+-            axis.setGridLinePen(QPen(grid, 1))
+-            axis.setMinorGridLineVisible(False)
+-        for i, series in enumerate(chart.series()):
+-            color = accent if i == 0 and not self.data.secondary else QColor(SECONDARY[dark])
+-            if isinstance(series, QLineSeries):
+-                series.setPen(QPen(color, 2))
+-            elif isinstance(series, QPieSeries):
+-                for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
+-                    piece.setBrush(fill)
+-                    piece.setPen(QPen(background, 1))
+-            else:
+-                for bars in series.barSets():
+-                    bars.setColor(color)
+-                    bars.setBorderColor(color)
+         self.tooltip.setStyleSheet(f'QLabel {{background: {background.name()}; color: {foreground.name()}; '
+                                   f'border: 1px solid {accent.name()}; border-radius: 5px; padding: 7px;}}')
+ 
+--- TRAIN-UI-02/Application/evaluation/experiments/gui_run.py
++++ TRAIN-UI-03/Application/evaluation/experiments/gui_run.py
+@@ -4,6 +4,7 @@
+ import math
+ import os
+ import time
++import torch
+ 
+ from Application.evaluation.bpr import BprTemporalData, evaluate_bpr_snapshot, prepare_bpr_snapshot
+ from Application.interactions import InteractionType
+@@ -15,6 +16,25 @@
+ 
+ class BenchmarkUnavailable(ValueError):
+     """Safe readiness failure discovered after actual canonical preparation."""
++
++
++def checkpoint_epochs(epochs):
++    """Deterministic budget-only policy; final epoch is always observed."""
++    if type(epochs) is not int or not 1 <= epochs <= 10000:
++        raise ValueError("Invalid epoch budget")
++    if epochs <= 10:
++        return tuple(range(1, epochs + 1))
++    return tuple(sorted({1, *((epochs * fraction + 5) // 10 for fraction in (1, 2, 4, 6, 8, 10))}))
++
++
++@torch.no_grad()
++def _checkpoint_score(model, data, temporal, device):
++    require_validation(data.snapshot, temporal)
++    versions, mode = tuple(p._version for p in model.parameters()), model.training
++    score = evaluate_bpr_snapshot(model, data, 10, device)
++    if versions != tuple(p._version for p in model.parameters()) or mode != model.training:
++        raise RuntimeError("Validation must not mutate model state or mode")
++    return score
+ 
+ 
+ def gui_config(values):
+@@ -50,11 +70,24 @@
+     check_cancel()
+     core._set_seed(cfg.seed)
+     started = time.monotonic()
++    scoring_seconds = 0.
++    checkpoints = checkpoint_epochs(cfg.epochs)
+ 
+     def observer(model, epoch):
++        nonlocal scoring_seconds
+         emit({"stage": "epoch", "epoch": epoch.epoch, "epochs": cfg.epochs, "loss": epoch.loss,
+-              "device": str(device), "training_seconds": time.monotonic() - started})
++              "device": str(device), "training_seconds": time.monotonic() - started - scoring_seconds})
+         check_cancel()
++        # Reuse the trainer's CONV-01A observer. No checkpoint selection or optimizer restart.
++        # The final point reuses final validation below, avoiding a duplicate full-catalog scan.
++        if epoch.epoch in checkpoints and epoch.epoch != cfg.epochs:
++            emit({"stage": "validation", "epoch": epoch.epoch, "device": str(device)})
++            checkpoint_start = time.monotonic()
++            score = _checkpoint_score(model, data, temporal, device)
++            scoring_seconds += time.monotonic() - checkpoint_start
++            check_cancel()
++            emit({"stage": "validation_checkpoint", "epoch": epoch.epoch, "ndcg": score.ndcg,
++                  "recall": score.recall, "device": str(device)})
+ 
+     # Trainer diagnostics are process-wide and may contain raw identifiers.
+     with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
+@@ -62,14 +95,18 @@
+     check_cancel()
+     if observed.epochs_completed != cfg.epochs or observed.early_stopped:
+         raise ValueError("Incomplete epoch budget")
+-    training_seconds = time.monotonic() - started
++    training_seconds = time.monotonic() - started - scoring_seconds
+     emit({"stage": "validation", "device": str(device)})
+     metrics = {}
+-    for label, kind in (("overall", None), *((kind.value, kind) for kind in InteractionType)):
+-        selected = snapshot if kind is None else replace(snapshot, cases=tuple(c for c in snapshot.cases if c.interaction_type is kind))
+-        for k in KS:
+-            check_cancel()
+-            score = evaluate_bpr_snapshot(model, BprTemporalData(selected, data.training), k, device)
+-            metrics.setdefault(label, {})[str(k)] = {"cases": score.evaluated_users, "ndcg": score.ndcg, "recall": score.recall}
++    with torch.no_grad():
++        for label, kind in (("overall", None), *((kind.value, kind) for kind in InteractionType)):
++            selected = snapshot if kind is None else replace(snapshot, cases=tuple(c for c in snapshot.cases if c.interaction_type is kind))
++            for k in KS:
++                check_cancel()
++                score = evaluate_bpr_snapshot(model, BprTemporalData(selected, data.training), k, device)
++                metrics.setdefault(label, {})[str(k)] = {"cases": score.evaluated_users, "ndcg": score.ndcg, "recall": score.recall}
+     check_cancel()
++    final = metrics["overall"]["10"]
++    emit({"stage": "validation_checkpoint", "epoch": cfg.epochs, "ndcg": final["ndcg"],
++          "recall": final["recall"], "device": str(device)})
+     return {**dataset, "epochs_completed": observed.epochs_completed, "training_seconds": training_seconds, "metrics": metrics}
+--- TRAIN-UI-02/Application/tabs/train_model_tab.py
++++ TRAIN-UI-03/Application/tabs/train_model_tab.py
+@@ -13,12 +13,13 @@
+ from PyQt6.QtGui import QIcon
+ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
+                              QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QFormLayout,
+-                             QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QFrame)
++                             QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QFrame, QSizePolicy)
+ from Application.settings.settings_and_filter import get_selected_list_values
+ from Application.settings.set_status import (set_status_processing, schedule_status_reset,
+                                              set_status_error, set_status_ok)
+ from Application.evaluation.experiments.gui_history import ExperimentHistory, now, clean_record, RESEARCH_FIXED
+ from Application.mindbox.canonical_storage import atomic_json
++from Application.training_charts import TrainingChart
+ from .training_workflow import input_values, metadata_readiness, production_config
+ 
+ 
+@@ -42,18 +43,24 @@
+     tab = QWidget()
+     root = QVBoxLayout(tab)
+     root.setContentsMargins(0, 0, 0, 0)
+-    root.setSpacing(6)
++    root.setSpacing(0)
+     top = QHBoxLayout()
+-    top.setSpacing(10)
++    top.setContentsMargins(0, 0, 0, 0)
++    top.setSpacing(0)
+     root.addLayout(top, 3)
+-    left, right = QVBoxLayout(), QVBoxLayout()
+-    top.addLayout(left, 4)
++    left_panel, right_panel = QWidget(), QWidget()
++    left_panel.setObjectName('trainingLeftPanel')
++    right_panel.setObjectName('trainingChartsPanel')
++    left, right = QVBoxLayout(left_panel), QVBoxLayout(right_panel)
++    left.setContentsMargins(8, 0, 8, 8)
++    right.setContentsMargins(8, 0, 8, 8)
++    top.addWidget(left_panel, 4)
+     separator = QFrame()
+     separator.setObjectName('vSeparator')
+     separator.setFixedWidth(1)
+     separator.setFrameShape(QFrame.Shape.NoFrame)
+     top.addWidget(separator)
+-    top.addLayout(right, 6)
++    top.addWidget(right_panel, 7)
+ 
+     def heading(layout, text):
+         label = QLabel(text)
+@@ -84,43 +91,44 @@
+         widget.setObjectName(name)
+         setattr(aboba, name, widget)
+         form.addRow(label + ':', widget)
+-    heading(left, 'Данные для обучения')
+-    aboba.training_readiness = QLabel()
+-    aboba.training_readiness.setWordWrap(True)
+-    left.addWidget(aboba.training_readiness)
+-    aboba.training_data_counts = QLabel()
+-    aboba.training_data_counts.setTextFormat(Qt.TextFormat.PlainText)
+-    left.addWidget(aboba.training_data_counts)
+     aboba.training_reason = QLabel()
+     aboba.training_reason.setWordWrap(True)
+-    left.addStretch()
+-    left.addWidget(aboba.training_reason)
+     aboba.start_train = QPushButton(QIcon(str(ICONS_DIR / 'start_training.png')), 'Начать эксперимент')
+     aboba.start_train.setIconSize(QSize(17, 17))
+     aboba.start_train.clicked.connect(lambda: start_training_process(aboba))
+-    aboba.cancel_train = QPushButton('Отменить')
++    aboba.cancel_train = QPushButton(QIcon(str(ICONS_DIR / 'failure.png')), 'Отменить')
++    aboba.cancel_train.setIconSize(QSize(17, 17))
+     aboba.cancel_train.setEnabled(False)
+     aboba.cancel_train.clicked.connect(lambda: cancel_training(aboba))
+     buttons = QHBoxLayout()
+-    buttons.addWidget(aboba.start_train, 3)
+-    buttons.addWidget(aboba.cancel_train, 1)
+-    left.addLayout(buttons)
+-
+-    aboba.label_69 = heading(right, 'Процесс обучения')
++    buttons.setContentsMargins(0, 0, 0, 0)
++    for button, stretch in ((aboba.start_train, 3), (aboba.cancel_train, 1)):
++        button.setMinimumHeight(36)
++        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
++        buttons.addWidget(button, stretch, alignment=Qt.AlignmentFlag.AlignVCenter)
++
++    aboba.label_69 = heading(left, 'Процесс обучения')
+     aboba.training_progress_text = QLabel('Ожидание запуска')
+     aboba.training_progress_text.setWordWrap(True)
+     aboba.training_progress_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+     aboba.training_progress = QProgressBar()
+     aboba.training_progress.setRange(0, 50)
+     aboba.training_progress.setValue(0)
+-    right.addWidget(aboba.training_progress_text)
+-    right.addWidget(aboba.training_progress)
++    left.addWidget(aboba.training_progress_text)
++    left.addWidget(aboba.training_progress)
+     aboba.train_log = QTextEdit()
+     aboba.train_log.setAcceptRichText(False)
+     aboba.train_log.setReadOnly(True)
+     aboba.train_log.setPlaceholderText('Логи подготовки, обучения и оценки появятся здесь…')
+     aboba.train_log.document().setMaximumBlockCount(5000)
+-    right.addWidget(aboba.train_log, 1)
++    left.addWidget(aboba.train_log, 1)
++    left.addWidget(aboba.training_reason)
++    left.addLayout(buttons)
++    heading(right, 'Графики обучения')
++    aboba.training_loss_chart = TrainingChart('Ошибка обучения', ('Ошибка',), 'Ошибка')
++    aboba.training_metric_chart = TrainingChart('Метрики валидации', ('NDCG@10', 'Recall@10'), 'Значение')
++    right.addWidget(aboba.training_loss_chart, 1)
++    right.addWidget(aboba.training_metric_chart, 1)
+     separator = QFrame()
+     separator.setObjectName('hSeparator')
+     separator.setFixedHeight(1)
+@@ -128,7 +136,7 @@
+     root.addWidget(separator)
+     history = QVBoxLayout()
+     history.setSpacing(4)
+-    history.setContentsMargins(0, 0, 0, 0)
++    history.setContentsMargins(8, 4, 8, 0)
+     root.addLayout(history, 2)
+     heading(history, 'История экспериментов')
+     aboba.history_notice = QLabel()
+@@ -142,7 +150,7 @@
+     aboba.experiment_history.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+     aboba.experiment_history.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+     aboba.experiment_history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+-    aboba.experiment_history.horizontalHeader().setStretchLastSection(False)
++    aboba.experiment_history.horizontalHeader().setStretchLastSection(True)
+     aboba.experiment_history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+     for column, width in enumerate((180, 85, 95, 85, 70, 105, 105, 180, 170, 90, 100, 110)):
+         aboba.experiment_history.setColumnWidth(column, width)
+@@ -213,39 +221,34 @@
+     aboba.start_train.setEnabled(not blocker)
+     if hasattr(aboba, 'training_reason'):
+         aboba.training_reason.setText(blocker)
+-        aboba.training_reason.setVisible(bool(blocker))
+-        _render_data(aboba)
++        aboba.training_reason.setVisible(bool(blocker) and not active)
++        aboba.training_metric_chart.setVisible(research)
+         aboba.cancel_train.setEnabled(active and not getattr(aboba, '_cancel_requested', False) and not getattr(aboba, '_publishing', False))
+         for widget in (aboba.training_mode, aboba.w_purchase, aboba.w_favorite, aboba.w_view_item, aboba.epochs_input):
+             widget.setEnabled(not active)
+     return not blocker
+ 
+ 
+-def _render_data(aboba):
+-    """Render metadata readiness and already received preparation aggregates only."""
+-    if not hasattr(aboba, 'training_data_counts'):
+-        return
+-    ready, reason, revision = aboba._training_ready
+-    cached = getattr(aboba, '_training_data_by_mode', {}).get(_research(aboba), {})
+-    counts = cached.get('counts', {}) if ready and cached.get('revision') == revision else {}
+-    state = cached.get('state', 'ready') if counts else 'ready'
+-    if not ready:
+-        state_text = ('Ошибка проверки данных' if any(word in reason.lower() for word in ('ошиб', 'поврежд', 'corrupt'))
+-                      else 'Данные для обучения отсутствуют')
+-    else:
+-        state_text = {'ready': 'Данные готовы', 'using': 'Данные используются в обучении',
+-                      'used': 'Данные использованы'}[state]
+-    aboba.training_readiness.setText(state_text)
++def _log_data_counts(aboba, counts, prepared=False):
++    if not counts:
++        return
+     labels = [('interactions', 'Взаимодействий'), ('users', 'Пользователей'), ('items', 'Товаров')]
+-    if 'pairs' in counts:
++    if prepared:
+         labels.append(('pairs', 'Обучающих пар'))
+-    aboba.training_data_counts.setText('\n'.join(
++    signature = tuple((key, counts.get(key)) for key, _ in labels)
++    logged = getattr(aboba, '_counts_logged', {})
++    if logged.get(prepared) == signature:
++        return
++    logged[prepared] = signature
++    aboba._counts_logged = logged
++    title = 'Подготовка данных завершена.\nДля обучения подготовлено:' if prepared else 'Доступные данные:'
++    aboba.train_log.append(title + '\n' + '\n'.join(
+         f'{label}: {format(counts[key], ",").replace(",", " ") if key in counts else "—"}' for key, label in labels))
+ 
+ 
+-def _receive_data_counts(aboba, event, state='ready'):
++def _receive_data_counts(aboba, event, state='ready', log=None):
+     """No raw reads: both runners deliver counts from their normal preparation."""
+-    if not hasattr(aboba, 'training_data_counts'):
++    if not hasattr(aboba, '_training_ready'):
+         return
+     source = event.get('dataset', event)
+     names = {'interactions': ('training_events', 'bpr_events'), 'users': ('training_users', 'users'),
+@@ -264,7 +267,21 @@
+         previous = {}
+     cache[research] = {'revision': revision, 'counts': {**previous.get('counts', {}), **counts}, 'state': state}
+     aboba._training_data_by_mode = cache
+-    _render_data(aboba)
++    if log is not None and counts:
++        _log_data_counts(aboba, cache[research]['counts'], prepared=log == 'prepared')
++
++
++def _set_training_phase(aboba, stage):
++    timer = getattr(aboba, '_status_reset_timer', None)
++    if timer is not None:
++        timer.stop()
++    phases = {'loading': 'Загрузка данных...', 'preparation': 'Подготовка данных...',
++              'training': 'Выполняется обучение...', 'epoch': 'Выполняется обучение...',
++              'validation': 'Оценка модели...', 'publication': 'Публикация модели...',
++              'preflight': 'Проверка данных перед обучением...'}
++    text = 'Отмена: ожидаем завершения процесса...' if getattr(aboba, '_cancel_requested', False) else phases.get(stage)
++    if text:
++        set_status_processing(aboba, text)
+ 
+ 
+ def _confirm_production(aboba, values):
+@@ -307,18 +324,27 @@
+     aboba._progress_event = {}
+     aboba.train_log.clear()
+     aboba.train_log.append('Новый эксперимент' if research else 'Новое обучение рабочей модели')
+-    if hasattr(aboba, 'training_data_counts'):
+-        # Each configuration can produce a different number of positive pairs.
+-        if hasattr(aboba, '_training_data_by_mode'):
+-            aboba._training_data_by_mode.pop(research, None)
+-        _render_data(aboba)
++    aboba._counts_logged = {}
++    aboba.train_log.append('Проверка данных...\nДанные готовы.')
++    cached = getattr(aboba, '_training_data_by_mode', {}).get(research, {})
++    counts = cached.get('counts', {}) if cached.get('revision') == aboba._training_ready[2] else {}
++    if counts:
++        _log_data_counts(aboba, counts)
++    else:
++        aboba.train_log.append('Точные объёмы будут определены при подготовке.')
++    # Each configuration may produce different training pairs.
++    if hasattr(aboba, '_training_data_by_mode'):
++        aboba._training_data_by_mode.pop(research, None)
++    if hasattr(aboba, 'training_loss_chart'):
++        aboba.training_loss_chart.reset(values['epochs'])
++        aboba.training_metric_chart.reset(values['epochs'])
+     if hasattr(aboba, 'training_progress'):
+         aboba.training_progress.setRange(0, values['epochs'])
+         aboba.training_progress.setValue(0)
+         _update_progress(aboba)
+         aboba._training_timer.start()
+     refresh_training_state(aboba, metadata=False)
+-    set_status_processing(aboba, 'Проверка данных перед обучением...')
++    _set_training_phase(aboba, 'preflight')
+     if research:
+         aboba._research_record = {'run_id': uuid.uuid4().hex, 'started_at': now(), 'status': 'running',
+                                   'hyperparameters': {**RESEARCH_FIXED, **values}, 'epochs_requested': values['epochs'], 'epochs_completed': 0}
+@@ -377,6 +403,7 @@
+     aboba._cancel_requested = True
+     aboba.train_proc.write(b'NO\n')
+     refresh_training_state(aboba, metadata=False)
++    _set_training_phase(aboba, 'epoch')
+     aboba.train_log.append('Отмена запрошена. Ожидаем завершения процесса…')
+     process = aboba.train_proc
+ 
+@@ -502,7 +529,8 @@
+     phase = {'loading': 'Загрузка данных', 'preparation': 'Подготовка данных', 'training': 'Обучение',
+              'validation': 'Валидация', 'publication': 'Публикация', 'finished': 'Завершено',
+              'cancelled': 'Отменено', 'failed': 'Ошибка', 'interrupted': 'Прервано'}.get(stage, 'Обучение')
+-    text = f'Эпоха {epoch} из {epochs}' if stage == 'epoch' else f'{phase} · {epoch} из {epochs} эпох'
++    text = (f'Эпоха {epoch} из {epochs}' if stage == 'epoch' else f'{phase} · {epoch} из {epochs} эпох'
++            if stage in {'finished', 'cancelled', 'failed', 'interrupted', 'training'} else phase)
+     if stage in {'epoch', 'training'} and loss is not None:
+         text += f' · Ошибка: {loss:.6f}'.replace('.', ',')
+     aboba.training_progress_text.setText(text + f' · Время: {_duration(elapsed)} · {(event.get("device") or "—").upper()}')
+@@ -548,11 +576,26 @@
+             aboba._research_record.update(record)
+             _save_history(aboba, aboba._research_record)
+         return
++    if stage == 'validation_checkpoint':
++        if getattr(aboba, '_run_is_research', False):
++            if hasattr(aboba, 'training_metric_chart'):
++                for name, key in (('NDCG@10', 'ndcg'), ('Recall@10', 'recall')):
++                    aboba.training_metric_chart.add_point(name, event.get('epoch'), event.get(key))
++            aboba.train_log.append((f'Валидация после эпохи {event["epoch"]}: '
++                                   f'NDCG@10: {event["ndcg"]:.6f} · Recall@10: {event["recall"]:.6f}').replace('.', ','))
++            if event['epoch'] < aboba.epochs_input.value():
++                aboba._progress_event.update(stage='epoch')
++                _update_progress(aboba)
++                _set_training_phase(aboba, 'epoch')
++        return
+     if stage in {'loading', 'preparation', 'training', 'epoch', 'validation', 'publication', 'timing'}:
+         aboba._progress_event.update(event)
+         if stage in {'preparation', 'training'}:
+-            _receive_data_counts(aboba, event, 'using' if stage == 'training' else 'ready')
++            _receive_data_counts(aboba, event, 'using' if stage == 'training' else 'ready', log='prepared')
++        if stage == 'epoch' and hasattr(aboba, 'training_loss_chart'):
++            aboba.training_loss_chart.add_point('Ошибка', event.get('epoch'), event.get('loss'))
+         _update_progress(aboba)
++        _set_training_phase(aboba, stage)
+         if getattr(aboba, '_run_is_research', False):
+             if stage == 'epoch':
+                 aboba._research_record['epochs_completed'] = event['epoch']
+@@ -562,9 +605,9 @@
+             aboba._research_record['device'] = event.get('device', aboba._research_record.get('device', 'unknown'))
+             if stage in {'training', 'epoch'}:
+                 _save_history(aboba, aboba._research_record)
+-        aboba.train_log.append(f'Эпоха {event["epoch"]}: Ошибка: {event["loss"]:.6f}'.replace('.', ',') if stage == 'epoch' else
+-                               {'loading': 'Загрузка данных…', 'preparation': 'Подготовка данных…', 'training': 'Обучение…',
+-                                'validation': 'Оценка модели…', 'publication': 'Публикация модели…', 'timing': 'Обучение и оценка завершены.'}[stage])
++        aboba.train_log.append((f'Эпоха {event["epoch"]} из {event["epochs"]}. Ошибка: ' + f'{event["loss"]:.6f}'.replace('.', ',')) if stage == 'epoch' else
++                               {'loading': 'Загрузка данных…', 'preparation': 'Подготовка данных…', 'training': 'Обучение начато.',
++                                'validation': 'Оценка модели…', 'publication': 'Публикация модели…', 'timing': 'Завершение запуска…'}[stage])
+         return
+     if stage == 'research_finished':
+         aboba._train_research_result = event['result']
+@@ -579,7 +622,7 @@
+     if stage != 'preflight':
+         return
+     aboba._train_preflight_result = event
+-    _receive_data_counts(aboba, event)
++    _receive_data_counts(aboba, event, log='available')
+     quality = event.get('quality')
+     aboba.train_log.append('Проверка данных: ' + {'PASS': 'Допущено', 'WARN': 'Предупреждение', 'BLOCK': 'Заблокировано'}.get(
+         (quality or {}).get('level'), 'Ошибка'))
+@@ -606,7 +649,7 @@
+             return
+         process.write(b'YES\n' if answer == QMessageBox.StandardButton.Yes and not aboba._cancel_requested else b'NO\n')
+     else:
+-        set_status_processing(aboba, 'Идёт обучение модели...')
++        _set_training_phase(aboba, 'preflight')
+ 
+ 
+ def _release_training(aboba):
+@@ -622,6 +665,7 @@
+                 aboba.train_log.append('Не удалось удалить временные параметры запуска.')
+             setattr(aboba, name, None)
+     refresh_training_state(aboba)
++    schedule_status_reset(aboba, 5)
+ 
+ 
+ def _finish_research(aboba, exit_code, exit_status, failed_start=False):
+@@ -658,6 +702,9 @@
+     if error == QProcess.ProcessError.FailedToStart and getattr(aboba, '_training_active', False):
+         if getattr(aboba, '_run_is_research', False):
+             _finish_research(aboba, 1, QProcess.ExitStatus.CrashExit, failed_start=True)
++        elif hasattr(aboba, 'training_progress'):
++            aboba._progress_event.update(stage='failed', total_seconds=time.monotonic() - aboba._run_started_clock)
++            _update_progress(aboba)
+         _release_training(aboba)
+         set_status_error(aboba, 'Не удалось запустить обучение')
+         aboba.train_log.append('Не удалось запустить процесс обучения модели.')
+@@ -706,7 +753,6 @@
+         _receive_data_counts(aboba, summary, 'ready')
+     _log_result(aboba, summary, research=False)
+     _release_training(aboba)
+-    schedule_status_reset(aboba, 5)
+ 
+ 
+ def _get_store_city_map(aboba) -> dict:
+--- TRAIN-UI-02/tests/evaluation/test_gui_run.py
++++ TRAIN-UI-03/tests/evaluation/test_gui_run.py
+@@ -70,10 +70,12 @@
+     assert scored == [5, 10, 20] * 4
+     assert 'ndcg' in result['metrics']['overall']['10'] and 'recall' in result['metrics']['PURCHASE']['20']
+     assert current.read_bytes() == b'production sentinel'
+-    assert [p['stage'] for p in progress] == ['preparation', 'training', 'epoch', 'validation']
++    assert [p['stage'] for p in progress] == ['preparation', 'training', 'epoch', 'validation', 'validation_checkpoint']
+     assert progress[1]['training_events'] == len(protocol.validation.history)
+     assert progress[1]['training_events'] == 22  # November/December targets are excluded.
+     assert 'training_events' not in result  # Presentation event does not change persisted result schema.
++    assert progress[-1]['ndcg'] == result['metrics']['overall']['10']['ndcg']
++    assert progress[-1]['recall'] == result['metrics']['overall']['10']['recall']
+ 
+ 
+ def test_test_snapshot_rejected_before_training_or_scoring(fixed_events, monkeypatch):
+@@ -91,6 +93,91 @@
+     monkeypatch.setattr(runner.core, 'train_prepared_data_with_metrics', lambda *a, **kw: pytest.fail('Empty benchmark training'))
+     with pytest.raises(runner.BenchmarkUnavailable):
+         runner.run_validation(snapshot, temporal, runner.gui_config(values()), torch.device('cpu'), lambda _: None, lambda: None)
++
++
++@pytest.mark.parametrize('epochs,expected', [(1, (1,)), (3, (1, 2, 3)), (10, tuple(range(1, 11))),
++                    (11, (1, 2, 4, 7, 9, 11)), (50, (1, 5, 10, 20, 30, 40, 50)),
++                    (200, (1, 20, 40, 80, 120, 160, 200)), (10000, (1, 1000, 2000, 4000, 6000, 8000, 10000))])
++def test_gui_sparse_checkpoint_schedule(epochs, expected):
++    assert runner.checkpoint_epochs(epochs) == expected
++    assert expected[-1] == epochs and tuple(sorted(set(expected))) == expected
++
++
++@pytest.mark.parametrize('epochs', [0, -1, 10001, 1.5, True])
++def test_gui_sparse_checkpoint_rejects_invalid_budget(epochs):
++    with pytest.raises(ValueError):
++        runner.checkpoint_epochs(epochs)
++
++
++def test_sparse_observation_preserves_bit_exact_final_state_and_optimizer(fixed_events, monkeypatch):
++    from Application.evaluation.bpr import prepare_bpr_snapshot
++    from Application.model.bpr_preparation import BprWeightConfig
++    monkeypatch.setattr(torch, 'set_num_interop_threads', lambda n: None)
++    monkeypatch.setattr(runner.core, '_save_artifacts', lambda *a, **k: pytest.fail('No publication'))
++    temporal = benchmark_config()
++    protocol = build_temporal_protocol(fixed_events, temporal)
++    cfg = runner.gui_config({**values(), 'epochs': 3})
++    data = prepare_bpr_snapshot(protocol.validation, BprWeightConfig(
++        view_weight=cfg.w_view_item, favorite_weight=cfg.w_favorite, purchase_weight=cfg.w_purchase))
++    runner.core._set_seed(cfg.seed)
++    reference, _, reference_observations = runner.core.train_prepared_data_with_metrics(cfg, data.training, torch.device('cpu'))
++    expected_state = {key: value.detach().clone() for key, value in reference.state_dict().items()}
++    original_train, original_score, original_step = runner.core.train_prepared_data_with_metrics, runner.evaluate_bpr_snapshot, torch.optim.Adam.step
++    returned, scored, progress, optimizer_ids = [], [], [], []
++    def train(*args, **kwargs):
++        result = original_train(*args, **kwargs)
++        returned.append(result)
++        return result
++    def score(model, selected, k, device):
++        assert not torch.is_grad_enabled()
++        assert selected.snapshot.cutoff == temporal.validation_start and selected.snapshot.future_end == temporal.test_start
++        before = {key: value.detach().clone() for key, value in model.state_dict().items()}
++        mode = model.training
++        result = original_score(model, selected, k, device)
++        assert model.training == mode
++        for key, value in model.state_dict().items():
++            torch.testing.assert_close(value, before[key], rtol=0, atol=0)
++        scored.append(k)
++        return result
++    def step(optimizer, *args, **kwargs):
++        optimizer_ids.append(id(optimizer))
++        return original_step(optimizer, *args, **kwargs)
++    monkeypatch.setattr(runner.core, 'train_prepared_data_with_metrics', train)
++    monkeypatch.setattr(runner, 'evaluate_bpr_snapshot', score)
++    monkeypatch.setattr(torch.optim.Adam, 'step', step)
++    result = runner.run_validation(protocol.validation, temporal, cfg, torch.device('cpu'), progress.append, lambda: None)
++    assert len(returned) == 1 and len(set(optimizer_ids)) == 1
++    model, _, observed = returned[0]
++    assert observed == reference_observations and observed.epochs_completed == 3 and not observed.early_stopped
++    assert observed.best_epoch == -1 and not cfg.early_stop and not cfg.use_item_features
++    for key, value in model.state_dict().items():
++        torch.testing.assert_close(value, expected_state[key], rtol=0, atol=0)
++    assert scored == [10, 10] + [5, 10, 20] * 4  # Final @10 reused, not evaluated twice.
++    points = [event for event in progress if event['stage'] == 'validation_checkpoint']
++    assert [event['epoch'] for event in points] == [1, 2, 3]
++    assert all(set(event) == {'stage', 'epoch', 'ndcg', 'recall', 'device'} for event in points)
++    assert points[-1]['ndcg'] == result['metrics']['overall']['10']['ndcg']
++    assert points[-1]['recall'] == result['metrics']['overall']['10']['recall']
++
++
++def test_cancel_during_sparse_validation_stops_before_next_epoch(fixed_events, monkeypatch):
++    monkeypatch.setattr(torch, 'set_num_interop_threads', lambda n: None)
++    snapshot = build_temporal_protocol(fixed_events, benchmark_config()).validation
++    cancelled, progress = [], []
++    original = runner._checkpoint_score
++    def checkpoint(*args):
++        result = original(*args)
++        cancelled.append(True)
++        return result
++    def check():
++        if cancelled:
++            raise KeyboardInterrupt
++    monkeypatch.setattr(runner, '_checkpoint_score', checkpoint)
++    with pytest.raises(KeyboardInterrupt):
++        runner.run_validation(snapshot, benchmark_config(), runner.gui_config({**values(), 'epochs': 3}),
++                              torch.device('cpu'), progress.append, check)
++    assert [event['epoch'] for event in progress if event['stage'] == 'epoch'] == [1]
++    assert not any(event['stage'] == 'validation_checkpoint' for event in progress)
+ 
+ 
+ def test_cancel_epoch_stops_before_validation(fixed_events, monkeypatch):
+--- TRAIN-UI-02/tests/tabs/test_training_research_ui.py
++++ TRAIN-UI-03/tests/tabs/test_training_research_ui.py
+@@ -331,7 +331,7 @@
+     assert len([f for f in widget.findChildren(QFrame) if f.objectName() == 'vSeparator']) == 1
+     assert len([f for f in widget.findChildren(QFrame) if f.objectName() == 'hSeparator']) == 1
+     headers = [label for label in widget.findChildren(QLabel) if label.property('class') == 'sectionHeader']
+-    assert [label.text() for label in headers] == ['Параметры', 'Данные для обучения', 'Процесс обучения', 'История экспериментов']
++    assert [label.text() for label in headers] == ['Параметры', 'Процесс обучения', 'Графики обучения', 'История экспериментов']
+     assert all(label.alignment() == Qt.AlignmentFlag.AlignCenter for label in headers)
+     layouts = widget.findChildren(QVBoxLayout)
+     for label in headers:
+@@ -345,6 +345,7 @@
+     assert [control.text() for control in (w.w_purchase, w.w_favorite, w.w_view_item)] == ['10,00', '2,00', '0,50']
+     assert all(control.decimals() == 2 for control in widget.findChildren(QDoubleSpinBox))
+     assert not hasattr(w, 'training_result') and not hasattr(w, 'mode_description')
++    assert not hasattr(w, 'training_data_counts') and not hasattr(w, 'training_readiness')
+     assert not any('benchmark' in label.text() or label.text() == 'Результат' for label in widget.findChildren(QLabel))
+     assert w.training_progress_text.alignment() == Qt.AlignmentFlag.AlignCenter
+     history_layout = next(layout for layout in layouts if layout.indexOf(w.experiment_history) >= 0)
+@@ -354,7 +355,7 @@
+         'Дата', 'Просмотр', 'Избранное', 'Покупка', 'Эпохи', 'NDCG@10', 'Recall@10',
+         'NDCG@10 (просмотры)', 'NDCG@10 (покупки)', 'Время', 'Устройство', 'Статус']
+     assert all(table.horizontalHeader().sectionResizeMode(i) == QHeaderView.ResizeMode.Interactive for i in range(12))
+-    assert not table.horizontalHeader().stretchLastSection()
++    assert table.horizontalHeader().stretchLastSection()
+     assert table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+ 
+ 
+@@ -372,12 +373,12 @@
+     assert data['runs'][0]['hyperparameters'] == record['hyperparameters']
+     assert data['runs'][0]['metrics'] == record['metrics']
+     w.experiment_history.setColumnWidth(0, 233)
+-    w.experiment_history.setColumnWidth(11, 177)
++    w.experiment_history.setColumnWidth(1, 177)
+     w.train_log.setPlainText('Журнал текущего запуска')
+     tab._load_history(w)
+     w.experiment_history.selectRow(0)
+     assert w._experiment_store.path.read_bytes() == original
+-    assert w.experiment_history.columnWidth(0) == 233 and w.experiment_history.columnWidth(11) == 177
++    assert w.experiment_history.columnWidth(0) == 233 and w.experiment_history.columnWidth(1) == 177
+     assert w.experiment_history.item(0, 11).text() == text and w.experiment_history.item(0, 10).text() == 'CUDA'
+     assert w.experiment_history.item(0, 1).text() == '0,12' and w.experiment_history.item(0, 5).text() == '0,012346'
+     assert w.train_log.toPlainText() == 'Журнал текущего запуска'
+@@ -394,8 +395,9 @@
+     monkeypatch.setattr(production, 'preflight_production_training', lambda *a, **k: pytest.fail('UI must not prepare'))
+     monkeypatch.setattr(tab, 'metadata_readiness', lambda *a: (ready, reason, 'b' * 32))
+     tab.refresh_training_state(w)
+-    assert w.training_readiness.text() == expected
+-    assert w.training_data_counts.text() == 'Взаимодействий: —\nПользователей: —\nТоваров: —'
++    assert w._training_ready == (ready, reason, 'b' * 32)
++    assert not hasattr(w, 'training_readiness') and not hasattr(w, 'training_data_counts')
++    assert not w.train_log.toPlainText()  # Readiness check does not fabricate run logs/counts.
+     assert w.start_train.isEnabled() == ready
+ 
+ 
+@@ -410,15 +412,14 @@
+     if mode:
+         event(w, {'stage': 'preflight', 'dataset': dataset,
+                   'quality': {'level': 'PASS', 'training_allowed': True, 'metrics': {'eval_events': 98765, 'cases': 98765}, 'issues': []}})
+-        assert w.training_readiness.text() == 'Данные готовы' and '12 034' in w.training_data_counts.text()
++        assert 'Доступные данные:' in w.train_log.toPlainText() and '12 034' in w.train_log.toPlainText()
+     event(w, {'stage': 'training', 'device': 'cuda', **({'dataset': dataset} if mode else research_counts),
+               'validation_cases': 98765})
+     expected = 'Взаимодействий: 12 034\nПользователей: 123\nТоваров: 456\nОбучающих пар: 987'
+-    assert w.training_readiness.text() == 'Данные используются в обучении'
+-    assert w.training_data_counts.text() == expected
++    assert 'Подготовка данных завершена.\nДля обучения подготовлено:\n' + expected in w.train_log.toPlainText()
+     event(w, {'stage': 'epoch', 'epoch': 50, 'epochs': 50, 'loss': .045248, 'device': 'cuda'})
+     event(w, {'stage': 'validation', 'device': 'cuda', 'validation_cases': 98765})
+-    assert w.training_data_counts.text() == expected
++    assert w.train_log.toPlainText().count('Для обучения подготовлено:') == 1
+     if mode:
+         event(w, {'stage': 'finished', 'published': True, 'postpublish_validation': True,
+                   'published_generation': 'b' * 32, 'dataset': dataset, 'training_metrics': {'epochs_completed': 50}})
+@@ -426,21 +427,21 @@
+         event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': 'completed',
+                   'device': 'cuda', 'metrics': {'overall': {'10': {'ndcg': .01, 'recall': .02, 'cases': 98765}}}}})
+     finish(w)
+-    assert w.training_readiness.text() == 'Данные использованы'
+-    assert w.training_data_counts.text() == expected
++    assert expected in w.train_log.toPlainText()
++    before_refresh = w.train_log.toPlainText()
+     tab.refresh_training_state(w)
+-    assert w.training_data_counts.text() == expected and w.training_readiness.text() == 'Данные использованы'
++    assert w.train_log.toPlainText() == before_refresh
+     all_text = '\n'.join(label.text() for label in widget.findChildren(QLabel)) + w.train_log.toPlainText()
+     assert not any(text in all_text for text in ('Validation cases', 'validation_cases', '98765', 'eval_events'))
+     assert ('NDCG@10' in w.train_log.toPlainText()) == (mode == 0)
+     assert ('Публикация модели: успешно' in w.train_log.toPlainText()) == (mode == 1)
+     w.training_mode.setCurrentIndex(1 - mode)
+-    assert w.training_data_counts.text().count('—') == 3
++    assert w.train_log.toPlainText() == before_refresh
+     w.training_mode.setCurrentIndex(mode)
+-    assert w.training_data_counts.text() == expected
++    assert w.train_log.toPlainText() == before_refresh
+     monkeypatch.setattr(tab, 'metadata_readiness', lambda *a: (True, 'Changed dataset', 'c' * 32))
+     tab.refresh_training_state(w)
+-    assert w.training_data_counts.text().count('—') == 3
++    assert w.train_log.toPlainText() == before_refresh
+ 
+ 
+ @pytest.mark.parametrize('stage,expected', [('loading', 'Загрузка данных'), ('preparation', 'Подготовка данных'),
+@@ -463,7 +464,8 @@
+     w, _ = ui
+     w.train_log.setPlainText('Предыдущий журнал')
+     tab.start_training_process(w)
+-    assert w.train_log.toPlainText() == 'Новый эксперимент'
++    assert w.train_log.toPlainText().startswith('Новый эксперимент\nПроверка данных...\nДанные готовы.')
++    assert 'Точные объёмы будут определены при подготовке.' in w.train_log.toPlainText()
+     event(w, {'stage': 'epoch', 'epoch': 50, 'epochs': 50, 'loss': .1, 'device': 'cuda'})
+     event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': status,
+               'total_seconds': 4354, 'device': 'cuda', 'metrics': {'overall': {'10': {'ndcg': .00984, 'recall': .018891}}}}})
+@@ -476,9 +478,11 @@
+ def test_ui02_new_configuration_drops_previous_counts(ui):
+     w, _ = ui
+     tab._receive_data_counts(w, {'training_events': 100, 'training_users': 10, 'training_items': 20, 'training_pairs': 50}, 'used')
+-    assert 'Обучающих пар: 50' in w.training_data_counts.text()
+-    tab.start_training_process(w)
+-    assert w.training_readiness.text() == 'Данные готовы' and w.training_data_counts.text().count('—') == 3
++    assert w._training_data_by_mode[True]['counts']['pairs'] == 50
++    tab.start_training_process(w)
++    assert 'Доступные данные:\nВзаимодействий: 100\nПользователей: 10\nТоваров: 20' in w.train_log.toPlainText()
++    assert 'Обучающих пар' not in w.train_log.toPlainText()  # New weights may change pair count.
++    assert True not in w._training_data_by_mode
+     finish(w, 1)
+ 
+ 
+@@ -510,8 +514,156 @@
+         tab.create_train_model_widgets_tab(w)
+         assert not w.start_train.isEnabled()  # January data cannot satisfy November research.
+         w.training_mode.setCurrentIndex(1)
+-        assert w.training_readiness.text() == 'Данные готовы' and w.start_train.isEnabled()
+-        assert w.training_data_counts.text().count('—') == 3
++        assert w._training_ready[0] and w.start_train.isEnabled()
++        assert not hasattr(w, 'training_data_counts') and not w.train_log.toPlainText()
+     finally:
+         w.close()
+         w.deleteLater()
++
++
++def test_ui03_layout_separator_junction_and_button_row(ui):
++    from PyQt6.QtCore import QMargins, Qt
++    from PyQt6.QtGui import QIcon
++    from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy
++    w, widget = ui
++    root = widget.layout()
++    top = root.itemAt(0).layout()
++    assert root.spacing() == top.spacing() == 0
++    assert root.contentsMargins() == top.contentsMargins() == QMargins()
++    left, vertical, right = [top.itemAt(i).widget() for i in range(3)]
++    assert top.stretch(0) == 4 and top.stretch(2) == 7
++    assert vertical.objectName() == 'vSeparator' and root.itemAt(1).widget().objectName() == 'hSeparator'
++    assert root.itemAt(2).layout().indexOf(w.experiment_history) >= 0
++    assert w.heading_enter_parameter.parentWidget() is left and w.label_69.parentWidget() is left
++    assert w.train_log.parentWidget() is left
++    assert w.training_loss_chart.parentWidget() is right and w.training_metric_chart.parentWidget() is right
++    row = next(layout for layout in left.findChildren(QHBoxLayout) if layout.indexOf(w.start_train) >= 0)
++    assert row.indexOf(w.cancel_train) >= 0 and row.contentsMargins() == QMargins()
++    assert w.start_train.minimumHeight() == w.cancel_train.minimumHeight() == 36
++    for button in (w.start_train, w.cancel_train):
++        assert button.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
++        assert row.itemAt(row.indexOf(button)).alignment() & Qt.AlignmentFlag.AlignVCenter
++    assert not w.cancel_train.icon().isNull()
++    assert w.cancel_train.icon().pixmap(17, 17).toImage() == QIcon(str(tab.ICONS_DIR / 'failure.png')).pixmap(17, 17).toImage()
++
++
++@pytest.mark.parametrize('status', ['completed', 'cancelled', 'failed'])
++def test_ui03_loss_and_metric_points_survive_finish_then_reset(ui, status):
++    w, _ = ui
++    assert all(series.count() == 0 for series in w.training_loss_chart.lines.values())
++    assert w.training_loss_chart.placeholder.isVisibleTo(w.training_loss_chart)
++    w.epochs_input.setValue(3)
++    tab.start_training_process(w)
++    for epoch, loss in ((1, .6), (2, .4), (3, .3)):
++        event(w, {'stage': 'epoch', 'epoch': epoch, 'epochs': 3, 'loss': loss, 'device': 'cpu'})
++        event(w, {'stage': 'validation_checkpoint', 'epoch': epoch, 'ndcg': .01 * epoch, 'recall': .02 * epoch, 'cases': 98765})
++    def points(chart, name):
++        return [(point.x(), point.y()) for point in chart.lines[name].points()]
++    assert points(w.training_loss_chart, 'Ошибка') == [(1, .6), (2, .4), (3, .3)]
++    assert points(w.training_metric_chart, 'NDCG@10') == [(1, .01), (2, .02), (3, .03)]
++    assert points(w.training_metric_chart, 'Recall@10') == [(1, .02), (2, .04), (3, .06)]
++    assert set(w.training_metric_chart.lines) == {'NDCG@10', 'Recall@10'}
++    event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': status, 'device': 'cpu'}})
++    finish(w, 0 if status == 'completed' else 1)
++    assert points(w.training_loss_chart, 'Ошибка') == [(1, .6), (2, .4), (3, .3)]
++    assert w.training_metric_chart.lines['NDCG@10'].count() == 3
++    assert '98765' not in w.train_log.toPlainText()
++    assert not w.cancel_train.isEnabled() and w.start_train.isEnabled()
++    tab.start_training_process(w)
++    assert all(series.count() == 0 for chart in (w.training_loss_chart, w.training_metric_chart) for series in chart.lines.values())
++    finish(w, 1)
++
++
++def test_ui03_production_loss_only_and_no_fake_validation(ui, monkeypatch):
++    w, _ = ui
++    from Application.evaluation.experiments import gui_run
++    monkeypatch.setattr(gui_run, 'run_validation', lambda *a, **k: pytest.fail('Research evaluator in production GUI'))
++    w.training_mode.setCurrentIndex(1)
++    assert w.training_metric_chart.isHidden()
++    monkeypatch.setattr(tab, '_confirm_production', lambda *a: True)
++    tab.start_training_process(w)
++    event(w, {'stage': 'epoch', 'epoch': 1, 'epochs': 50, 'loss': .6, 'device': 'cuda'})
++    event(w, {'stage': 'validation_checkpoint', 'epoch': 1, 'ndcg': .1, 'recall': .2})
++    assert w.training_loss_chart.lines['Ошибка'].count() == 1
++    assert all(series.count() == 0 for series in w.training_metric_chart.lines.values())
++    assert 'NDCG@10:' not in w.train_log.toPlainText()
++    finish(w, 1)
++
++
++@pytest.mark.parametrize('mode', [0, 1])
++@pytest.mark.parametrize('outcome', ['completed', 'cancelled', 'failed', 'failed_start'])
++def test_ui03_global_status_lifecycle_and_existing_idle_timer(ui, monkeypatch, mode, outcome):
++    from Application.settings import set_status as status
++    w, _ = ui
++    w.status_label, w.status_icon = QLabel(w), QLabel(w)
++    w._status_reset_timer = QTimer(w)
++    w._status_reset_timer.setSingleShot(True)
++    w._status_reset_timer.timeout.connect(lambda: status.set_ready_status(w))
++    for name in ('set_status_ok', 'set_status_error', 'set_status_processing', 'schedule_status_reset'):
++        monkeypatch.setattr(tab, name, getattr(status, name))
++    monkeypatch.setattr(tab, '_confirm_production', lambda *a: True)
++    monkeypatch.setattr(QTimer, 'singleShot', lambda *args: None)
++    w.training_mode.setCurrentIndex(mode)
++    w.epochs_input.setValue(3)
++    w._status_reset_timer.start(1)  # A previous operation's timeout must not reset an active run.
++    tab.start_training_process(w)
++    assert w.status_label.text() == 'Проверка данных перед обучением...'
++    assert not w._status_reset_timer.isActive()
++    for stage, expected in [('loading', 'Загрузка данных...'), ('preparation', 'Подготовка данных...'),
++                            ('training', 'Выполняется обучение...'), ('validation', 'Оценка модели...')]:
++        event(w, {'stage': stage, 'device': 'cpu'})
++        assert w.status_label.text() == expected
++    if outcome == 'failed_start':
++        w.train_proc.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
++    else:
++        if outcome == 'cancelled':
++            tab.cancel_training(w)
++            assert 'Отмена' in w.status_label.text()
++        if not mode:
++            event(w, {'stage': 'research_finished', 'result': {**w._research_record, 'status': outcome}})
++        elif outcome == 'completed':
++            event(w, {'stage': 'finished', 'published': True, 'postpublish_validation': True,
++                      'published_generation': 'a' * 32, 'training_metrics': {'epochs_completed': 3}})
++        finish(w, 0 if outcome == 'completed' else 130 if outcome == 'cancelled' else 1)
++    assert not w._training_active and not w.cancel_train.isEnabled()
++    assert w.training_mode.isEnabled() and w.start_train.isEnabled()
++    assert w._status_reset_timer.isActive() and w._status_reset_timer.interval() == 5000
++    assert not any(text in w.status_label.text() for text in ('Выполняется', 'Подготовка', 'Проверка данных перед'))
++    w._status_reset_timer.timeout.emit()
++    assert w.status_label.text() == 'Готов к работе'
++    w._status_reset_timer.stop()
++
++
++def test_ui03_history_fills_viewport_and_ordinary_resize_is_retained(ui):
++    w, widget = ui
++    widget.resize(2100, 980)
++    widget.show()
++    QApplication.instance().processEvents()
++    table = w.experiment_history
++    header = table.horizontalHeader()
++    assert header.stretchLastSection()
++    assert header.length() >= table.viewport().width()
++    original = table.columnWidth(0)
++    table.setColumnWidth(0, original + 120)
++    tab._load_history(w)
++    QApplication.instance().processEvents()
++    assert table.columnWidth(0) == original + 120
++    table.setColumnWidth(0, table.viewport().width() + 150)
++    QApplication.instance().processEvents()
++    assert table.horizontalScrollBar().maximum() > 0
++
++
++def test_ui03_chart_theme_and_malformed_points_do_not_change_trajectory(ui):
++    from Application.theme.apply_theme import apply_app_theme
++    w, _ = ui
++    chart = w.training_loss_chart
++    chart.add_point('Ошибка', 1, .6)
++    chart.add_point('Ошибка', 1, .6)
++    chart.add_point('Ошибка', 2, float('nan'))
++    chart.add_point('Ошибка', 0, .5)
++    assert chart.lines['Ошибка'].count() == 1
++    for dark in (False, True, False):
++        apply_app_theme(QApplication.instance(), dark)
++        QApplication.instance().processEvents()
++        assert [(p.x(), p.y()) for p in chart.lines['Ошибка'].points()] == [(1, .6)]
++        assert chart.chart().backgroundBrush().color().name() == os.environ['QTMATERIAL_SECONDARYDARKCOLOR']
+--- TRAIN-UI-02/README.md
++++ TRAIN-UI-03/README.md
+@@ -115,11 +115,11 @@
+ python main.py
+ ```
+ 
+-## Обучение из GUI (TRAIN-UI-01 / TRAIN-UI-02)
++## Обучение из GUI (TRAIN-UI-01 / TRAIN-UI-02 / TRAIN-UI-03)
+ 
+ Вкладка «Обучение модели» содержит режим, четыре параметра (веса покупки,
+-избранного, просмотра и количество эпох), состояние данных, запуск/отмену,
+-progress, журнал с итоговой сводкой и историю экспериментов. Начальные значения:
++избранного, просмотра и количество эпох), запуск/отмену, progress,
++журнал, графики и историю экспериментов. Начальные значения:
+ 10 / 2 / 0.5 / 50; это provisional research defaults, а не доказанный optimum.
+ Веса конечные, покупка > 0, остальные >= 0, эпохи — целое число 1–10000.
+ Пустые/ошибочные поля блокируют запуск.
+@@ -156,15 +156,24 @@
+ Полная проверка остаётся в дочернем процессе. Во время run поля заблокированы;
+ структурированные события показывают epoch/loss/device, таймер — elapsed time.
+ Слева расположены параметры в порядке режим → эпохи → покупка → избранное →
+-просмотр и блок данных; справа — процесс и журнал. Секции разделены линиями,
+-история занимает нижнюю область. Веса в GUI отображаются с двумя знаками.
+-До подготовки неизвестные counts отображаются как «—»; отдельная загрузка
+-canonical events ради счётчиков не выполняется. Уже полученные агрегаты обычной
+-подготовки показывают взаимодействия, пользователей, товары и обучающие пары.
+-После успешного запуска они сохраняются до смены данных или нового запуска.
++просмотр и процесс с журналом; справа — графики (stretch 4:7).
++Секции разделены соединёнными линиями, история занимает нижнюю область.
++Веса в GUI отображаются с двумя знаками. Отдельного блока данных нет:
++readiness управляет кнопкой запуска, известные counts и точные агрегаты обычной
++подготовки попадают в журнал. Дополнительного чтения canonical events ради
++счётчиков нет; без metadata counts точные объёмы определяются при подготовке.
+ Research взаимодействия — события именно training history выбранного snapshot,
+ production взаимодействия — уже рассчитанный bpr_events. Validation cases в GUI
+-не отображаются. Отдельная карточка результата и постоянная подсказка удалены.
++не отображаются. Loss chart получает точку после каждой эпохи. Research chart
++показывает overall NDCG/Recall@10 на sparse checkpoints: для budgets до 10 —
++каждая эпоха; для больших — 1, 10/20/40/60/80/100% бюджета, с округлением и
++удалением duplicates (50 эпох: 1, 5, 10, 20, 30, 40, 50). Observer read-only,
++test blind, early_stop=False; итоговые метрики относятся к final requested epoch.
++Последняя точка использует штатную final validation без повторного scoring.
++Production показывает только loss. Графики, включая partial trajectory после
++отмены/ошибки, остаются до следующего запуска; новая траектория очищается при
++старте. Графики используют уже установленный QtCharts и общий стиль статистики.
++Общий статус отражает фактический этап и возвращается в idle общим таймером.
+ 
+ «Отменить» создаёт cancel signal: worker проверяет его между этапами/эпохами.
+ При задержке до публикации QProcess принудительно завершается через 2 секунды;
+@@ -190,7 +199,8 @@
+ в GUI, новые artifacts сохраняются отдельно; production остаётся доступен.
+ Итог текущего запуска выводится в журнал; выбор строки истории его не заменяет.
+ Подписи и статусы таблицы локализованы, storage codes и JSON v1 сохранены.
+-Колонки можно изменять вручную, ширина сохраняется при обновлении таблицы;
++Обычные колонки можно изменять вручную, ширина сохраняется при refresh;
++последняя колонка заполняет остаток viewport. При увеличении суммарной ширины
+ доступна горизонтальная прокрутка. NDCG/Recall отображаются с шестью знаками,
+ время — HH:MM:SS. Inputs между сессиями не сохраняются;
+ существующий train_config.json не переписывается. Временный config/cancel signal
+--- TRAIN-UI-02/Application/training_charts.py
++++ TRAIN-UI-03/Application/training_charts.py
+@@ -0,0 +1,94 @@
++"""Small live Qt line charts: structured scalar events only, no model polling."""
++import math
++
++from PyQt6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
++from PyQt6.QtCore import QEvent, QLocale, QMargins, Qt
++from PyQt6.QtGui import QPainter
++from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout
++
++from Application.statistics_charts import style_chart
++
++
++class TrainingChart(QChartView):
++    def __init__(self, title, names, y_title, parent=None):
++        chart = QChart()
++        super().__init__(chart, parent)
++        self.setObjectName('trainingChart')
++        self.setStyleSheet('QGraphicsView#trainingChart {border: none; padding: 0;}')
++        self.setFrameShape(QChartView.Shape.NoFrame)
++        self.setMinimumWidth(0)
++        self.setMinimumHeight(180)
++        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
++        self.setRenderHint(QPainter.RenderHint.Antialiasing)
++        chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
++        chart.setDropShadowEnabled(False)
++        chart.setBackgroundRoundness(0)
++        chart.setMargins(QMargins(8, 5, 12, 5))
++        chart.setTitle(title)
++        chart.setLocale(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
++        chart.setLocalizeNumbers(True)
++        chart.legend().setVisible(len(names) > 1)
++        chart.legend().setAlignment(Qt.AlignmentFlag.AlignBottom)
++        self.x_axis, self.y_axis = QValueAxis(), QValueAxis()
++        self.x_axis.setTitleText('Эпоха')
++        self.x_axis.setLabelFormat('%.0f')
++        self.y_axis.setTitleText(y_title)
++        self.y_axis.setLabelFormat('%.6f' if len(names) > 1 else '%.3f')
++        chart.addAxis(self.x_axis, Qt.AlignmentFlag.AlignBottom)
++        chart.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
++        self.lines = {}
++        for name in names:
++            series = QLineSeries()
++            series.setName(name)
++            series.setPointsVisible(True)
++            chart.addSeries(series)
++            series.attachAxis(self.x_axis)
++            series.attachAxis(self.y_axis)
++            self.lines[name] = series
++        self.placeholder = QLabel('График появится после начала обучения', self.viewport())
++        self.placeholder.setWordWrap(True)
++        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
++        self.placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
++        self.placeholder.setProperty('class', 'infoLabel')
++        overlay = QVBoxLayout(self.viewport())
++        overlay.addWidget(self.placeholder, alignment=Qt.AlignmentFlag.AlignCenter)
++        self.reset(50)
++        self.apply_theme()
++
++    def reset(self, epochs):
++        self.epochs = epochs
++        self._maximum = 0.
++        for series in self.lines.values():
++            series.clear()
++        self.x_axis.setRange(0, max(1, epochs))
++        self.x_axis.setTickType(QValueAxis.TickType.TicksDynamic)
++        self.x_axis.setTickAnchor(0)
++        self.x_axis.setTickInterval(max(1, math.ceil(epochs / 5)))
++        self.y_axis.setRange(0, 1)
++        self.placeholder.show()
++
++    def add_point(self, name, epoch, value):
++        if (name not in self.lines or type(epoch) is not int or not 1 <= epoch <= self.epochs
++                or type(value) not in (int, float) or not math.isfinite(value) or value < 0):
++            return
++        series = self.lines[name]
++        if series.count() and series.at(series.count() - 1).x() >= epoch:
++            # Duplicate final/checkpoint events do not create duplicate points.
++            if series.at(series.count() - 1).x() == epoch:
++                series.replace(series.count() - 1, epoch, value)
++            else:
++                return
++        else:
++            series.append(epoch, value)
++        self._maximum = max(self._maximum, value)
++        self.y_axis.setRange(0, max(1e-6, self._maximum * 1.1))
++        self.placeholder.hide()
++
++    def apply_theme(self):
++        _, foreground, _ = style_chart(self.chart())
++        self.placeholder.setStyleSheet(f'QLabel {{background: transparent; color: {foreground.name()}; border: none;}}')
++
++    def changeEvent(self, event):
++        super().changeEvent(event)
++        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange, QEvent.Type.FontChange) and hasattr(self, 'lines'):
++            self.apply_theme()

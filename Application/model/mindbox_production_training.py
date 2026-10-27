@@ -106,22 +106,30 @@ def _current(model_dir):
     return data["generation"], content
 
 
-def _prepare(manifest, raw_root, catalog, cfg):
+def _prepare(manifest, raw_root, catalog, cfg, *, read_only=False):
     if catalog.name != "nomenclature.csv" or catalog.parent != Path(cfg.data_dir).resolve():
         raise _Failure("PREPARATION_FAILED")
     batch = load_chunked_training_batch(manifest, raw_root=raw_root, require_complete=True)
     prepared = prepare_training_data_from_chunked_batch(batch, raw_root=raw_root, catalog_path=catalog,
-                                                       train_config=cfg, diagnose=True)
+                                                       train_config=cfg, diagnose=True, read_only=read_only)
     d = prepared.diagnostics
     quality = evaluate_training_quality(prepared.prepared_data, TrainingQualityDiagnostics(
         actions_view=d.actions_view, actions_favorite=d.actions_favorite, malformed_mapped_actions=d.malformed_actions,
         unresolved_products=d.resolution.total.unresolved, unsupported_products=d.resolution.total.unsupported_namespace,
         bpr_events=d.bpr.events_total, unmapped_actions=d.unmapped_actions,
         malformed_action_system_names=d.malformed_action_system_names,
-        orders_duplicate_conflicting=d.orders_duplicate_conflicting))
+        orders_duplicate_conflicting=d.orders_duplicate_conflicting,
+        product_resolution_attempts=d.resolution.total.interactions_total,
+        unknown_candidate_products=d.resolution.total.unknown_candidate,
+        invalid_product_ids=d.resolution.total.invalid_id,
+        first_snapshot_policy_verified=d.order_snapshot_policy == "first_in_period_source_order"))
     result = ProductionTrainingResult(batch_id=batch.batch_id, quality_report=quality,
         dataset={**dict(quality.metrics), "complete": prepared.complete, "orders_raw": d.orders_raw,
-                 "orders_unique": d.orders_unique, "orders_duplicate_identical": d.orders_duplicate_identical}, interaction_window={
+                 "orders_unique": d.orders_unique, "orders_duplicate_identical": d.orders_duplicate_identical,
+                 "transport_complete": batch.transport_complete, "order_snapshot_policy": d.order_snapshot_policy,
+                 "orders_in_period": d.orders_in_period,
+                 "excluded_outside_period": {key: getattr(d, key) for key in (
+                     "actions_before_start", "actions_at_or_after_end", "orders_before_start", "orders_at_or_after_end")}}, interaction_window={
             "since": batch.window.interaction_since.isoformat(), "until": batch.window.interaction_until.isoformat()})
     return prepared.prepared_data, result
 
@@ -130,7 +138,8 @@ def preflight_production_training(training_manifest, *, raw_root, catalog_path, 
     """Read-only preparation/quality; no lock, model writes, report or training."""
     try:
         with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
-            _, result = _prepare(Path(training_manifest).resolve(), Path(raw_root).resolve(), Path(catalog_path).resolve(), cfg)
+            _, result = _prepare(Path(training_manifest).resolve(), Path(raw_root).resolve(), Path(catalog_path).resolve(), cfg,
+                                 read_only=True)
         if progress:
             progress(result)
         return replace(result, error_code=None if result.quality_report.training_allowed else "QUALITY_BLOCK")
@@ -218,7 +227,8 @@ def _report(result, config_summary):
 
 
 def train_and_publish_production_model(training_manifest, *, raw_root, catalog_path, cfg, device,
-                                        allow_warn=False, model_dir=None, progress=None):
+                                        allow_warn=False, model_dir=None, progress=None, expected_batch_id=None,
+                                        epoch_observer=None, check_cancel=None, before_publication=None):
     """Train/publish under an OS lock; failures return safe immutable state.
 
     model_dir is an API/test seam. The CLI always selects the fixed project model.
@@ -242,6 +252,8 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
                 result = replace(prepared_result, previous_generation=previous_generation)
                 if progress:
                     progress(result)
+                if expected_batch_id is not None and result.batch_id != expected_batch_id:
+                    raise _Failure("PREFLIGHT_CHANGED")
                 if not result.quality_report.training_allowed:
                     raise _Failure("QUALITY_BLOCK")
                 if result.quality_report.level.value == "WARN" and not allow_warn:
@@ -250,11 +262,18 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
                     raise _Failure("ARTIFACT_FAILED")
                 stage = "TRAINING_FAILED"
                 result = replace(result, training_started=True)
+                if check_cancel:
+                    check_cancel()
+                if progress and epoch_observer is not None:
+                    progress(result)
                 core._set_seed(cfg.seed)
-                model, _, metrics = core.train_prepared_data_with_metrics(cfg, data, device)
+                observer_args = {"epoch_observer": epoch_observer} if epoch_observer is not None else {}
+                model, _, metrics = core.train_prepared_data_with_metrics(cfg, data, device, **observer_args)
                 result = replace(result, training_completed=True, training_metrics=metrics)
 
                 def guard():
+                    if check_cancel:
+                        check_cancel()
                     try:
                         changed = _current(model_dir)[1] != previous
                     except Exception:
@@ -267,7 +286,13 @@ def train_and_publish_production_model(training_manifest, *, raw_root, catalog_p
                 seen = build_seen_items_index(data)
                 if seen is None or data.analytics is None:
                     raise _Failure("ARTIFACT_FAILED")
+                if before_publication:
+                    before_publication()
+                if check_cancel:
+                    check_cancel()
                 result = replace(result, publication_started=True)
+                if progress and before_publication is not None:
+                    progress(result)
                 generation = core._save_artifacts(cfg, data.mappings, model, seen_items=seen, analytics=data.analytics,
                                      model_dir=str(model_dir), _before_commit=guard, _publication_state=receipt)
                 result = replace(result, published=True, published_generation=generation,

@@ -92,8 +92,8 @@ def test_main_window_has_only_current_tabs_and_reference_section(app, monkeypatc
     try:
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert titles == [
-            "Получение данных", "Пользовательские настройки", "Статистика и анализ",
-            "Обучение модели", "Выгрузка результатов",
+            "Получение данных", "Статистика и анализ", "Обучение модели",
+            "Выгрузка результатов", "Пользовательские настройки",
         ]
         assert window.status_label.text() == "Готов к работе"
         assert window._status_reset_timer.isSingleShot()
@@ -101,7 +101,7 @@ def test_main_window_has_only_current_tabs_and_reference_section(app, monkeypatc
             assert not hasattr(window, attr)
         for dark in (True, False, True):
             window.apply_theme(dark)
-            window.apply_static_widget_styles()
+            assert not hasattr(window, 'apply_static_widget_styles')
             app.processEvents()
             assert window._current_is_dark is dark
             assert [window.tabs.tabText(i) for i in range(5)] == titles

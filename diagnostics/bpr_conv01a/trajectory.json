@@ -1,0 +1,826 @@
+[
+  {
+    "epoch": 1,
+    "loss": 0.6827613861917706,
+    "training_seconds": 95.48334109999996,
+    "cumulative_training_seconds": 95.48334109999996,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.00043181517571894227,
+            "recall": 0.0008038585209003215
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.0007400988856392399,
+            "recall": 0.0018086816720257234
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.001383431141710654,
+            "recall": 0.0044212218649517685
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.0008182221351350502,
+            "recall": 0.0021492170709241634
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.0005924229108300344,
+            "recall": 0.0011641443538998836
+          }
+        }
+      },
+      "scoring_seconds": 46.20533239999986,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": null,
+    "ndcg10_relative_delta": null
+  },
+  {
+    "epoch": 2,
+    "loss": 0.6398189523239889,
+    "training_seconds": 90.65372690000004,
+    "cumulative_training_seconds": 186.137068,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.0013756787292279295,
+            "recall": 0.002612540192926045
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.0016962560685519345,
+            "recall": 0.003617363344051447
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.002906592936844667,
+            "recall": 0.008440514469453377
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.0010021258813832118,
+            "recall": 0.00184218606079214
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.0030131817237772436,
+            "recall": 0.006984866123399301
+          }
+        }
+      },
+      "scoring_seconds": 47.31946099999959,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.0009561571829126946,
+    "ndcg10_relative_delta": 1.2919316613844651
+  },
+  {
+    "epoch": 3,
+    "loss": 0.5693881372073749,
+    "training_seconds": 90.30258270000013,
+    "cumulative_training_seconds": 276.43965070000013,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.0031935305282906794,
+            "recall": 0.00502411575562701
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.004082719316509225,
+            "recall": 0.007837620578778135
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.005896216347900294,
+            "recall": 0.01507234726688103
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.0012078004875116974,
+            "recall": 0.003070310101320233
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.009535392975043251,
+            "recall": 0.016880093131548313
+          }
+        }
+      },
+      "scoring_seconds": 49.24528099999998,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.002386463247957291,
+    "ndcg10_relative_delta": 1.4069003449429514
+  },
+  {
+    "epoch": 4,
+    "loss": 0.45973317875518455,
+    "training_seconds": 91.9796567000003,
+    "cumulative_training_seconds": 368.41930740000043,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 5,
+    "loss": 0.33228297192895073,
+    "training_seconds": 91.12786589999996,
+    "cumulative_training_seconds": 459.5471733000004,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.005470339666608123,
+            "recall": 0.008038585209003215
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.00685475563592866,
+            "recall": 0.012258842443729904
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.00916889877030516,
+            "recall": 0.0215032154340836
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.0011860227527552643,
+            "recall": 0.0021492170709241634
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.017605580872326616,
+            "recall": 0.03143189755529686
+          }
+        }
+      },
+      "scoring_seconds": 49.644465500000024,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.0027720363194194348,
+    "ndcg10_relative_delta": 0.678968134843411
+  },
+  {
+    "epoch": 6,
+    "loss": 0.2280044731472981,
+    "training_seconds": 92.49853320000011,
+    "cumulative_training_seconds": 552.0457065000005,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 7,
+    "loss": 0.16052574232705996,
+    "training_seconds": 93.89902470000015,
+    "cumulative_training_seconds": 645.9447312000007,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 8,
+    "loss": 0.12002736109561253,
+    "training_seconds": 91.30619819999993,
+    "cumulative_training_seconds": 737.2509294000006,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.006770292209902418,
+            "recall": 0.01004823151125402
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.008176420776881018,
+            "recall": 0.014469453376205787
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.01030845266427694,
+            "recall": 0.022909967845659164
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.0013332816716234235,
+            "recall": 0.002456248081056187
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.021154465297603297,
+            "recall": 0.037252619324796274
+          }
+        }
+      },
+      "scoring_seconds": 48.782694900000024,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.001321665140952358,
+    "ndcg10_relative_delta": 0.19280995722516417
+  },
+  {
+    "epoch": 9,
+    "loss": 0.09370388304369365,
+    "training_seconds": 89.40124070000002,
+    "cumulative_training_seconds": 826.6521701000006,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 10,
+    "loss": 0.07701679374390151,
+    "training_seconds": 90.23803730000009,
+    "cumulative_training_seconds": 916.8902074000007,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 11,
+    "loss": 0.06502716648324612,
+    "training_seconds": 92.30071270000008,
+    "cumulative_training_seconds": 1009.1909201000008,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 12,
+    "loss": 0.05629561157485345,
+    "training_seconds": 86.55172600000014,
+    "cumulative_training_seconds": 1095.742646100001,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.006586832805306881,
+            "recall": 0.00984726688102894
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.008282202455395174,
+            "recall": 0.01507234726688103
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.010834642830527189,
+            "recall": 0.02532154340836013
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.0016564137687989512,
+            "recall": 0.00276327909118821
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.020848253651378466,
+            "recall": 0.03841676367869616
+          }
+        }
+      },
+      "scoring_seconds": 51.38356440000007,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.00010578167851415556,
+    "ndcg10_relative_delta": 0.012937406403209485
+  },
+  {
+    "epoch": 13,
+    "loss": 0.049944605655085274,
+    "training_seconds": 90.28108460000021,
+    "cumulative_training_seconds": 1186.0237307000011,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 14,
+    "loss": 0.04524778905411768,
+    "training_seconds": 93.14036410000017,
+    "cumulative_training_seconds": 1279.1640948000013,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 15,
+    "loss": 0.04138495032020476,
+    "training_seconds": 92.23056550000001,
+    "cumulative_training_seconds": 1371.3946603000013,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 16,
+    "loss": 0.03823213141452849,
+    "training_seconds": 91.6997421000001,
+    "cumulative_training_seconds": 1463.0944024000014,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 17,
+    "loss": 0.0356950210923702,
+    "training_seconds": 91.2829783000002,
+    "cumulative_training_seconds": 1554.3773807000016,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 18,
+    "loss": 0.03352039740488646,
+    "training_seconds": 91.92325280000023,
+    "cumulative_training_seconds": 1646.3006335000018,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 19,
+    "loss": 0.0316745353648368,
+    "training_seconds": 91.57701010000028,
+    "cumulative_training_seconds": 1737.877643600002,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 20,
+    "loss": 0.030255203787818274,
+    "training_seconds": 85.9121054000002,
+    "cumulative_training_seconds": 1823.7897490000023,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.00764583132568965,
+            "recall": 0.011454983922829582
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.009305710852445196,
+            "recall": 0.016680064308681672
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.011975951641744498,
+            "recall": 0.027331189710610933
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.002329473275495246,
+            "recall": 0.00460546515198035
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.022536741992712026,
+            "recall": 0.03958090803259604
+          }
+        }
+      },
+      "scoring_seconds": 45.0451094,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.0010235083970500224,
+    "ndcg10_relative_delta": 0.12357925353337516
+  },
+  {
+    "epoch": 21,
+    "loss": 0.02894488219378293,
+    "training_seconds": 83.58771940000042,
+    "cumulative_training_seconds": 1907.3774684000027,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 22,
+    "loss": 0.027699924048297082,
+    "training_seconds": 84.64519300000029,
+    "cumulative_training_seconds": 1992.022661400003,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 23,
+    "loss": 0.02663545873098731,
+    "training_seconds": 86.3359959999998,
+    "cumulative_training_seconds": 2078.358657400003,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 24,
+    "loss": 0.025701657541700312,
+    "training_seconds": 87.03649380000024,
+    "cumulative_training_seconds": 2165.395151200003,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 25,
+    "loss": 0.02492472452220616,
+    "training_seconds": 92.87831769999957,
+    "cumulative_training_seconds": 2258.2734689000026,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 26,
+    "loss": 0.02422712840028856,
+    "training_seconds": 90.02914299999975,
+    "cumulative_training_seconds": 2348.3026119000024,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 27,
+    "loss": 0.02356115693764726,
+    "training_seconds": 90.41035580000062,
+    "cumulative_training_seconds": 2438.712967700003,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 28,
+    "loss": 0.022989251579875056,
+    "training_seconds": 93.42651949999981,
+    "cumulative_training_seconds": 2532.139487200003,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 29,
+    "loss": 0.022455667277858724,
+    "training_seconds": 92.46364789999916,
+    "cumulative_training_seconds": 2624.603135100002,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    }
+  },
+  {
+    "epoch": 30,
+    "loss": 0.022009617568988272,
+    "training_seconds": 91.13886569999977,
+    "cumulative_training_seconds": 2715.7420008000017,
+    "cuda_memory_before_scoring": {
+      "allocated_bytes": 330845696,
+      "reserved_bytes": 432013312,
+      "peak_allocated_bytes": 413211136,
+      "peak_reserved_bytes": 432013312
+    },
+    "validation": {
+      "metrics": {
+        "overall": {
+          "5": {
+            "cases": 4976,
+            "ndcg": 0.007421049166765873,
+            "recall": 0.011254019292604502
+          },
+          "10": {
+            "cases": 4976,
+            "ndcg": 0.009840156621554253,
+            "recall": 0.018890675241157555
+          },
+          "20": {
+            "cases": 4976,
+            "ndcg": 0.013308059214716233,
+            "recall": 0.03255627009646302
+          }
+        },
+        "VIEW": {
+          "10": {
+            "cases": 3257,
+            "ndcg": 0.003012075854587713,
+            "recall": 0.006754682222904513
+          }
+        },
+        "FAVORITE": {
+          "10": {
+            "cases": 1,
+            "ndcg": 0.0,
+            "recall": 0.0
+          }
+        },
+        "PURCHASE": {
+          "10": {
+            "cases": 1718,
+            "ndcg": 0.02279062182215471,
+            "recall": 0.04190919674039581
+          }
+        }
+      },
+      "scoring_seconds": 47.77958470000067,
+      "scoring_device": "cuda",
+      "cases": 4976,
+      "cuda_memory_after_scoring": {
+        "allocated_bytes": 330845696,
+        "reserved_bytes": 432013312,
+        "peak_allocated_bytes": 413211136,
+        "peak_reserved_bytes": 432013312
+      },
+      "candidate_counts": {
+        "min": 4460,
+        "max": 5199,
+        "mean": 5171.96402733119
+      }
+    },
+    "ndcg10_delta": 0.0005344457691090574,
+    "ndcg10_relative_delta": 0.05743201971170476
+  }
+]

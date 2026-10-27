@@ -27,6 +27,27 @@ from Application.settings.set_status import set_ready_status
 REAL_PROCESS = QProcess
 
 
+@pytest.mark.parametrize('source,field,title', [('orders', 'lines[1].quantity', 'Заказы'),
+                                              ('actions', 'dateTimeUtc', 'Действия'),
+                                              ('customers', 'email', 'Клиенты')])
+def test_manual_structured_location_is_visible_once_without_raw_exception_values(window, source, field, title):
+    from Application.mindbox.manual_diagnostics import ManualImportDiagnostic
+    detail = ManualImportDiagnostic(source, 'validation', 2, 4, 34949,
+        line_index=2 if source == 'orders' else None, field_path=field, error_category='missing')
+    controller = window.mb_controller
+    controller._begin()
+    controller._launch('manual_customers' if source == 'customers' else 'manual_interactions', [])
+    payload = {'source': source, 'message': 'PRIVATE_CUSTOMER_API_KEY', 'error_type': 'PRIVATE_EXCEPTION',
+               'manual_import': {**detail.to_dict(), 'safe_message': 'PRIVATE_EMAIL'}}
+    window.mb_process.feed('Error: ' + json.dumps(payload) + '\n')
+    window.mb_process.finish(1)
+    text = window.mb_log.toPlainText()
+    assert f'{title} → ошибка проверки файла 2 из 4, запись 34 949.' in text
+    assert f'Поле: {field}.' in text and 'Причина: отсутствует обязательное поле.' in text
+    assert text.count('Причина:') == 1 and controller.error_reported
+    assert not any(value in text for value in ('PRIVATE', 'Error: {', 'Traceback', 'JSON envelope'))
+
+
 @pytest.mark.parametrize("stage,source,context", [
     ("manual_customers", "customers", "Ошибка импорта клиентов"),
     ("manual_interactions", "actions/orders", "Ошибка импорта действий и заказов"),
@@ -890,13 +911,14 @@ def test_all_tabs_themes_and_reference_controls(app):
     QApplication.processEvents()
     wait_until(lambda: not window.mb_controller.tasks)
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
-        "Получение данных", "Пользовательские настройки", "Статистика и анализ", "Обучение модели", "Выгрузка результатов"]
+        "Получение данных", "Статистика и анализ", "Обучение модели", "Выгрузка результатов", "Пользовательские настройки"]
     assert window.btn_load is not None and window.start_train is not None
     window.mb_controller.start()
     for dark in (False, True, False):
         window.apply_theme(dark)
-        window.tabs.setCurrentIndex(3)
-        assert window.tabs.currentIndex() == 3
+        training_index = next(i for i in range(window.tabs.count()) if window.tabs.tabText(i) == "Обучение модели")
+        window.tabs.setCurrentIndex(training_index)
+        assert window.tabs.currentIndex() == training_index
         assert window.theme_switch.isEnabled()
     window.mb_controller.cancel()
     window.mb_process.finish(1, True)

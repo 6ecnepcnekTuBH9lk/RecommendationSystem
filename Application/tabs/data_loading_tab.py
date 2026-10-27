@@ -331,6 +331,7 @@ class _SelectionEventsEdit(QTextEdit):
 
 
 def create_data_loading_widgets_tab(aboba):
+    from Application.theme.layout_metrics import CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
     tab = QWidget()
 
     # Корень вкладки:
@@ -353,8 +354,16 @@ def create_data_loading_widgets_tab(aboba):
     left = QVBoxLayout(left_wrap)
     right = QVBoxLayout(right_wrap)
 
-    left.setSpacing(10)
-    right.setSpacing(10)
+    for panel in (left, right):
+        panel.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+        panel.setSpacing(SECTION_SPACING)
+    api, operation, manual_section = QVBoxLayout(), QVBoxLayout(), QVBoxLayout()
+    for section in (api, operation, manual_section):
+        section.setContentsMargins(0, 0, 0, 0)
+        section.setSpacing(BLOCK_SPACING)
+    left.addLayout(api)
+    left.addLayout(operation)
+    right.addLayout(manual_section)
 
     # Вертикальный разделитель между колонками
     separator = QFrame()
@@ -371,6 +380,7 @@ def create_data_loading_widgets_tab(aboba):
     left_panel = QWidget()
     left_panel_layout = QVBoxLayout(left_panel)
     left_panel_layout.setContentsMargins(0, 0, 0, 0)
+    left_panel_layout.setSpacing(0)
     left_panel_layout.addWidget(left_scroll, 1)
     top.addWidget(left_panel, 1)
     top.addWidget(separator)
@@ -380,7 +390,7 @@ def create_data_loading_widgets_tab(aboba):
     root.addLayout(top, 2)
 
     aboba.mb_headings = [
-        _heading("Загрузка через API Mindbox", left),
+        _heading("Загрузка через API Mindbox", api),
     ]
 
     # ==================================================================
@@ -391,7 +401,7 @@ def create_data_loading_widgets_tab(aboba):
     # ---------------- Период взаимодействий ----------------
     period_row = QHBoxLayout()
     period_row.setContentsMargins(0, 0, 0, 0)
-    period_row.setSpacing(8)
+    period_row.setSpacing(CONTROL_SPACING)
 
     period_label = QLabel("Период взаимодействий:")
     period_label.setSizePolicy(
@@ -419,21 +429,23 @@ def create_data_loading_widgets_tab(aboba):
     period_row.addWidget(QLabel("По"))
     period_row.addWidget(aboba.mb_interaction_until, 1)
 
-    left.addLayout(period_row)
+    api.addLayout(period_row)
 
     customers_period = QHBoxLayout()
+    customers_period.setContentsMargins(0, 0, 0, 0)
+    customers_period.setSpacing(CONTROL_SPACING)
     aboba.mb_customers_since = _date_widget(today.addMonths(-1))
     aboba.mb_customers_until = _date_widget(today)
     customers_period.addWidget(QLabel("Период клиентов: С"))
     customers_period.addWidget(aboba.mb_customers_since, 1)
     customers_period.addWidget(QLabel("По"))
     customers_period.addWidget(aboba.mb_customers_until, 1)
-    left.addLayout(customers_period)
+    api.addLayout(customers_period)
 
     # ---------------- История объединений клиентов ----------------
     merge_row = QHBoxLayout()
     merge_row.setContentsMargins(0, 0, 0, 0)
-    merge_row.setSpacing(8)
+    merge_row.setSpacing(CONTROL_SPACING)
 
     merge_label = QLabel("Объединения клиентов:")
     merge_label.setSizePolicy(
@@ -450,11 +462,12 @@ def create_data_loading_widgets_tab(aboba):
     merge_row.addWidget(merge_label)
     merge_row.addWidget(aboba.mb_merge_since, 1)
 
-    left.addLayout(merge_row)
+    api.addLayout(merge_row)
 
     # ---------------- Selection ----------------
     selection_grid = QGridLayout()
-    selection_grid.setVerticalSpacing(8)
+    selection_grid.setContentsMargins(0, 0, 0, 0)
+    selection_grid.setSpacing(CONTROL_SPACING)
 
     aboba.mb_selection_fields = {}
 
@@ -484,7 +497,7 @@ def create_data_loading_widgets_tab(aboba):
 
         aboba.mb_selection_fields[field] = editor
 
-    left.addLayout(selection_grid)
+    api.addLayout(selection_grid)
 
     # ---------------- Информационная подпись ----------------
     aboba.mb_sources_info = QLabel(
@@ -500,10 +513,12 @@ def create_data_loading_widgets_tab(aboba):
         "infoLabel",
     )
 
-    left.addWidget(aboba.mb_sources_info)
+    api.addWidget(aboba.mb_sources_info)
 
     # ---------------- Кнопки API ----------------
     buttons = QHBoxLayout()
+    buttons.setContentsMargins(0, 0, 0, 0)
+    buttons.setSpacing(CONTROL_SPACING)
 
     aboba.mb_start_button = QPushButton(
         " Получить данные"
@@ -553,13 +568,15 @@ def create_data_loading_widgets_tab(aboba):
     buttons.addWidget(aboba.mb_customers_button)
     buttons.addWidget(aboba.mb_cancel_button)
 
-    left.addLayout(buttons)
+    api.addLayout(buttons)
 
     # ==================================================================
     # ЛЕВАЯ КОЛОНКА
     # Состояние операции
     # ==================================================================
     state_grid = QGridLayout()
+    state_grid.setContentsMargins(0, 0, 0, 0)
+    state_grid.setSpacing(CONTROL_SPACING)
     state_grid.setColumnStretch(1, 1)
     for row, (name, title) in enumerate((
         ("orders", "Заказы"), ("actions", "Действия"),
@@ -570,14 +587,14 @@ def create_data_loading_widgets_tab(aboba):
         setattr(aboba, f"mb_{name}_status_label", value)
         state_grid.addWidget(QLabel(title + ":"), row, 0)
         state_grid.addWidget(value, row, 1)
-    left.addLayout(state_grid)
+    operation.addLayout(state_grid)
 
     aboba.mb_progress = _BusyProgressBar()
     aboba.mb_progress.setTextVisible(True)
     aboba.mb_progress.setRange(0, 1)
     aboba.mb_progress.setValue(0)
     aboba.mb_progress.setFormat("Прогресс загрузки")
-    left.addWidget(aboba.mb_progress)
+    operation.addWidget(aboba.mb_progress)
 
     # ---------------- Resume block ----------------
     aboba.mb_resume_block = QWidget()
@@ -586,7 +603,7 @@ def create_data_loading_widgets_tab(aboba):
         aboba.mb_resume_block
     )
     resume.setContentsMargins(0, 0, 0, 0)
-    resume.setSpacing(6)
+    resume.setSpacing(BLOCK_SPACING)
 
     resume_title = QLabel("Загрузка не завершена")
     resume_title.setAlignment(
@@ -627,7 +644,7 @@ def create_data_loading_widgets_tab(aboba):
         aboba.mb_resume_button
     )
 
-    left.addWidget(
+    operation.addWidget(
         aboba.mb_resume_block
     )
 
@@ -639,10 +656,12 @@ def create_data_loading_widgets_tab(aboba):
     # ==================================================================
     _heading(
         "Ручная загрузка из Mindbox",
-        right,
+        manual_section,
     )
 
     manual = QGridLayout()
+    manual.setContentsMargins(0, 0, 0, 0)
+    manual.setSpacing(CONTROL_SPACING)
 
     aboba.mb_manual_files = {}
     aboba.mb_manual_paths = {name: () for name in ("actions", "orders", "customers")}
@@ -713,11 +732,11 @@ def create_data_loading_widgets_tab(aboba):
             (editor, button)
         )
 
-    right.addLayout(manual)
+    manual_section.addLayout(manual)
 
     manual_period = QHBoxLayout()
     manual_period.setContentsMargins(0, 0, 0, 0)
-    manual_period.setSpacing(8)
+    manual_period.setSpacing(CONTROL_SPACING)
 
     manual_period_label = QLabel("Период выгрузки действий и заказов:")
     manual_period_label.setSizePolicy(
@@ -747,7 +766,7 @@ def create_data_loading_widgets_tab(aboba):
         (aboba.mb_manual_since, aboba.mb_manual_until)
     )
 
-    right.addLayout(manual_period)
+    manual_section.addLayout(manual_period)
 
     manual_hint = QLabel(
         "Укажите тот же период, что при выгрузке Действий и Заказов в Mindbox. "
@@ -758,10 +777,12 @@ def create_data_loading_widgets_tab(aboba):
     manual_hint.setWordWrap(True)
     manual_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    right.addWidget(manual_hint)
+    manual_section.addWidget(manual_hint)
 
     # ---------------- Кнопки manual import ----------------
     manual_buttons = QHBoxLayout()
+    manual_buttons.setContentsMargins(0, 0, 0, 0)
+    manual_buttons.setSpacing(CONTROL_SPACING)
 
     aboba.mb_manual_interactions_button = QPushButton(
         " Импорт действий и заказов"
@@ -804,7 +825,7 @@ def create_data_loading_widgets_tab(aboba):
             button
         )
 
-    right.addLayout(
+    manual_section.addLayout(
         manual_buttons
     )
 
@@ -843,7 +864,7 @@ def create_data_loading_widgets_tab(aboba):
     log_layout = QVBoxLayout(
         log_wrap
     )
-    log_layout.setContentsMargins(8, 8, 8, 0)
+    log_layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
     log_layout.setSpacing(0)
 
     aboba.mb_log = QTextEdit()
