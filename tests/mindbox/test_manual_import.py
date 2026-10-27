@@ -185,7 +185,8 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved, base_price):
     actions = write(root, "actions", [action] * 9 + [{"actionTemplate": {"ids": {"systemName": "UstanovkaSpiskaProduktovV"}},
                                                      "products": [{"ids": {"website": "ignored"}}]}])
     order = {"ids": {"mindboxId": 20}, "customer": {"ids": {"mindboxId": 1}},
-             "firstAction": {"dateTimeUtc": "2026-01-01T12:00:00Z", "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
+              "firstAction": {"dateTimeUtc": (source.window.interaction_since + timedelta(hours=12)).isoformat(),
+                              "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
              "lines": [{"id": 1, "number": 1, "quantity": 2, "basePricePerItem": 1, "priceOfLine": 2,
                         "status": {"ids": {"externalId": "CP"}}, "product": {"ids": {"offline1C": "654321_variant"}}}]}
     if base_price == 'missing':
@@ -205,6 +206,53 @@ def test_manual_transport_uses_normal_preparation_and_dedup(saved, base_price):
     assert result.diagnostics.orders_duplicate_identical == 1
     assert result.diagnostics.unmapped_actions == 1
     assert result.prepared_data.mappings.idx2user == ["2"]
+
+
+@pytest.mark.parametrize("boundary,offset,expected_purchase,before_start,at_or_after_end", [
+    ("start", -1, 0, 2, 0),
+    ("start", 0, 1, 0, 0),
+    ("end", -1, 1, 0, 0),
+    ("end", 0, 0, 0, 2),
+    ("end", 1, 0, 0, 2),
+])
+def test_manual_preparation_respects_half_open_order_window(
+    saved, boundary, offset, expected_purchase, before_start, at_or_after_end,
+):
+    from Application.model.BPRMF import TrainConfig
+
+    root, source, _ = saved
+    window = source.window
+    stamp = (window.interaction_since if boundary == "start" else window.interaction_until)
+    stamp += timedelta(microseconds=offset)
+    action = {"ids": {"mindboxId": 10}, "customer": {"ids": {"mindboxId": 1}},
+              "dateTimeUtc": (window.interaction_since + timedelta(hours=12)).isoformat(),
+              "creationDateTimeUtc": (window.interaction_since + timedelta(hours=12)).isoformat(),
+              "actionTemplate": {"ids": {"systemName": "CustomView"}},
+              "products": [{"ids": {"offline1C": "123456_variant"}}]}
+    order = {"ids": {"mindboxId": 20}, "customer": {"ids": {"mindboxId": 1}},
+             "firstAction": {"dateTimeUtc": stamp.isoformat(),
+                             "channel": {"ids": {"externalId": "channel"}, "name": "test"}},
+             "lines": [{"id": 1, "number": 1, "quantity": 2, "basePricePerItem": 1, "priceOfLine": 2,
+                        "status": {"ids": {"externalId": "CP"}}, "product": {"ids": {"offline1C": "654321_variant"}}}]}
+    actions = write(root, "actions", [action] * 9)
+    orders = write(root, "orders", [order, order])
+    original = actions.read_bytes(), orders.read_bytes()
+    selection = replace(DEFAULT_SELECTION, view_action_system_names=("CustomView",))
+    manifest = manual.import_interactions(actions, orders, raw_root=root, window=window, selection=selection)
+    batch = daily.load_chunked_training_batch(manifest, raw_root=root, require_complete=True)
+    catalog = root / "nomenclature.csv"
+    catalog.write_text("КодНоменклатуры\n123456\n654321\n", encoding="utf-8-sig")
+    result = daily.prepare_training_data_from_chunked_batch(
+        batch, raw_root=root, catalog_path=catalog, train_config=TrainConfig(),
+    )
+    assert result.complete
+    assert result.diagnostics.purchase_interactions == expected_purchase
+    assert result.diagnostics.orders_duplicate_identical == expected_purchase
+    assert result.diagnostics.orders_before_start == before_start
+    assert result.diagnostics.orders_at_or_after_end == at_or_after_end
+    assert result.diagnostics.view_interactions == 9
+    assert result.prepared_data.mappings.idx2user == ["2"]
+    assert (actions.read_bytes(), orders.read_bytes()) == original
 
 
 def test_order_schema_failure_keeps_previous_canonical_pair_and_source_bytes(saved):

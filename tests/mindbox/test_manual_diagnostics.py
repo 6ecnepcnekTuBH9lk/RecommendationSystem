@@ -203,3 +203,85 @@ def test_read_only_command_unknown_failure_does_not_print_traceback_or_source_pa
     text = capsys.readouterr().out
     assert 'PRIVATE' not in text and 'Traceback' not in text
     assert not (tmp_path / 'report.json').exists()
+
+
+@pytest.mark.parametrize('output_form', ['absolute', 'relative'])
+def test_read_only_orders_output_cannot_replace_input(tmp_path, monkeypatch, capsys, output_form):
+    from scripts.check_historical_orders import main
+    source = tmp_path / 'PRIVATE_orders.json'
+    source.write_text(json.dumps({'orders': [order()]}), encoding='utf-8')
+    original = source.read_bytes()
+    monkeypatch.chdir(tmp_path)
+    output = source if output_form == 'absolute' else source.name
+    assert main([str(source), '--output', str(output)]) == 1
+    assert source.read_bytes() == original
+    captured = capsys.readouterr()
+    assert all(marker not in captured.out + captured.err for marker in ('PRIVATE', 'Traceback', str(tmp_path)))
+
+
+@pytest.mark.parametrize('operation', ['mkdir', 'write_text'])
+def test_read_only_orders_report_write_error_is_sanitized(tmp_path, monkeypatch, capsys, operation):
+    from scripts.check_historical_orders import main
+    source = tmp_path / 'PRIVATE_orders.json'
+    source.write_text(json.dumps({'orders': [order()]}), encoding='utf-8')
+    original = source.read_bytes()
+    output = tmp_path / 'report.json'
+
+    def denied(*args, **kwargs):
+        raise PermissionError('PRIVATE_WRITE_PATH')
+
+    monkeypatch.setattr(Path, operation, denied)
+    assert main([str(source), '--output', str(output)]) == 1
+    assert source.read_bytes() == original and not output.exists()
+    captured = capsys.readouterr()
+    assert all(marker not in captured.out + captured.err for marker in ('PRIVATE', 'Traceback', str(tmp_path)))
+
+
+@pytest.mark.parametrize('exception', [InterruptedError, KeyboardInterrupt])
+def test_read_only_orders_cancellation_returns_130(tmp_path, monkeypatch, capsys, exception):
+    from scripts import check_historical_orders as checker
+    monkeypatch.setattr(checker, 'check_sources', lambda *args: (_ for _ in ()).throw(exception('PRIVATE')))
+    output = tmp_path / 'report.json'
+    assert checker.main(['unused.json', '--output', str(output)]) == 130
+    assert not output.exists()
+    captured = capsys.readouterr()
+    assert 'PRIVATE' not in captured.out + captured.err and 'Traceback' not in captured.out + captured.err
+
+
+def test_read_only_orders_schema_failure_report_has_only_safe_fields(tmp_path, capsys):
+    from scripts.check_historical_orders import main
+    source = tmp_path / 'PRIVATE_orders.json'
+    raw = order()
+    raw['lines'][0]['quantity'] = 'PRIVATE_QUANTITY'
+    source.write_text(json.dumps({'orders': [raw]}), encoding='utf-8')
+    original = source.read_bytes()
+    output = tmp_path / 'report.json'
+    assert main([str(source), '--output', str(output)]) == 1
+    report = json.loads(output.read_text(encoding='utf-8'))
+    assert report['files'][0]['complete_json']
+    assert report['files'][0]['schema_errors'] == [{'field_path': 'lines[].quantity', 'error_category': 'number', 'count': 1}]
+    captured = capsys.readouterr()
+    text = output.read_text(encoding='utf-8') + captured.out + captured.err
+    assert all(marker not in text for marker in ('PRIVATE', 'Traceback', str(tmp_path)))
+    assert source.read_bytes() == original and not (tmp_path / 'canonical').exists()
+
+
+@pytest.mark.parametrize('corrupt_tail', [False, True])
+def test_read_only_orders_real_cli_preserves_source_and_sanitizes_output(tmp_path, corrupt_tail):
+    import subprocess
+    import sys
+    from scripts import check_historical_orders as checker
+
+    source = tmp_path / 'PRIVATE_orders.json'
+    source.write_text(json.dumps({'orders': [order()]}) + (' PRIVATE_TAIL' if corrupt_tail else ''), encoding='utf-8')
+    original = source.read_bytes()
+    output = tmp_path / 'report.json'
+    process = subprocess.run([sys.executable, '-B', '-X', 'utf8', checker.__file__, str(source), '--output', str(output)],
+                             capture_output=True, text=True, encoding='utf-8', timeout=20)
+    assert process.returncode == int(corrupt_tail)
+    report = json.loads(output.read_text(encoding='utf-8'))
+    assert report['files'][0]['complete_json'] is not corrupt_tail
+    assert not report['canonical_merges_checked'] and not report['import_performed']
+    text = process.stdout + process.stderr + output.read_text(encoding='utf-8')
+    assert all(marker not in text for marker in ('PRIVATE', 'Traceback', str(tmp_path)))
+    assert source.read_bytes() == original and not (tmp_path / 'canonical').exists()
