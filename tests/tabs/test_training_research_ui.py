@@ -92,6 +92,22 @@ def test_four_inputs_default_research_and_removed_controls(ui):
     assert not w.cancel_train.isEnabled()
 
 
+def test_invalid_feature_norm_blocks_production_before_qprocess_but_not_research(ui):
+    window, _ = ui
+    tab.USER_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = tab.USER_SETTINGS_DIR / 'train_config.json'
+    path.write_text(json.dumps({'feature_norm': 'typo'}), encoding='utf-8')
+    window.training_mode.setCurrentIndex(1)
+    tab.refresh_training_state(window)
+    assert not window.start_train.isEnabled()
+    assert 'feature_norm' in window.training_reason.text()
+    assert not Process.instances
+    window.training_mode.setCurrentIndex(0)
+    tab.refresh_training_state(window)
+    assert window.start_train.isEnabled()
+    assert not Process.instances
+
+
 @pytest.mark.parametrize('ready,reason', [(False, 'Нет canonical данных'), (False, 'Metadata повреждена'),
                                          (False, 'Temporal benchmark недоступен')])
 def test_readiness_block_reason(ui, monkeypatch, ready, reason):

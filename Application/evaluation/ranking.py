@@ -23,7 +23,8 @@ class TemporalMetrics:
     ndcg: float
 
 
-def evaluate_snapshot(snapshot: TemporalSnapshot, scorer: ScoringBackend, k: int = 10) -> TemporalMetrics:
+def evaluate_snapshot(snapshot: TemporalSnapshot, scorer: ScoringBackend, k: int = 10,
+                      *, case_observer=None) -> TemporalMetrics:
     if type(k) is not int or k < 1:
         raise TemporalProtocolError("Ranking K must be a positive integer")
     contributions = []
@@ -39,6 +40,9 @@ def evaluate_snapshot(snapshot: TemporalSnapshot, scorer: ScoringBackend, k: int
         ranking = np.argsort(-scores, kind="stable")[:k]
         target = candidates.index(case.target_item)
         positions = np.flatnonzero(ranking == target)
-        contributions.append(single_target_metrics(int(positions[0]) + 1 if len(positions) else None))
+        contribution = single_target_metrics(int(positions[0]) + 1 if len(positions) else None)
+        contributions.append(contribution)
+        if case_observer is not None:
+            case_observer(case, contribution)
     recall, ndcg = np.mean(contributions, axis=0) if contributions else (0.0, 0.0)
     return TemporalMetrics(snapshot.cutoff, k, len(contributions), float(recall), float(ndcg))

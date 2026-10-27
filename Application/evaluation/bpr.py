@@ -41,7 +41,8 @@ class _BprScorer:
         return self.model.score(users, items).detach().cpu().numpy()
 
 
-def evaluate_bpr_snapshot(model, data: BprTemporalData, k: int = 10, device=torch.device("cpu")):
+def evaluate_bpr_snapshot(model, data: BprTemporalData, k: int = 10, device=torch.device("cpu"),
+                          *, case_observer=None):
     validate_prepared_data(data.training)
     maps = data.training.mappings
     if (len(data.training.splits.eval_users) or set(maps.idx2item) != set(data.snapshot.item_universe)
@@ -56,6 +57,7 @@ def evaluate_bpr_snapshot(model, data: BprTemporalData, k: int = 10, device=torc
     was_training = model.training
     model.eval()
     try:
-        return evaluate_snapshot(data.snapshot, _BprScorer(model, maps, device), k)
+        kwargs = {"case_observer": case_observer} if case_observer is not None else {}
+        return evaluate_snapshot(data.snapshot, _BprScorer(model, maps, device), k, **kwargs)
     finally:
         model.train(was_training)

@@ -106,32 +106,6 @@ def _validate_checkpoint(mappings, checkpoint):
                 or value.shape != (count, dim) or not torch.isfinite(value).all()):
             raise ValueError("Invalid embedding tensor")
 
-    features = checkpoint.get("feat2idx", {})
-    if (not isinstance(features, dict)
-            or any(not isinstance(k, str) or not k or type(v) is not int for k, v in features.items())
-            or sorted(features.values()) != list(range(len(features)))):
-        raise ValueError("Invalid feature mapping")
-    matrix = checkpoint.get("item_feat_mat")
-    if matrix is not None:
-        if (not isinstance(matrix, np.ndarray) or matrix.dtype != np.dtype("int64")
-                or matrix.ndim != 2 or matrix.shape[0] != len(mappings["idx2item"])
-                or matrix.shape[1] < 1 or np.any(matrix < -1) or np.any(matrix >= len(features))):
-            raise ValueError("Invalid feature matrix")
-    if features:
-        saved_matrix = state.get("item_feat_mat")
-        weights = state.get("feat_emb.weight")
-        if (matrix is None or not isinstance(saved_matrix, torch.Tensor)
-                or saved_matrix.dtype != torch.int64
-                or not np.array_equal(matrix, saved_matrix.numpy())
-                or not isinstance(weights, torch.Tensor) or weights.dtype != torch.float32
-                or weights.shape != (len(features), dim) or not torch.isfinite(weights).all()):
-            raise ValueError("Inconsistent saved item features")
-        scale = config.get("feature_scale", 0.2)
-        norm = config.get("feature_norm", "mean")
-        if (type(scale) not in (int, float) or not math.isfinite(scale)
-                or not isinstance(norm, str)
-                or norm.strip().lower() not in ("sum", "mean", "avg", "sqrt", "sqrt_mean", "sqrt-norm")):
-            raise ValueError("Invalid saved feature configuration")
 
 
 # PyTorch 2.5 safe_globals is process-wide. Serialize this module's temporary

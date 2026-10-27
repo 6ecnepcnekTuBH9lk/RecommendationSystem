@@ -5,6 +5,7 @@ from pathlib import Path
 
 from Application.mindbox.canonical_storage import current_batch
 from Application.evaluation.experiments.gui_benchmark import require_gui_coverage
+from Application.model.item_feature_config import normalize_feature_norm
 
 
 def input_values(window):
@@ -51,4 +52,8 @@ def production_config(values, settings_dir, data_dir):
         raise ValueError("Некорректные настройки рабочей модели")
     # The CLI's existing typed TrainConfig loader validates hidden fields and
     # supplies defaults. Existing early-stop/feature settings stay intact.
-    return {**settings, **values, "data_dir": str(data_dir)}
+    result = {**settings, **values, "data_dir": str(data_dir)}
+    # Validate hidden settings before the GUI starts a process; no ML imports.
+    if "feature_norm" in result:
+        result["feature_norm"] = normalize_feature_norm(result["feature_norm"])
+    return result
