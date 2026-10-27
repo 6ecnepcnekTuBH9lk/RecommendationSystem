@@ -1,9 +1,11 @@
 """Formula layout and adaptive calculation tables, synthetic results only."""
 
 from dataclasses import replace
+from time import monotonic
 
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer, QT_VERSION_STR, PYQT_VERSION_STR, qVersion
+from PyQt6.QtGui import QFontInfo
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QLabel, QStyleOptionViewItem
 
@@ -12,6 +14,68 @@ from Application.tabs.hybrid_calculation_widgets import FEATURE_NAMES
 from Application.theme.apply_theme import apply_app_theme
 from tests.tabs.test_customer_contact_search_ui import app as app, card as card, search, wait
 from tests.tabs.test_recommendation_sections import explained as explained
+
+
+def formula_geometry(section):
+    return tuple((label.geometry().getRect(), label.heightForWidth(label.width()), label.font().toString())
+                 for label in section.formula.findChildren(QLabel))
+
+
+def geometry_diagnostic(section):
+    labels = []
+    for index, label in enumerate(section.formula.findChildren(QLabel)):
+        labels.append({
+            "index": index, "text": label.text(), "format": label.textFormat().name,
+            "rect": label.geometry().getRect(), "contents": label.contentsRect().getRect(),
+            "heightForWidth": label.heightForWidth(label.width()), "font": label.font().toString(),
+            "resolved_font": QFontInfo(label.font()).family(),
+            "minimum": (label.minimumWidth(), label.minimumHeight()),
+            "maximum": (label.maximumWidth(), label.maximumHeight()),
+            "size_hint": (label.sizeHint().width(), label.sizeHint().height()),
+            "minimum_size_hint": (label.minimumSizeHint().width(), label.minimumSizeHint().height()),
+        })
+    ancestors = []
+    parent = section.formula
+    while parent is not None:
+        layout = parent.layout()
+        ancestors.append({"type": type(parent).__name__, "name": parent.objectName(),
+                          "rect": parent.geometry().getRect(), "heightForWidth": parent.heightForWidth(parent.width()),
+                          "minimum_height": parent.minimumHeight(), "maximum_height": parent.maximumHeight(),
+                          "size_hint": (parent.sizeHint().width(), parent.sizeHint().height()),
+                          "layout_rect": layout.geometry().getRect() if layout is not None else None,
+                          "layout_height_for_width": layout.totalHeightForWidth(parent.width()) if layout is not None else None})
+        parent = parent.parentWidget()
+    return {"Qt_build": QT_VERSION_STR, "Qt_runtime": qVersion(), "PyQt": PYQT_VERSION_STR,
+            "platform": QApplication.platformName(),
+            "dpi": section.formula.logicalDpiY(), "labels": labels, "ancestors": ancestors,
+            "tables": tuple((view.size().width(), view.size().height(), view.viewport().width(),
+                             view.horizontalHeader().length(), view._fit_timer.isActive())
+                            for view in (section.table, section.features))}
+
+
+def wait_for_calculation_layout(section, *, timeout=5):
+    """Observe completed layout turns, without activating or repairing layouts in the test."""
+    deadline = monotonic() + timeout
+    previous = None
+    initial = None
+    while monotonic() < deadline:
+        QTest.qWait(10)
+        geometry = formula_geometry(section)
+        tables = tuple((view.geometry().getRect(), view.viewport().size().width(),
+                        view.viewport().size().height()) for view in (section.table, section.features))
+        current = (section.formula.geometry().getRect(), geometry, tables)
+        if initial is None:
+            initial = current
+        ready = all(not view._fit_timer.isActive()
+                    and view.horizontalHeader().length() == view.viewport().width()
+                    and view.horizontalScrollBar().maximum() == 0 for view in (section.table, section.features))
+        ready = ready and bool(geometry) and all(rect[2] > 0 and rect[3] >= required
+                                                 for rect, required, _font in geometry)
+        if ready and current == previous:
+            return
+        previous = current
+    pytest.fail(f"Calculation layout did not settle without clipped text within {timeout}s: "
+                f"initial={initial!r}; final={geometry_diagnostic(section)!r}")
 
 
 def test_formula_frame_content_centering_and_exact_section_structure(explained):
@@ -41,16 +105,14 @@ def test_formula_frame_content_centering_and_exact_section_structure(explained):
 
 
 @pytest.mark.parametrize("dark", [False, True])
-@pytest.mark.parametrize("width", [480, 1100, 1800])
+@pytest.mark.parametrize("width", [478, 480, 482, 1100, 1800])
 def test_tables_fill_viewport_and_wrap_without_scroll_or_lost_rows(explained, app, dark, width):
     card, _, _, _ = explained
     search(card)
     apply_app_theme(app, dark)
     card.host.resize(width, 950)
     section = card.tab.calculations
-    wait(lambda: all(view.horizontalHeader().length() == view.viewport().width()
-                     and view.horizontalScrollBar().maximum() == 0 for view in (section.table, section.features)))
-    QTest.qWait(30)
+    wait_for_calculation_layout(section)
     assert card.tab.scroll.horizontalScrollBar().maximum() == 0
     for view, count in ((section.table, 10), (section.features, 6)):
         assert view.model().columnCount() == count
@@ -69,8 +131,43 @@ def test_tables_fill_viewport_and_wrap_without_scroll_or_lost_rows(explained, ap
     assert section.table.columnWidth(1) > section.table.columnWidth(0)
     assert section.features.columnWidth(1) > section.features.columnWidth(3)
     for label in section.formula.findChildren(QLabel):
-        assert label.hasHeightForWidth()
-        assert label.height() >= label.heightForWidth(label.width())
+        assert label.hasHeightForWidth(), geometry_diagnostic(section)
+        assert label.height() >= label.heightForWidth(label.width()), geometry_diagnostic(section)
+
+
+def test_layout_wait_rejects_persistently_clipped_formula(explained):
+    card, _, _, _ = explained
+    search(card)
+    section = card.tab.calculations
+    wait_for_calculation_layout(section)
+    label = section.formula.findChildren(QLabel)[1]
+    label.setFixedHeight(1)
+    with pytest.raises(pytest.fail.Exception, match="without clipped text") as failure:
+        wait_for_calculation_layout(section, timeout=0.1)
+    assert label.height() < label.heightForWidth(label.width())
+    assert label.text() in str(failure.value)
+    for field in ("index", "heightForWidth", "resolved_font", "ancestors", "tables", "dpi", "platform"):
+        assert field in str(failure.value)
+
+
+def test_layout_wait_includes_queued_formula_geometry(explained):
+    card, _, _, _ = explained
+    search(card)
+    section = card.tab.calculations
+    wait_for_calculation_layout(section)
+    label = section.formula.findChildren(QLabel)[1]
+    minimum, maximum = label.minimumHeight(), label.maximumHeight()
+    label.setFixedHeight(1)
+    completed = []
+
+    def finish_layout():
+        label.setMinimumHeight(minimum)
+        label.setMaximumHeight(maximum)
+        completed.append(True)
+
+    QTimer.singleShot(30, finish_layout)
+    wait_for_calculation_layout(section)
+    assert completed and label.height() >= label.heightForWidth(label.width())
 
 
 def test_selection_resize_and_copy_use_existing_immutable_data_only(explained, monkeypatch, app):
@@ -145,7 +242,7 @@ def test_repeated_resize_and_theme_switch_do_not_accumulate_layout_work(explaine
     for width, dark in ((1800, True), (480, False), (1100, True), (480, True), (1800, False)):
         apply_app_theme(app, dark)
         card.host.resize(width, 950)
-        QTest.qWait(50)
+        wait_for_calculation_layout(section)
     wait(lambda: not section.table._fit_timer.isActive() and not section.features._fit_timer.isActive())
     for view in (section.table, section.features):
         assert view.horizontalHeader().length() == view.viewport().width()
