@@ -148,6 +148,11 @@ def _hash(value):
     return hashlib.sha256(_json(value).encode("ascii")).hexdigest()
 
 
+def _code_fingerprint(path):
+    """Preserve the LF byte contract across Git's Windows CRLF conversion."""
+    return hashlib.sha256(Path(path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def _micros(value):
     if value is None:
         return None
@@ -205,8 +210,7 @@ def _capture_sources(root):
     if any(c.since < merges.since or c.until > merges.until for c in components[1:]):
         raise ValueError("CustomerMerges does not cover consumed sources")
     # Source code hashes catch normalizer changes even if a version bump is missed.
-    code_versions = [hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-                     for module in (normalization, records)]
+    code_versions = [_code_fingerprint(module.__file__) for module in (normalization, records)]
     key = [INDEX_SCHEMA_VERSION, records.HISTORY_SCHEMA_VERSION, code_versions, str(root),
            asdict(selection), [c.key for c in components]]
     return _Sources(_hash(key), selection, tuple(components))

@@ -259,6 +259,89 @@ def test_relevant_inputs_invalidate_and_explicit_build_restores(source, change, 
     assert status(source).status is S.READY
 
 
+def test_code_fingerprint_lf_crlf_preserves_legacy_lf_hash(tmp_path):
+    content = b'# synthetic source\nVALUE = "text"\n'
+    lf, crlf = tmp_path / "lf.py", tmp_path / "crlf.py"
+    lf.write_bytes(content)
+    crlf.write_bytes(content.replace(b"\n", b"\r\n"))
+    expected = hashlib.sha256(content).hexdigest()
+    assert module._code_fingerprint(lf) == module._code_fingerprint(crlf) == expected
+
+
+@pytest.mark.parametrize("content", [b"VALUE = 2\n", b"VALUE = 1 # comment\n", b"VALUE  = 1\n",
+                                     b"VALUE = 1", b"VALUE = 1\r", b"\xef\xbb\xbfVALUE = 1\n"])
+def test_code_fingerprint_keeps_all_other_byte_changes(tmp_path, content):
+    path = tmp_path / "code.py"
+    path.write_bytes(b"VALUE = 1\n")
+    before = module._code_fingerprint(path)
+    path.write_bytes(content)
+    assert module._code_fingerprint(path) != before
+
+
+@pytest.mark.parametrize("endings", [(b"\n", b"\n"), (b"\r\n", b"\n"),
+                                     (b"\n", b"\r\n"), (b"\r\n", b"\r\n")])
+def test_source_signature_and_published_index_survive_code_eol_only(source, tmp_path, monkeypatch, endings):
+    modules = (module.normalization, module.records)
+    files = [tmp_path / f"source-{n}.py" for n in range(2)]
+    contents = [b"# normalization fixture\nVALUE = 1\n", b"# records fixture\nVALUE = 2\n"]
+    for mod, path, content in zip(modules, files, contents):
+        path.write_bytes(content)
+        monkeypatch.setattr(mod, "__file__", str(path))
+    root, service, _ = source
+    captured = module._capture_sources(root)
+    # Independent reconstruction of the pre-fix LF contract, not a new hash format.
+    expected = module._hash([module.INDEX_SCHEMA_VERSION, module.records.HISTORY_SCHEMA_VERSION,
+                             [hashlib.sha256(content).hexdigest() for content in contents], str(root),
+                             asdict(captured.selection), [c.key for c in captured.components]])
+    assert captured.version == expected
+    built = build(source)
+    assert built.status is S.READY and built.source_version == expected
+    index_path = service.index_path(raw_root=root)
+    before, before_stat = index_path.read_bytes(), module._stat(index_path)
+    for path, content, ending in zip(files, contents, endings):
+        path.write_bytes(content.replace(b"\n", ending))
+    assert module._capture_sources(root).version == expected
+    ready = status(source)
+    assert ready.status is S.READY and ready.generation == built.generation and ready.source_version == expected
+    assert index_path.read_bytes() == before and module._stat(index_path) == before_stat
+    # No automatic trust of a legacy signature computed directly from CRLF bytes.
+    if any(ending == b"\r\n" for ending in endings):
+        legacy_crlf = module._hash([module.INDEX_SCHEMA_VERSION, module.records.HISTORY_SCHEMA_VERSION,
+                                   [hashlib.sha256(path.read_bytes()).hexdigest() for path in files], str(root),
+                                   asdict(captured.selection), [c.key for c in captured.components]])
+        assert legacy_crlf != expected
+    files[0].write_bytes(contents[0] + b"# substantive fingerprint change\n")
+    assert module._capture_sources(root).version != expected
+    assert status(source).status is S.STALE
+
+
+@pytest.mark.parametrize("change", ["selection", "part_stat", "part_count", "schema", "normalizer_schema"])
+def test_eol_canonicalization_does_not_bypass_other_source_gates(source, monkeypatch, change):
+    assert build(source).status is S.READY
+    root, _, metadata = source
+    before = module._capture_sources(root).version
+    if change == "selection":
+        metadata["selection"]["view_action_system_names"] = ["DifferentView"]
+        save_catalog(root, metadata)
+    elif change == "part_stat":
+        original = module._stat
+        def changed_stat(path):
+            values = original(path)
+            return (*values[:2], values[2] + 1, values[3]) if path.suffix == ".json" else values
+        monkeypatch.setattr(module, "_stat", changed_stat)
+    elif change == "part_count":
+        entry = metadata["actions"]["2026-01-01"]
+        write_part(root / entry["directory"], "actions", [action("second")], 2)
+        entry["parts"] = 2
+        save_catalog(root, metadata)
+    elif change == "schema":
+        monkeypatch.setattr(module, "INDEX_SCHEMA_VERSION", module.INDEX_SCHEMA_VERSION + 1)
+    else:
+        monkeypatch.setattr(module.records, "HISTORY_SCHEMA_VERSION", module.records.HISTORY_SCHEMA_VERSION + 1)
+    assert module._capture_sources(root).version != before
+    assert status(source).status is S.STALE
+
+
 def test_customers_bpr_and_global_revision_are_not_dependencies(source, monkeypatch):
     first = build(source)
     source[2]["revision"] = "unrelated-revision"
