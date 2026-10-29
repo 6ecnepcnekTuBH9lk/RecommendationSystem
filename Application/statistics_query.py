@@ -153,16 +153,16 @@ class IndexedInput:
             raise AdapterError("Indexed order header failed source validation")
         details = json.loads(encoded)
         channel = details.get("firstAction", {}).get("channel")
-        lines = [] if outside or bad_date else self._batch_lines.get(ordinal, ())
+        lines = [] if bad_date else self._batch_lines.get(ordinal, ())
         return dict(details, _ordinal=ordinal, _date=date, _adapter_bad=adapter_bad, _aggregate_bad=aggregate_bad,
-                    _fingerprint=fingerprint, _lines=lines, ids={"mindboxId": str(order_sid)},
+                    _fingerprint=fingerprint, _lines=lines, _header_bad=header_bad, ids={"mindboxId": str(order_sid)},
                     customer={"ids": {"mindboxId": str(customer)}},
                     firstAction={"dateTimeUtc": "invalid" if bad_date else date.isoformat(), "channel": channel},
                     lines=[{"quantity": Decimal(quantity), "status": {"ids": {"externalId": status}}}
                            for _, quantity, status, _, _, _ in lines])
 
     def order(self, raw):
-        if raw["_adapter_bad"]:
+        if raw["_adapter_bad"] or raw['_header_bad']:
             raise AdapterError("Indexed order failed source adapter validation")
         customer = raw["customer"]["ids"]["mindboxId"]
         return tuple(SimpleNamespace(
@@ -238,7 +238,7 @@ def calculate_indexed_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFA
         sql_before = db.sql_seconds
         try:
             result = reference._calculate_statistics(Path(raw_root), catalog_path, progress, check, effective, source,
-                                                     calculated_at=calculated_at)
+                                                     calculated_at=calculated_at, customer_filter=analysis_filter)
         except sqlite3.OperationalError:
             if failure:
                 raise failure[0] from None

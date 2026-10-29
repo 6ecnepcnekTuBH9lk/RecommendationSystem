@@ -31,6 +31,8 @@ def empty_snapshot(base, *, missing_profiles=False):
     result['delivery_financials'] = tuple((currency, 0, '0', '0', '0') for currency in ('RUB', 'KZT'))
     result['view_price_statistics'] = tuple((currency, 0, '0', '0') for currency in ('RUB', 'KZT'))
     result['warnings'] = ('Canonical Customers отсутствует: число профилей неизвестно.',) if missing_profiles else ()
+    if result.get('product_category_paths') is not None:
+        result['product_category_paths'] = ()
     return validate_result(result)
 
 
@@ -74,6 +76,56 @@ def complete_snapshot(base):
     result['diagnostics'] = tuple((key, {'orders_unique': 2, 'unique_order_lines': 2, 'purchase_lines': 2,
                                         'mapped_view_actions': 3, 'mapped_favorite_actions': 1,
                                         'mapped_without_product': 1}.get(key, 0)) for key, _ in result['diagnostics'])
+    return validate_result(result)
+
+
+def quality_snapshot(base):
+    """Saved aggregate example, with a tiny selected-item result; no source history."""
+    result = complete_snapshot(base)
+    result.update(source_actions=2292725, actions_with_product=1216544, actions_without_product=1076181)
+    result['action_types'] = (('ProsmotrProdukta', 2173313), ('FavoriteSynthetic', 73978), ('Unknown', 45434))
+    source = dict(mapped_view_actions=2173313, mapped_favorite_actions=73978,
+                  mapped_without_product=1032982, unmapped_actions=45434)
+    result['diagnostics'] = tuple((key, source.get(key, value)) for key, value in result['diagnostics'])
+    return validate_result(result)
+
+
+def category_snapshot(base):
+    """Two directly assigned items; same leaf name, distinct codes and roots."""
+    result = complete_snapshot(base)
+    result.update(unique_resolved_items=2, products_with_views=2, products_with_purchases=2)
+    result['top_products'] = (('000001', 'A', 1, 1, 1, 3), ('000002', 'B', 1, 0, 1, 2))
+    result['top_viewed_products'] = (('000001', 'A', 1, 1, 1, 1), ('000002', 'B', 1, 1, 0, 1))
+    result['top_favorited_products'] = (('000001', 'A', 1, 1, 1, 1),)
+    result['top_purchased_products'] = (('000001', 'A', 1, 1, '4', 1, 1), ('000002', 'B', 1, 1, '4', 1, 0))
+    result['product_category_statistics'] = (('000123', 'Рубашки', 1, 1, 1, 1, '4'),
+                                             ('000124', 'Рубашки', 1, 1, 0, 1, '4'))
+    result['product_category_paths'] = (('000123', (('Длинное название раздела ' * 20).strip(), 'Рубашки')),
+                                        ('000124', ('Другой раздел', 'Рубашки')))
+    for key in ('product_gender_statistics', 'product_season_statistics', 'product_style_statistics'):
+        result[key] = (('Не указано', 2, 2, 1, 2, '8'),)
+    return validate_result(result)
+
+
+def customer_scope_snapshot(base, *, missing_profiles=False, empty=False):
+    from Application.customer_statistics_scope import CustomerScope
+    from Application.analysis_filter import AnalysisFilter
+    from Application.interactions import InteractionType
+    result = empty_snapshot(base, missing_profiles=missing_profiles) if missing_profiles or empty else complete_snapshot(base)
+    scope = CustomerScope(True, True, AnalysisFilter('2026-01-01', '2026-08-31'))
+    scope.profiles_available = not missing_profiles
+    if not empty:
+        if not missing_profiles:
+            scope.profile('with-profile')
+            scope.profile('profile-only')
+        scope.action('with-profile', InteractionType.VIEW, False)
+        scope.action('with-profile', InteractionType.FAVORITE, False)
+        scope.action('buyer', InteractionType.VIEW, True)
+        scope.action('event-only', None, False)
+        scope.order('buyer', True)
+        scope.order('with-profile', True)
+        scope.order('orders-only', False)
+    result['customer_scope'] = scope.result()
     return validate_result(result)
 
 

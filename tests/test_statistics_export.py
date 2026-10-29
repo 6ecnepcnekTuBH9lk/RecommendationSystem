@@ -47,6 +47,20 @@ def test_warnings_and_method_notes_are_not_exported_but_snapshot_is_preserved(sa
         book.close()
 
 
+def test_category_path_beyond_excel_limit_fails_atomically_without_silent_truncation(sample_result, tmp_path):
+    from statistics_export_samples import category_snapshot
+    from Application.statistics_html_export import presentation
+    result = category_snapshot(sample_result)
+    result['product_category_paths'] = (('000123', ('R' * 32768, 'Рубашки')), result['product_category_paths'][1])
+    path = tmp_path / 'previous.xlsx'
+    path.write_bytes(b'previous report')
+    with pytest.raises(ValueError, match='32767'):
+        export.export_statistics(result, path)
+    assert path.read_bytes() == b'previous report'
+    assert any('R' * 32768 in cell['text'] for block in presentation(result)[3].blocks
+               if block['kind'] == 'table' for row in block['rows'] for cell in row)
+
+
 def test_workbook_snapshot_metadata_types_and_sections(sample_result, tmp_path):
     result = sample_result
     result['analysis_filter'] = AnalysisFilter('2025-01-02', '2025-12-30', ('Рубашки', None), None).to_dict()
@@ -228,7 +242,7 @@ def test_saved_sheet_xml_has_grid_without_panes_or_off_table_styling(sample_resu
                     assert dimension.get('style') in (None, '0')
                 for dimension in xml.findall('.//m:row', namespace):
                     assert dimension.get('s') in (None, '0')
-                assert sheet.max_row < 200 and sheet.max_column <= 7
+                assert sheet.max_row < 200 and sheet.max_column <= (8 if sheet.title == 'Товары' else 7)
                 # Inspect blanks in memory without writing any extra cells to the XLSX.
                 for row, column in ((sheet.max_row + 2, 1), (2, sheet.max_column + 2)):
                     cell = sheet.cell(row, column)
@@ -257,8 +271,8 @@ def test_plain_tables_preserve_currencies_ranking_and_summary(sample_result, tmp
         assert assert_minimal_tables(book)
         summary = book['Сводка']
         for label, field in [('Количество взаимодействий', 'total_interactions'), ('Количество заказов', 'orders'),
-                             ('Количество позиций в заказах', 'order_lines'), ('Количество клиентов', 'customers'),
-                             ('Активные клиенты', 'interaction_users'), ('Покупатели', 'purchase_users'),
+                             ('Количество позиций в заказах', 'order_lines'), ('Профили текущего среза', 'customers'),
+                             ('Клиенты с товарными взаимодействиями', 'interaction_users'), ('Покупатели', 'purchase_users'),
                              ('Повторные покупатели', 'repeat_buyers'), ('Доля повторных покупателей', 'repeat_buyer_rate')]:
             assert kpi(summary, label).value == result[field]
         assert kpi(summary, 'Доля повторных покупателей').number_format == export.PERCENT_FORMAT
@@ -372,7 +386,7 @@ def test_empty_valid_snapshot_has_only_real_tables(sample_result, tmp_path, miss
     book = load_workbook(path)
     try:
         assert all(not sheet._charts for sheet in book)
-        assert kpi(book['Сводка'], 'Количество клиентов').value == ('Нет данных' if missing_profiles else 0)
+        assert kpi(book['Сводка'], 'Профили текущего среза').value == ('Нет данных' if missing_profiles else 0)
         assert kpi(book['Сводка'], 'Количество взаимодействий').value == 0
         assert find(book['Клиенты'], 'Средний возраст')[1].value is None
         assert assert_minimal_tables(book)

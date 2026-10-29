@@ -48,12 +48,12 @@ def normalized(value):
 def golden(dataset, selection):
     expected = reference.calculate_statistics(raw_root=dataset[0], catalog_path=dataset[1], analysis_filter=selection)
     actual = query(dataset, selection)
-    assert len(fields(expected)) == len(fields(actual)) == 88
+    assert len(fields(expected)) == len(fields(actual)) == 90
     assert normalized(actual) == normalized(expected)
     return actual
 
 
-def test_full_88_field_matrix_preserves_first_snapshot_scopes_decimal_and_product_occurrences(dataset):
+def test_full_field_matrix_preserves_first_snapshot_scopes_decimal_and_product_occurrences(dataset):
     catalog(dataset)
     first = order(["CP", "CD", "Return", "delivering", "F"], "same")
     first["lines"][1]["product"]["ids"]["offline1C"] = "000002-size"
@@ -110,6 +110,19 @@ def test_basic_projection_does_not_read_any_raw_json_or_customers_rows_at_query(
     content = (folder/"statistics.sqlite").read_bytes()
     assert b'"mindboxId"' not in content
     assert not list(folder.glob("*-journal"))
+
+
+def test_indexed_and_reference_keep_same_frozen_category_paths_without_raw_reads(dataset, monkeypatch):
+    dataset[1].write_text('КодНоменклатуры|КатегорияНаСайте\n000001|000123\n000002|000124\n', encoding='utf-8-sig')
+    (dataset[0] / 'site_categories.csv').write_text(
+        'КодКатегории|НазваниеКатегории|КодРодительскойКатегории\n'
+        '000123|Рубашки|root\n000124|Рубашки|missing\nroot|Раздел|\n', encoding='utf-8-sig')
+    expected = reference.calculate_statistics(raw_root=dataset[0], catalog_path=dataset[1])
+    build(dataset)
+    monkeypatch.setattr(reference, 'iter_export', lambda *a, **k: pytest.fail('raw read'))
+    actual = query(dataset)
+    assert normalized(actual) == normalized(expected)
+    assert dict(actual.product_category_paths) == {'000123': ('Раздел', 'Рубашки'), '000124': None}
 
 
 @pytest.mark.parametrize("source", ["revision", "actions", "merges", "customers", "catalog", "categories", "selection", "algorithm", "runtime"])

@@ -125,7 +125,7 @@ class Projector:
         customer = order_sid = fingerprint = None
         header_bad = adapter_bad = aggregate_bad = 0
         details, rows, eligible = {}, [], []
-        if not bad_date and not outside:
+        if not bad_date:
             try:
                 for index, line in enumerate(objects(raw, "lines", required=True)):
                     quantity = number(line, "quantity")
@@ -225,15 +225,17 @@ def action_record(raw, products):
         product_view_is_available=details.get("available"))
 
 
-def profile_result(db, provenance, root, as_of, check, progress, cohort=None, identities=None):
+def profile_result(db, provenance, root, as_of, check, progress, cohort=None, identities=None, scope=None):
     from Application.customer_demographics import AGE_LABELS, age_group, calendar_age
     from Application.dataset_statistics import Coverage, _distribution, _histogram_median
     genders, ages, groups = Counter(), Counter(), Counter()
     customers = provenance["customers"]
     count = 0 if customers["present"] else None
+    if scope is not None:
+        scope.profiles_available = customers['present']
     summary = json.loads(customers.get("summary") or "{}")
     seen = set()
-    if cohort is not None:
+    if cohort is not None and scope is None:
         db.execute("CREATE TEMP TABLE cohort(customer INTEGER PRIMARY KEY)")
         db.executemany("INSERT INTO cohort VALUES(?)", ((int(c),) for c in cohort))
         rows = db.execute("SELECT p.customer,p.sex,p.born FROM cohort c CROSS JOIN demographics.profiles p INDEXED BY profile_cohort ON p.customer=c.customer ORDER BY p.ordinal")
@@ -242,8 +244,10 @@ def profile_result(db, provenance, root, as_of, check, progress, cohort=None, id
     try:
         for sid, sex, birthday in rows:
             check()
+            if scope is not None:
+                scope.profile(str(sid))  # Same local SID representation as indexed events.
             if cohort is not None:
-                if sid in seen:
+                if (scope is not None and str(sid) not in cohort) or sid in seen:
                     continue
                 seen.add(sid)
             count += 1
@@ -255,7 +259,7 @@ def profile_result(db, provenance, root, as_of, check, progress, cohort=None, id
                 ages[age] += 1
     finally:
         rows.close()
-        if cohort is not None:
+        if cohort is not None and scope is None:
             db.execute("DROP TABLE cohort")
     kinds = summary.get("source_kinds", [summary["source_kind"]] if summary.get("source_kind") else [])
     coverage = Coverage("Customers", tuple(tuple(v) for v in summary.get("intervals", ())), tuple(kinds), summary.get("updated"))

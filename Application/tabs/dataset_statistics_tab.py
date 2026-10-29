@@ -17,6 +17,10 @@ from PyQt6.QtWidgets import (
 from Application.statistics_presentation import (
     SOURCE_ACTIONS_HEADING as SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING as ACTION_QUALITY_HEADING,
     source_action_rows, source_action_quality_rows,
+    SOURCE_EVENT_QUALITY_HEADING, SOURCE_EVENT_QUALITY_NOTES, RESOLUTION_NOTES, source_event_quality_rows,
+    CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows,
+    CUSTOMER_SCOPE_NOTES, customer_scope_sections, customer_scope_context,
+    PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL,
 )
 from Application import statistics_charts as charts
 from Application.loading_errors import format_error
@@ -160,6 +164,13 @@ def _actions_page(layout, result):
                     ("Добавления в избранное", result["favorite_interactions"]),
                     ("Клиенты с просмотрами", result["view_users"]),
                     ("Клиенты с избранным", result["favorite_users"])])
+    section = _section_heading(layout, SOURCE_EVENT_QUALITY_HEADING)
+    quality = source_event_quality_rows(result)
+    title, rate = quality[6]
+    _cards(section, [(title, "Нет данных" if rate is None else f"{rate:.2f}".replace(".", ",") + " %")])
+    table(["Показатель", "Значение"],
+          [(name, "Нет данных" if value is None else value) for name, value in quality[:6] + quality[7:]])
+    section.addWidget(_label("\n".join(f"{name}: {text}" for name, text in SOURCE_EVENT_QUALITY_NOTES)))
     section = _section_heading(layout, "Активность клиентов")
     table(["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"], [
         ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
@@ -201,6 +212,7 @@ def _products_page(layout, result):
             option.text = title.upper()
             size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
             widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
+        return widget
 
     def group(first, field):
         table([first, "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
@@ -223,8 +235,13 @@ def _products_page(layout, result):
     table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
           [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
     section = _section_heading(layout, "Категории товаров")
-    table(["Категория", "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
-          [(*row[1:6], _decimal_display(row[6], money=False)) for row in result["product_category_statistics"]])
+    section.addWidget(_label(DIRECT_CATEGORY_NOTE))
+    categories = table(CATEGORY_HEADERS,
+                       [(*row[:7], _decimal_display(row[7], money=False)) for row in product_category_rows(result)])
+    # A long saved path remains one complete line, accessible by the table's
+    # horizontal scrollbar; no clipping to the generic 440 px column limit.
+    categories.setWordWrap(False)
+    categories.resizeColumnToContents(2)
     for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
                          ("Спрос по стилевой группе", "product_style_statistics")):
         section = _section_heading(layout, title)
@@ -232,6 +249,7 @@ def _products_page(layout, result):
             section.addWidget(charts.create_season_chart(result))
         group("Значение", field)
     section = _section_heading(layout, "Качество сопоставления")
+    section.addWidget(_label(" ".join(text for _, text in RESOLUTION_NOTES)))
     table(["Показатель", "Значение"], [
         ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
         ("Уникальные распознанные товары", result["unique_resolved_items"]),
@@ -346,7 +364,7 @@ class DatasetStatisticsTab(QWidget):
         self.description = _information_label(SOURCE_DESCRIPTION)
         layout.addWidget(self.description)
         self.card_labels = _cards(layout, [(name, None) for name in (
-            "Количество взаимодействий", "Количество заказов", "Количество позиций в заказах", "Количество клиентов")])
+            "Количество взаимодействий", "Количество заказов", "Количество позиций в заказах", PROFILE_SLICE_LABEL)])
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(CONTROL_SPACING)
@@ -660,9 +678,16 @@ class DatasetStatisticsTab(QWidget):
         _actions_page(actions, result)
         _orders_page(orders, result)
         _products_page(products, result)
-        _cards(customers, [("Количество клиентов", result["customers"]),
-                          ("Активные клиенты", result["interaction_users"]),
+        _cards(customers, [(PROFILE_SLICE_LABEL, result["customers"]),
+                          (ITEM_CLIENTS_LABEL, result["interaction_users"]),
                           ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
+        for title, rows in customer_scope_sections(result):
+            customer_section = _section_heading(customers, title)
+            scope_table = _table(customer_section, ['Показатель', 'Значение'], rows)
+            scope_table.resizeRowsToContents()
+            scope_table.fit_height()
+        customer_section.addWidget(_label(customer_scope_context(result)))
+        customer_section.addWidget(_label('\n'.join(f'{name}: {text}' for name, text in CUSTOMER_SCOPE_NOTES)))
         customer_section = _section_heading(customers, "Портрет клиента")
         if result["customers"] is None:
             customer_section.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))

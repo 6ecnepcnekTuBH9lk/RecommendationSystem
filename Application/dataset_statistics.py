@@ -31,6 +31,7 @@ from Application.order_statistics import CURRENCY_WARNING, OrderAggregates, orde
 from Application.statistics_period import shared_intervals
 from Application.action_statistics import ActionAggregates
 from Application.product_statistics import ProductAggregates, ProductMetadata
+from Application.customer_statistics_scope import CustomerScope
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,10 @@ class DatasetStatistics:
     product_season_statistics: tuple[tuple[str, int, int, int, int, str], ...]
     product_style_statistics: tuple[tuple[str, int, int, int, int, str], ...]
     analysis_filter: AnalysisFilter = AnalysisFilter()
+    # Optional snapshot metadata; legacy results have no paths. Seven category
+    # aggregate fields above retain their positions and numerical semantics.
+    product_category_paths: tuple[tuple[str, tuple[str, ...] | None], ...] | None = None
+    customer_scope: dict | None = None
 
 
 def _distribution(counts, labels):
@@ -200,7 +205,7 @@ class _Interactions:
         return resolved
 
 
-def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=None):
+def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=None, scope=None):
     from Application.customer_demographics import AGE_LABELS, age_group, calendar_age
 
     path = database(root)
@@ -212,13 +217,17 @@ def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=Non
     connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     try:
         count = 0
+        if scope is not None:
+            scope.profiles_available = True
         # Stream identity and demographics only; never retain raw profiles/contacts.
         seen = set()
         for source_id, birthday, sex in connection.execute(
                 "SELECT id, json_extract(raw, '$.birthDate'), json_extract(raw, '$.sex') FROM profiles ORDER BY id"):
             check()
+            canonical_id = identities.resolve(source_id) if scope is not None or cohort is not None else source_id
+            if scope is not None:
+                scope.profile(canonical_id)
             if cohort is not None:
-                canonical_id = identities.resolve(source_id)
                 if canonical_id not in cohort or canonical_id in seen:
                     continue
                 seen.add(canonical_id)
@@ -273,14 +282,15 @@ def _catalog_metadata(path):
         return MappingProxyType(metadata)
 
 
-def _category_names(path):
-    """Read only exact category codes/names, never hierarchy or raw rows."""
-    names = {}
+def _category_reference(path):
+    """Names and ordered paths from one CSV read; never aggregate ancestors."""
+    names, parents, ambiguous_parents = {}, {}, set()
     with Path(path).open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream, delimiter="|", strict=True)
         columns = reader.fieldnames or []
         if not {"КодКатегории", "НазваниеКатегории"}.issubset(columns) or len(set(columns)) != len(columns):
             raise CatalogError("Некорректные колонки справочника категорий.")
+        has_parents = "КодРодительскойКатегории" in columns
         for row in reader:
             if None in row or any(value is None for value in row.values()):
                 raise CatalogError("Некорректная структура строки справочника категорий.")
@@ -289,8 +299,37 @@ def _category_names(path):
                 continue
             if code in names and names[code] != name:
                 raise CatalogError("Конфликт названий для кода категории.")
+            parent = row.get("КодРодительскойКатегории", "").strip()
+            if code in parents and parents[code] != parent:
+                ambiguous_parents.add(code)
             names[code] = name
-    return MappingProxyType({code: name or code for code, name in names.items()})
+            parents[code] = parent
+    paths = {}
+    for code in sorted(names):
+        trail, seen, cursor = [], set(), code
+        prefix = ()
+        while cursor:
+            if cursor in paths:
+                prefix = paths[cursor]
+                break
+            if (not has_parents or cursor in seen or cursor not in names
+                    or cursor in ambiguous_parents or not names[cursor]):
+                prefix = None
+                break
+            seen.add(cursor)
+            trail.append(cursor)
+            cursor = parents[cursor]
+        for node in reversed(trail):
+            prefix = (*prefix, names[node]) if prefix is not None else None
+            paths[node] = prefix
+        paths.setdefault(code, None)
+    return (MappingProxyType({code: name or code for code, name in names.items()}),
+            MappingProxyType(paths))
+
+
+def _category_names(path):
+    """Compatibility helper for the existing exact code/name mapping."""
+    return _category_reference(path)[0]
 
 
 def _catalog_snapshot(path):
@@ -306,12 +345,12 @@ def _catalog_snapshot(path):
         before = signature()
         products = load_catalog(path)
         metadata = _catalog_metadata(path)
-        categories = _category_names(categories_path)
+        categories, category_paths = _category_reference(categories_path)
         if signature() != before:
             raise CatalogError("Номенклатура или справочник категорий обновились во время чтения. Повторите расчёт.")
         if products.item_ids != metadata.keys():
             raise CatalogError("Метаданные не соответствуют товарам справочника.")
-        return products, metadata, categories
+        return products, metadata, categories, category_paths
     except (OSError, UnicodeError, csv.Error):
         raise CatalogError("Не удалось прочитать номенклатуру или справочник категорий.") from None
 
@@ -347,7 +386,7 @@ def load_analysis_options(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CAT
         for name, sources in (*entries.items(), ("customer_merges", [data["customer_merges"]])):
             for entry in sources:
                 _source_directory(root, name, entry)
-        _, metadata, _ = _catalog_snapshot(catalog_path)
+        _, metadata, _, _ = _catalog_snapshot(catalog_path)
         period = shared_intervals(*[[(e["since"], e["until"]) for e in entries[name]]
                                   for name in ("actions", "orders")])
         return options_from_snapshot(metadata, period)
@@ -388,7 +427,8 @@ def calculate_statistics(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CATA
                                      calculated_at=calculated_at)
 
 
-def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, input_source=None, *, calculated_at=None):
+def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, input_source=None, *, calculated_at=None,
+                          customer_filter=None):
     """One shared calculation driver. Indexed inputs preserve occurrence order.
 
     The reference path retains the raw reader/adapters. The optional input source
@@ -399,6 +439,8 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     as_of = calculated_at.astimezone().date()
     check()
     data, entries = _statistics_sources(root)
+    customer_filter = analysis_filter if customer_filter is None else customer_filter
+    scope = CustomerScope(bool(entries['actions']), bool(entries['orders']), customer_filter)
     selection = MindboxSelectionConfig(**data["selection"])
     merge = data["customer_merges"]
     warnings = []
@@ -423,11 +465,12 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     identities = input_source.identities if input_source is not None else CustomerIdResolver(adapt_customer_merge(raw)
                                     for raw in records("customer_merges", [merge] if merge else []))
     builder = InteractionBuilder(selection.interaction_rules())
-    product_catalog, metadata, categories = _catalog_snapshot(catalog_path)
+    product_catalog, metadata, categories, category_paths = _catalog_snapshot(catalog_path)
     period = shared_intervals(*[[(entry["since"], entry["until"]) for entry in entries[name]]
                                 for name in ("actions", "orders")])
     if period:
         analysis_filter = options_from_snapshot(metadata, period).normalize(analysis_filter)
+    order_scope_period = shared_intervals([], [(entry['since'], entry['until']) for entry in entries['orders']])
     products = ProductResolver(product_catalog)
 
     def matches(product):
@@ -443,6 +486,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     accepted_counts = Counter()
     business_orders = business_lines = 0
     action_types, statuses = Counter(), Counter()
+    source_classification = Counter()
     action_users, order_users = set(), set()
     accepted_action_users, accepted_order_users = set(), set()
     with_product = missing_action_customer = raw_lines = 0
@@ -455,14 +499,27 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
                 continue
         name = adapt_action_system_name(raw)
         action_types[name] += 1
-        with_product += bool(objects(raw, "products"))
+        has_product = bool(objects(raw, "products"))
+        with_product += has_product
+        kind = classify_action_system_name(name, builder.rules)
+        source_classification['unmapped' if kind is None else kind.value] += 1
+        if kind is not None and not has_product:
+            source_classification['itemless'] += 1
         source = identifier(raw, "customer.ids.mindboxId", required=False)
         if source is not None:
-            action_users.add(identities.resolve(source))
+            canonical_id = identities.resolve(source)
+            action_users.add(canonical_id)
+            if (customer_filter.start_date is None or
+                    (occurred := timestamp(raw, 'dateTimeUtc', required=False)) is not None and customer_filter.contains(occurred)):
+                scope.action(canonical_id, kind, has_product)
         else:
             missing_action_customer += 1
-        if classify_action_system_name(name, builder.rules) is None:
+        if kind is None:
             builder.record_unmapped_action(name)
+            continue
+        if source is None:
+            # An event without identity remains in source diagnostics, never
+            # creates a synthetic customer or an item interaction.
             continue
         action = (input_source.action(raw) if input_source is not None else
                   adapt_action(raw, identities, product_namespaces=selection.action_product_namespaces))
@@ -483,12 +540,32 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
                 product_aggregates.add(resolved)
 
     snapshots = input_source.snapshots() if input_source is not None else OrderSnapshots()
+    scope_only_orders = set()  # Only orders selected outside the legacy shared coverage.
+
+    def scope_order(raw, lines):
+        identity = identities.resolve(identifier(raw, 'customer.ids.mindboxId'))
+        scope.order(identity, any(line.line_status in builder.rules.purchase_line_statuses for line in lines))
+
+    def adapted_lines(raw, eligible):
+        return (input_source.order(raw) if input_source is not None else
+                adapt_order(order_for_adapter({**raw, 'lines': eligible}), identities,
+                            product_namespaces=selection.order_product_namespaces))
+
     order_aggregates = OrderAggregates()
     outside_period = fractional_lines = 0
     for raw in records("orders", entries["orders"]):
         ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
+        scope_eligible = (customer_filter.contains(ordered_at)
+                          and any(start <= ordered_at < end for start, end in order_scope_period))
         if not any(start <= ordered_at < end for start, end in period):
             outside_period += 1
+            if scope_eligible:
+                key = identifier(raw, 'ids.mindboxId')
+                if key not in snapshots.fingerprints and key not in scope_only_orders:
+                    eligible = [line for line in objects(raw, 'lines', required=True)
+                                if (quantity := number(line, 'quantity')) == quantity.to_integral_value()]
+                    scope_order(raw, adapted_lines(raw, eligible))
+                    scope_only_orders.add(key)
             continue
         if not analysis_filter.contains(ordered_at):
             continue
@@ -508,9 +585,9 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
             continue
         buyer = None
         purchases = []
-        eligible_order = {**raw, "lines": eligible_lines}
-        lines = (input_source.order(raw) if input_source is not None else
-                 adapt_order(order_for_adapter(eligible_order), identities, product_namespaces=selection.order_product_namespaces))
+        lines = adapted_lines(raw, eligible_lines)
+        if scope_eligible and identifier(raw, 'ids.mindboxId') not in scope_only_orders:
+            scope_order(raw, lines)
         lines = tuple(line for line in lines if matches(line.product))
         if analysis_filter.product_restricted and not lines:
             continue
@@ -538,7 +615,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     check()
     customers, customer_coverage, genders, ages, mean_age, median_age = (input_source.customer_snapshot if input_source is not None else _customer_snapshot)(
         root, as_of, check, progress,
-        cohort=set(collected.users) if analysis_filter.active else None, identities=identities)
+        cohort=set(collected.users) if analysis_filter.active else None, identities=identities, scope=scope)
     user_types = Counter(collected.user_types.values())
     view_users = sum(n for mask, n in user_types.items() if mask & 1)
     favorite_users = sum(n for mask, n in user_types.items() if mask & 2)
@@ -569,10 +646,10 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
         ("unknown_currency_view_price_actions", action_aggregates.unknown_price_currency),
         ("orders_outside_statistics_period", outside_period),
         ("fractional_quantity_order_lines", fractional_lines),
-        ("mapped_view_actions", interactions.actions_view),
-        ("mapped_favorite_actions", interactions.actions_favorite),
-        ("unmapped_actions", interactions.actions_unmapped),
-        ("mapped_without_product", interactions.actions_malformed),
+        ("mapped_view_actions", source_classification['VIEW']),
+        ("mapped_favorite_actions", source_classification['FAVORITE']),
+        ("unmapped_actions", source_classification['unmapped']),
+        ("mapped_without_product", source_classification['itemless']),
         ("actions_without_customer_id", missing_action_customer),
         ("unknown_candidate", collected.failures["unknown_candidate"]),
         ("unsupported_namespace", collected.failures["unsupported_namespace"]),
@@ -589,13 +666,16 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
         coverage=tuple(_coverage(name.title(), entries[name]) for name in ("actions", "orders"))
                  + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
         analysis_filter=analysis_filter,
-        source_actions=interactions.actions_total,
+        customer_scope=scope.result(check),
+        product_category_paths=tuple((code, category_paths.get(code))
+                                     for code, *_ in product_result["product_category_statistics"] if code is not None),
+        source_actions=sum(action_types.values()),
         total_interactions=sum(accepted_counts.values()),
         orders=business_orders if analysis_filter.active else snapshots.raw,
         order_lines=business_lines if analysis_filter.active else raw_lines, customers=customers,
         action_customers=len(accepted_action_users if analysis_filter.active else action_users),
         order_customers=len(accepted_order_users if analysis_filter.active else order_users), interaction_users=len(collected.users),
-        actions_with_product=with_product, actions_without_product=interactions.actions_total - with_product,
+        actions_with_product=with_product, actions_without_product=sum(action_types.values()) - with_product,
         view_interactions=accepted_counts["VIEW"], favorite_interactions=accepted_counts["FAVORITE"],
         purchase_interactions=accepted_counts["PURCHASE"], purchase_quantity=str(collected.quantity),
         mean_interactions=sum(accepted_counts.values()) / len(collected.users) if collected.users else 0.0,

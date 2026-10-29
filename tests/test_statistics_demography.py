@@ -1,4 +1,4 @@
-"""Controlled local-calendar dates; synthetic sources only, all 88 fields exact."""
+"""Controlled local-calendar dates; synthetic sources only, all fields exact."""
 
 from dataclasses import asdict
 from datetime import datetime
@@ -41,12 +41,12 @@ def exact(data, day, selection=AnalysisFilter()):
     expected = reference.calculate_statistics(raw_root=data[0], catalog_path=data[1],
                                               analysis_filter=selection, calculated_at=at)
     actual = query(data, selection, calculated_at=at)
-    assert len(asdict(actual)) == 88
+    assert len(asdict(actual)) == 90
     assert asdict(actual) == asdict(expected)
     return actual
 
 
-def test_same_generation_all_88_fields_over_birthdays_year_leap_future_and_filters(dataset):
+def test_same_generation_all_fields_over_birthdays_year_leap_future_and_filters(dataset):
     profiles(dataset)
     catalog(dataset)
     built = build(dataset)

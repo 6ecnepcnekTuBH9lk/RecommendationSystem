@@ -79,6 +79,7 @@ def _algorithm_version():
         "interactions.py",
         "product_resolution.py",
         "customer_demographics.py",
+        "customer_statistics_scope.py",
     )
     # Include adapters, identity, strict reader and publication rules recursively.
     paths = [package / name for name in names] + sorted(
@@ -198,6 +199,7 @@ def capture_sources(raw_root, catalog_path, analysis_filter, *, already_locked=F
             "as_of": local.date().isoformat(),
             "timezone": str(local.tzinfo),
             "filter": effective.to_dict(),
+            "customer_period": {"start_date": analysis_filter.start_date, "end_date": analysis_filter.end_date},
         }
         # Freeze to JSON primitives, so comparisons survive disk round trips.
         return json.loads(_json(source)), effective
@@ -219,6 +221,8 @@ def load_slice(directory, provenance):
         ):
             return None
         result = validate_result(payload["result"])
+        if result.get('customer_scope') is not None and result['customer_scope']['period'] != provenance['customer_period']:
+            return None
         if (
             AnalysisFilter.from_dict(result["analysis_filter"]).to_dict()
             != AnalysisFilter.from_dict(provenance["filter"]).to_dict()
@@ -244,6 +248,8 @@ def load_slice(directory, provenance):
 
 def save_slice(directory, provenance, result):
     validate_result(result)
+    if result.get('customer_scope') is not None and result['customer_scope']['period'] != provenance['customer_period']:
+        raise ValueError('Customer period differs from provenance')
     path = Path(directory) / (_digest(provenance) + ".json")
     if path.is_symlink():
         raise ValueError("Unsafe statistics slice path")

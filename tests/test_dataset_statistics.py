@@ -1085,7 +1085,7 @@ def test_catalog_metadata_projection_immutable_and_missing_values(tmp_path, enco
     path.write_text("КодНоменклатуры|НазваниеНаСайте|Номенклатура|КатегорияНаСайте|Остаток|ТитульнаяФотография\n"
                     "000001|  | Fallback | A,B;C/D |not-a-number|private-photo\n000002|||||\n", encoding=encoding)
     (tmp_path / "site_categories.csv").write_text("КодКатегории|НазваниеКатегории\n", encoding="utf-8-sig")
-    catalog, metadata, _ = _catalog_snapshot(path)
+    catalog, metadata, _, _ = _catalog_snapshot(path)
     assert catalog.item_ids == metadata.keys()
     assert metadata["000001"].name == "Fallback"
     assert metadata["000001"].category == "A,B;C/D"
@@ -1269,13 +1269,13 @@ def test_category_reference_read_errors_are_safe(dataset, content):
 def test_reference_snapshot_covers_both_files(dataset, monkeypatch, changed_file):
     from Application import dataset_statistics as statistics
     from Application.product_resolution import CatalogError
-    original = statistics._category_names
+    original = statistics._category_reference
     def changed(path):
         result = original(path)
         with (dataset[0] / changed_file).open('a', encoding='utf-8') as stream:
             stream.write('\n')
         return result
-    monkeypatch.setattr(statistics, '_category_names', changed)
+    monkeypatch.setattr(statistics, '_category_reference', changed)
     with pytest.raises(CatalogError, match='во время чтения'):
         calculate(dataset)
 

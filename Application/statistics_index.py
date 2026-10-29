@@ -42,7 +42,7 @@ def source_version(provenance):
     # Only final results depend on the local demographic day/timezone/filter.
     # Customers and Merges remain bound: independent source refresh is unsafe
     # without a persistent original-ID to SID mapping (intentionally absent).
-    return {k: v for k, v in provenance.items() if k not in {"filter", "as_of", "timezone"}}
+    return {k: v for k, v in provenance.items() if k not in {"filter", "as_of", "timezone", "customer_period"}}
 
 
 def component_digest(path, check=lambda: None):
@@ -238,7 +238,7 @@ def build_statistics_index(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CA
                         yield adapt_customer_merge(raw)
 
                 identities = CustomerIdResolver(merges())
-                catalog, metadata, _ = reference._catalog_snapshot(catalog_path)
+                catalog, metadata, _, _ = reference._catalog_snapshot(catalog_path)
                 products = ProductResolver(catalog)
                 db.executemany("INSERT INTO items VALUES(?,?,?)", ((code, item.nomenclature_type, item.collection)
                                                                   for code, item in metadata.items()))

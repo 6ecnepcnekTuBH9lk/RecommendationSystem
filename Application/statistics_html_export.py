@@ -9,13 +9,13 @@ import re
 
 from Application import statistics_export as tables
 from Application.analysis_filter import AnalysisFilter
-from Application.statistics_presentation import _calculation_message, _date_time
+from Application.statistics_presentation import _calculation_message, _date_time, ITEM_CLIENTS_LABEL
 
 
 SECTIONS = ('Обзор', *tables.SHEET_NAMES[1:])
 ASSETS = Path(__file__).with_name('statistics_html_assets')
 TEXT_TRANSLATION = str.maketrans({'ё': 'е', 'Ё': 'Е', '—': '-', '–': '-'})
-IDENTIFIER_HEADERS = {'Код', 'Артикул', 'Системное название', 'Система идентификаторов', 'Статус'}
+IDENTIFIER_HEADERS = {'Код', 'Код категории', 'Артикул', 'Системное название', 'Система идентификаторов', 'Статус'}
 
 
 def display_text(value):
@@ -227,7 +227,7 @@ def build_statistics_html(result):
     overview = (
         ('Взаимодействия', 'total_interactions'), ('Просмотры', 'view_interactions'),
         ('Добавления в избранное', 'favorite_interactions'), ('Заказы', 'orders'), ('Покупатели', 'purchase_users'),
-        ('Повторные покупатели', 'repeat_buyers'), ('Активные клиенты', 'interaction_users'),
+        ('Повторные покупатели', 'repeat_buyers'), (ITEM_CLIENTS_LABEL, 'interaction_users'),
         ('Доля повторных покупателей', 'repeat_buyer_rate'))
     kpi = ''.join(f'<article class="kpi"><span>{display_text(label)}</span><strong>{escape(_cell(result[field])["text"])}'
                   f'{" %" if field == "repeat_buyer_rate" else ""}</strong></article>' for label, field in overview)

@@ -74,6 +74,100 @@ SOURCE_ACTIONS_HEADING = "Исходные события Actions"
 ACTION_QUALITY_HEADING = "Качество событий Actions"
 ACTION_SOURCE_KEYS = ("mapped_view_actions", "mapped_favorite_actions", "unmapped_actions", "mapped_without_product")
 
+SOURCE_EVENT_QUALITY_HEADING = "Качество исходных событий"
+SOURCE_EVENT_QUALITY_NOTES = (
+    ("Единица счёта", "Одно исходное событие независимо от количества товарных вхождений."),
+    ("Знаменатель доли", "Всего исходных VIEW/FAVORITE в выбранном периоде до товарного отбора. "
+     "Доля без товара = 100 × события без товара / всего VIEW/FAVORITE."),
+    ("Событие с товаром", "Есть товарное вхождение; корректность идентификатора и успешное "
+     "сопоставление с каталогом этим не подтверждаются."),
+)
+RESOLUTION_NOTES = (
+    ("Область расчёта", "Доля распознанных рассчитана среди товарных взаимодействий, "
+     "включённых в анализ после применения отбора."),
+    ("Полнота источника", "Она не характеризует полноту идентификаторов во всех исходных "
+     "событиях VIEW/FAVORITE."),
+    ("Типы взаимодействий", "В показатель могут входить покупки."),
+)
+
+CATEGORY_HEADERS = ("Код категории", "Название категории", "Путь категории", "Товаров",
+                    "Просмотры", "Избранное", "Покупки", "Продано единиц")
+DIRECT_CATEGORY_NOTE = ("Каждый товар учитывается в одной прямой категории. "
+                        "Родительские категории не включают показатели дочерних категорий автоматически.")
+LEGACY_CATEGORY_PATH = "Путь недоступен в сохранённом результате"
+UNAVAILABLE_CATEGORY_PATH = "Путь недоступен в справочнике"
+PROFILE_SLICE_LABEL = "Профили текущего среза"
+ITEM_CLIENTS_LABEL = "Клиенты с товарными взаимодействиями"
+
+CUSTOMER_SCOPE_NOTES = (
+    ("Источники и время", "Профили Customers — доступный снимок. Actions и Orders — наблюдаемые события периода. "
+     "Это не историческая реконструкция всех клиентов компании."),
+    ("Множества", "Клиенты разных источников и типов активности пересекаются: их количества нельзя складывать. "
+     "Общая база B — объединение канонических ID профилей, Actions и выбранных снимков Orders."),
+    ("Снимки заказов", "Используется первый подходящий снимок заказа в периоде. "
+     "Одинаковые и конфликтующие дубли не добавляют клиентов и не заменяют владельца заказа."),
+    ("Цифровая активность", "Исходные VIEW/FAVORITE учитываются и без товара. Неклассифицированные Actions "
+     "не считаются цифровой активностью VIEW/FAVORITE. Товарный отбор не меняет новый охват клиентов."),
+    ("Покупки и знаменатель", "Покупатель — клиент с принятой позицией покупки по всем товарам и действующим статусам. "
+     "Доли рассчитаны от B. Без наблюдаемой покупки в периоде не означает отсутствие покупок за всю жизнь."),
+    ("Прежние показатели", "Количество профилей и клиентов с товарными взаимодействиями в прежних таблицах "
+     "сохраняет свой товарный срез; эти показатели не заменяют объединённую базу B."),
+)
+
+
+def customer_scope_sections(result):
+    scope = result['customer_scope'] if 'customer_scope' in result else None
+    groups = (
+        ('Охват клиентской базы', (
+            ('Идентифицированные клиенты в доступных источниках', 'identified'),
+            ('Уникальные клиенты с профилями', 'profiles'),
+            ('Клиенты исходных Actions', 'actions'), ('Клиенты исходных Orders', 'orders'),
+            ('Клиенты без доступного профиля', 'without_profile'),
+            ('Клиенты только с профилем, без наблюдаемых Actions/Orders за период', 'profile_only'),
+            ('Наблюдаемые ID клиентов событий (доступная часть)', 'events'))),
+        ('Цифровая активность клиентов', (
+            ('Клиенты с исходными VIEW', 'views'), ('Клиенты с исходными FAVORITE', 'favorites'),
+            ('Клиенты с VIEW или FAVORITE', 'digital'), ('Клиенты с VIEW и FAVORITE', 'view_favorite'),
+            ('Клиенты с VIEW/FAVORITE без товарного идентификатора', 'itemless_digital'))),
+        ('Покупатели и клиенты без покупок', (
+            ('Покупатели по всем товарам за выбранный период', 'buyers'),
+            ('Без наблюдаемых покупок за выбранный период', 'non_buyers'),
+            ('Доля покупателей от идентифицированной базы, %', 'buyer_rate'),
+            ('Доля клиентов без наблюдаемых покупок, %', 'non_buyer_rate'))),
+    )
+    return [(title, [(label, 'Нет данных в сохранённом результате' if scope is None else
+                     scope[key] if scope[key] is not None else 'Нет данных') for label, key in rows])
+            for title, rows in groups]
+
+
+def customer_scope_context(result):
+    scope = result.get('customer_scope')
+    if scope is None:
+        return 'Новый охват не рассчитан в сохранённом результате. Пересчёт при открытии или экспорте не выполняется.'
+    period = AnalysisFilter(**scope['period'])
+    text = ('Период событий: ' + period.summary().removeprefix('Отбор → период ') + '.' if period.start_date else
+            'Период событий: вся доступная наблюдаемая история; покрытие источников приведено в технической информации.')
+    if not all(scope[k] for k in ('profiles_available', 'actions_available', 'orders_available')):
+        text += ' Не все источники доступны: общая база B и её доли неизвестны. Наблюдаемые ID событий показывают доступную часть.'
+    return text
+
+
+def product_category_rows(result):
+    """Only saved metadata; never consult today's category CSV during display."""
+    saved = result["product_category_paths"] if "product_category_paths" in result else None
+    paths = dict(saved) if saved is not None else {}
+    rows = []
+    for code, name, *values in result["product_category_statistics"]:
+        if code is None:
+            path = "Категория не указана"
+        elif saved is None:
+            path = LEGACY_CATEGORY_PATH
+        else:
+            # ASCII separator is readable even with the bundled Material font.
+            path = " / ".join(paths[code]) if paths.get(code) else UNAVAILABLE_CATEGORY_PATH
+        rows.append((code if code is not None else "Не указан", name, path, *values))
+    return rows
+
 
 def source_action_rows(result):
     """Raw event shares use the same date-scoped source population as counts."""
@@ -87,3 +181,29 @@ def source_action_quality_rows(result):
             ("Исходные Actions с товаром", result["actions_with_product"]),
             ("Исходные Actions без товара", result["actions_without_product"]),
             *((DIAGNOSTIC_LABELS[key], diagnostics[key]) for key in ACTION_SOURCE_KEYS)]
+
+
+def source_event_quality_rows(result):
+    """Event-level quality from saved counters, independent of item selection.
+
+    Do not substitute all-Action product counts or item-interaction counts.
+    Inconsistent counters cannot establish a difference or a percentage; keep
+    their original values visible and leave those derived values unavailable.
+    """
+    diagnostics = dict(result["diagnostics"])
+    views = diagnostics["mapped_view_actions"]
+    favorites = diagnostics["mapped_favorite_actions"]
+    total = views + favorites
+    missing = diagnostics["mapped_without_product"]
+    unmapped = diagnostics["unmapped_actions"]
+    consistent = total + unmapped == result["source_actions"] and 0 <= missing <= total
+    return [
+        ("Все исходные Actions", result["source_actions"]),
+        ("Исходные VIEW", views),
+        ("Исходные FAVORITE", favorites),
+        ("Всего VIEW/FAVORITE", total),
+        ("VIEW/FAVORITE с товаром", total - missing if consistent else None),
+        ("VIEW/FAVORITE без товара", missing),
+        ("Доля VIEW/FAVORITE без товара, %", 100 * missing / total if consistent and total else None),
+        ("Неклассифицированные Actions", unmapped),
+    ]

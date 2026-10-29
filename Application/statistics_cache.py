@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
+from Application.customer_statistics_scope import validate_customer_scope
 
 from Application.paths import USER_SETTINGS_DIR
 from Application.analysis_filter import AnalysisFilter
@@ -337,6 +338,20 @@ def validate_result(result):
         _validate_orders(result)
         _validate_actions(result)
         _validate_products(result)
+        validate_customer_scope(result.get('customer_scope'))
+        # Optional presentation metadata: legacy schema-10 snapshots remain
+        # valid without mutation. Present paths must match the direct rows.
+        paths = result.get("product_category_paths")
+        if paths is not None:
+            categories = {row[0]: row[1] for row in result["product_category_statistics"] if row[0] is not None}
+            label = lambda value: isinstance(value, str) and bool(value.strip()) and value == value.strip()
+            if not _rows(paths, (label, lambda value: value is None or
+                                isinstance(value, (list, tuple)) and bool(value) and all(label(v) for v in value))):
+                raise ValueError
+            if [row[0] for row in paths] != list(categories):
+                raise ValueError
+            if any(path is not None and path[-1] != categories[code] for code, path in paths):
+                raise ValueError
         keys = [key for key, _ in result["diagnostics"]]
         if len(keys) != len(set(keys)) or set(keys) != set(DIAGNOSTIC_KEYS):
             raise ValueError

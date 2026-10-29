@@ -15,6 +15,10 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from Application.statistics_presentation import (
     SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING, source_action_rows, source_action_quality_rows,
+    SOURCE_EVENT_QUALITY_HEADING, SOURCE_EVENT_QUALITY_NOTES, RESOLUTION_NOTES, source_event_quality_rows,
+    CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows,
+    CUSTOMER_SCOPE_NOTES, customer_scope_sections, customer_scope_context,
+    PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL,
 )
 from Application.analysis_filter import AnalysisFilter
 from Application.statistics_cache import parse_timestamp
@@ -58,7 +62,7 @@ class _Sheet:
         self.ws.sheet_format.defaultRowHeight = ROW_HEIGHT
         widths = (34, 48, 18, 20, 20, 20, 22)
         if worksheet.title == "Товары":
-            widths = (18, 48, 18, 20, 20, 20, 22)
+            widths = (20, 48, 72, 18, 20, 20, 20, 22)
         for column, width in enumerate(widths, 1):
             self.ws.column_dimensions[get_column_letter(column)].width = width
         self.write(["KANZLER AI"], section=True)
@@ -113,6 +117,8 @@ class _Sheet:
         self.write(headers, header=True)
         formats = {i: PERCENT_FORMAT for i, label in enumerate(headers, 1) if "%" in label}
         for values in rows:
+            if tuple(headers) == CATEGORY_HEADERS and len(values[2]) > 32767:
+                raise ValueError("Путь категории превышает лимит ячейки XLSX (32767 символов).")
             self.write(values, formats=formats)
         last = self.row - 1
         if last > header and len(headers) > 1:
@@ -142,7 +148,8 @@ class _Sheet:
 
     def cards(self, values):
         self.table(["Показатель", "Значение"], [
-            (label, _Numeric(Decimal(str(value)), PERCENT_FORMAT) if label.startswith("Доля") and value is not None else value)
+            (label, _Numeric(Decimal(str(value)), PERCENT_FORMAT)
+             if label.startswith("Доля") and value is not None and not isinstance(value, str) else value)
             for label, value in values])
 
 
@@ -166,8 +173,8 @@ def _summary(sheet, result):
     sheet.heading("Основные показатели")
     main = (
         ("Количество взаимодействий", "total_interactions"), ("Количество заказов", "orders"),
-        ("Количество позиций в заказах", "order_lines"), ("Количество клиентов", "customers"),
-        ("Активные клиенты", "interaction_users"), ("Покупатели", "purchase_users"),
+        ("Количество позиций в заказах", "order_lines"), (PROFILE_SLICE_LABEL, "customers"),
+        (ITEM_CLIENTS_LABEL, "interaction_users"), ("Покупатели", "purchase_users"),
         ("Повторные покупатели", "repeat_buyers"), ("Доля повторных покупателей", "repeat_buyer_rate"))
     sheet.cards([(label, result[key] if result[key] is not None else "Нет данных") for label, key in main])
 
@@ -214,6 +221,12 @@ def _actions_page(layout, result):
                     ("Добавления в избранное", result["favorite_interactions"]),
                     ("Клиенты с просмотрами", result["view_users"]),
                     ("Клиенты с избранным", result["favorite_users"])])
+    layout.heading(SOURCE_EVENT_QUALITY_HEADING)
+    quality = source_event_quality_rows(result)
+    layout.cards([(name, "Нет данных" if value is None else value) for name, value in quality[6:7]])
+    table(["Показатель", "Значение"],
+          [(name, "Нет данных" if value is None else value) for name, value in quality[:6] + quality[7:]])
+    table(["Пояснение", "Определение"], SOURCE_EVENT_QUALITY_NOTES)
     layout.heading("Активность клиентов")
     table(["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"], [
         ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
@@ -293,13 +306,15 @@ def _products_page(layout, result):
     table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
           [(*row[:4], _decimal(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
     layout.heading("Категории товаров")
-    table(["Категория", "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
-          [(*row[1:6], _decimal(row[6], money=False)) for row in result["product_category_statistics"]])
+    table(["Пояснение", "Определение"], [("Прямые категории", DIRECT_CATEGORY_NOTE)])
+    table(CATEGORY_HEADERS,
+          [(*row[:7], _decimal(row[7], money=False)) for row in product_category_rows(result)])
     for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
                          ("Спрос по стилевой группе", "product_style_statistics")):
         layout.heading(title)
         group("Значение", field)
     layout.heading("Качество сопоставления")
+    table(["Пояснение", "Определение"], RESOLUTION_NOTES)
     table(["Показатель", "Значение"], [
         ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
         ("Уникальные распознанные товары", result["unique_resolved_items"]),
@@ -337,9 +352,13 @@ def _clients_technical(customers, technical, result):
     technical.table(["Системное название", "Количество", "Доля, %"], source_action_rows(result))
     technical.heading(ACTION_QUALITY_HEADING)
     technical.table(["Классификация событий", "Количество"], source_action_quality_rows(result))
-    customers.cards([("Количество клиентов", result["customers"]),
-                      ("Активные клиенты", result["interaction_users"]),
+    customers.cards([(PROFILE_SLICE_LABEL, result["customers"]),
+                      (ITEM_CLIENTS_LABEL, result["interaction_users"]),
                       ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
+    for title, rows in customer_scope_sections(result):
+        customers.heading(title)
+        customers.cards(rows)
+    customers.table(['Пояснение', 'Определение'], [('Период и полнота', customer_scope_context(result)), *CUSTOMER_SCOPE_NOTES])
     customers.heading("Портрет клиента")
     customers.table(["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
     customers.cards([("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
