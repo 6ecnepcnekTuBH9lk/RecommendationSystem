@@ -42,7 +42,7 @@ def source_version(provenance):
     # Only final results depend on the local demographic day/timezone/filter.
     # Customers and Merges remain bound: independent source refresh is unsafe
     # without a persistent original-ID to SID mapping (intentionally absent).
-    return {k: v for k, v in provenance.items() if k not in {"filter", "as_of", "timezone", "customer_period"}}
+    return {k: v for k, v in provenance.items() if k not in {"filter", "as_of", "timezone", "customer_period", "rfm_as_of"}}
 
 
 def component_digest(path, check=lambda: None):

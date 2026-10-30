@@ -32,6 +32,10 @@ from Application.statistics_period import shared_intervals
 from Application.action_statistics import ActionAggregates
 from Application.product_statistics import ProductAggregates, ProductMetadata
 from Application.customer_statistics_scope import CustomerScope
+from Application.statistics_buyer_aggregates import BuyerAggregates
+from Application.statistics_purchase_facts import build_purchase_order_fact
+from Application.statistics_rfm_core import RfmAggregates
+from Application.statistics_rfm_validation import rfm_cutoff
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,8 @@ class DatasetStatistics:
     # aggregate fields above retain their positions and numerical semantics.
     product_category_paths: tuple[tuple[str, tuple[str, ...] | None], ...] | None = None
     customer_scope: dict | None = None
+    buyer_statistics: dict | None = None
+    rfm_statistics: dict | None = None
 
 
 def _distribution(counts, labels):
@@ -205,7 +211,7 @@ class _Interactions:
         return resolved
 
 
-def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=None, scope=None):
+def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=None, scope=None, buyers=None):
     from Application.customer_demographics import AGE_LABELS, age_group, calendar_age
 
     path = database(root)
@@ -219,14 +225,18 @@ def _customer_snapshot(root, as_of, check, progress, cohort=None, identities=Non
         count = 0
         if scope is not None:
             scope.profiles_available = True
+        if buyers is not None:
+            buyers.profiles_available = True
         # Stream identity and demographics only; never retain raw profiles/contacts.
         seen = set()
         for source_id, birthday, sex in connection.execute(
                 "SELECT id, json_extract(raw, '$.birthDate'), json_extract(raw, '$.sex') FROM profiles ORDER BY id"):
             check()
-            canonical_id = identities.resolve(source_id) if scope is not None or cohort is not None else source_id
+            canonical_id = identities.resolve(source_id) if scope is not None or cohort is not None or buyers is not None else source_id
             if scope is not None:
                 scope.profile(canonical_id)
+            if buyers is not None:
+                buyers.profile(canonical_id, sex, birthday, as_of)
             if cohort is not None:
                 if canonical_id not in cohort or canonical_id in seen:
                     continue
@@ -471,6 +481,13 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     if period:
         analysis_filter = options_from_snapshot(metadata, period).normalize(analysis_filter)
     order_scope_period = shared_intervals([], [(entry['since'], entry['until']) for entry in entries['orders']])
+    buyer_aggregates = BuyerAggregates('INDEXED' if input_source is not None else 'REFERENCE', customer_filter,
+                                      order_scope_period, orders_available=bool(entries['orders']))
+    rfm_date = rfm_cutoff(order_scope_period, customer_filter.end_date, calculated_at)
+    rfm = (RfmAggregates(rfm_date, order_scope_period, identity_space=buyer_aggregates.identity_space, check=check)
+           if rfm_date is not None else None)
+    if input_source is not None:
+        input_source.rfm_interval = rfm.windows['LAST_48M'] if rfm is not None else None
     products = ProductResolver(product_catalog)
 
     def matches(product):
@@ -541,20 +558,44 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
 
     snapshots = input_source.snapshots() if input_source is not None else OrderSnapshots()
     scope_only_orders = set()  # Only orders selected outside the legacy shared coverage.
+    rfm_orders = set()  # First eligible snapshot in the independent 48-month area.
+    prepared_lines = prepared_fact = None
 
-    def scope_order(raw, lines):
+    def purchase_fact(raw, lines, ordered_at):
+        nonlocal prepared_fact
+        if prepared_fact is None:
+            prepared_fact = build_purchase_order_fact(
+                lines, identity_space=buyer_aggregates.identity_space,
+                customer_id=identities.resolve(identifier(raw, 'customer.ids.mindboxId')),
+                order_id=identifier(raw, 'ids.mindboxId'), order_datetime_utc=ordered_at, check=check)
+        return prepared_fact
+
+    def scope_order(raw, lines, ordered_at):
         identity = identities.resolve(identifier(raw, 'customer.ids.mindboxId'))
         scope.order(identity, any(line.line_status in builder.rules.purchase_line_statuses for line in lines))
+        buyer_aggregates.add(purchase_fact(raw, lines, ordered_at))
 
     def adapted_lines(raw, eligible):
-        return (input_source.order(raw) if input_source is not None else
-                adapt_order(order_for_adapter({**raw, 'lines': eligible}), identities,
-                            product_namespaces=selection.order_product_namespaces))
+        nonlocal prepared_lines
+        if prepared_lines is None:
+            prepared_lines = (input_source.order(raw) if input_source is not None else
+                              adapt_order(order_for_adapter({**raw, 'lines': eligible}), identities,
+                                          product_namespaces=selection.order_product_namespaces))
+        return prepared_lines
 
     order_aggregates = OrderAggregates()
     outside_period = fractional_lines = 0
     for raw in records("orders", entries["orders"]):
+        prepared_lines = prepared_fact = None
         ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
+        if (rfm is not None and rfm.windows['LAST_48M'][0] <= ordered_at < rfm.windows['LAST_48M'][1]
+                and any(a <= ordered_at < b for a, b in order_scope_period)):
+            key = identifier(raw, 'ids.mindboxId')
+            if key not in rfm_orders:
+                eligible = [line for line in objects(raw, 'lines', required=True)
+                            if (quantity := number(line, 'quantity')) == quantity.to_integral_value()]
+                rfm.add(purchase_fact(raw, adapted_lines(raw, eligible), ordered_at))
+                rfm_orders.add(key)
         scope_eligible = (customer_filter.contains(ordered_at)
                           and any(start <= ordered_at < end for start, end in order_scope_period))
         if not any(start <= ordered_at < end for start, end in period):
@@ -564,7 +605,8 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
                 if key not in snapshots.fingerprints and key not in scope_only_orders:
                     eligible = [line for line in objects(raw, 'lines', required=True)
                                 if (quantity := number(line, 'quantity')) == quantity.to_integral_value()]
-                    scope_order(raw, adapted_lines(raw, eligible))
+                    lines = adapted_lines(raw, eligible)
+                    scope_order(raw, lines, ordered_at)
                     scope_only_orders.add(key)
             continue
         if not analysis_filter.contains(ordered_at):
@@ -587,7 +629,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
         purchases = []
         lines = adapted_lines(raw, eligible_lines)
         if scope_eligible and identifier(raw, 'ids.mindboxId') not in scope_only_orders:
-            scope_order(raw, lines)
+            scope_order(raw, lines, ordered_at)
         lines = tuple(line for line in lines if matches(line.product))
         if analysis_filter.product_restricted and not lines:
             continue
@@ -615,7 +657,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     check()
     customers, customer_coverage, genders, ages, mean_age, median_age = (input_source.customer_snapshot if input_source is not None else _customer_snapshot)(
         root, as_of, check, progress,
-        cohort=set(collected.users) if analysis_filter.active else None, identities=identities, scope=scope)
+        cohort=set(collected.users) if analysis_filter.active else None, identities=identities, scope=scope, buyers=buyer_aggregates)
     user_types = Counter(collected.user_types.values())
     view_users = sum(n for mask, n in user_types.items() if mask & 1)
     favorite_users = sum(n for mask, n in user_types.items() if mask & 2)
@@ -667,6 +709,8 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
                  + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
         analysis_filter=analysis_filter,
         customer_scope=scope.result(check),
+        buyer_statistics=buyer_aggregates.result(as_of, check),
+        rfm_statistics=rfm.result() if rfm is not None else None,
         product_category_paths=tuple((code, category_paths.get(code))
                                      for code, *_ in product_result["product_category_statistics"] if code is not None),
         source_actions=sum(action_types.values()),

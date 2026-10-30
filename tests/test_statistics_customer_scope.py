@@ -157,8 +157,10 @@ def test_orders_own_coverage_original_period_and_cache_keys_do_not_change_legacy
     selected = AnalysisFilter('2026-01-01', '2026-01-01')
     all_history, day = asdict(calculate(source)), asdict(calculate(source, selected))
     assert all_history['analysis_filter'] == day['analysis_filter']  # Existing full-period normalization.
-    assert {k: v for k, v in all_history.items() if k != 'customer_scope'} == {
-        k: v for k, v in day.items() if k != 'customer_scope'}
+    assert {k: v for k, v in all_history.items() if k not in ('customer_scope','buyer_statistics','rfm_statistics')} == {
+        k: v for k, v in day.items() if k not in ('customer_scope','buyer_statistics','rfm_statistics')}
+    assert all_history['buyer_statistics']['policies']['EXTENDED_COMPLETED']['orders'] == 2
+    assert day['buyer_statistics']['policies']['EXTENDED_COMPLETED']['orders'] == 1
     assert all_history['customer_scope']['buyers'] == 2 and day['customer_scope']['buyers'] == 1
     build(source)
     assert asdict(query(source, calculated_at=AT)) == all_history
@@ -230,6 +232,8 @@ def test_first_source_order_owner_is_not_replaced_by_later_snapshot_inside_legac
 
 def test_customer_period_is_attested_in_slices_not_only_the_normalized_legacy_filter(source):
     result = asdict(calculate(source))
+    result.pop('buyer_statistics')  # Isolate the existing schema-10 customer-scope attestation.
+    result.pop('rfm_statistics')
     provenance, _ = slices.capture_sources(source[0], source[1], AnalysisFilter(), calculated_at=AT)
     folder = source[0] / 'slices'
     slices.save_slice(folder, provenance, result)

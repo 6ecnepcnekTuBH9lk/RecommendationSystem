@@ -12,7 +12,7 @@ from Application.analysis_filter import AnalysisFilter
 from Application.statistics_presentation import _calculation_message, _date_time, ITEM_CLIENTS_LABEL
 
 
-SECTIONS = ('Обзор', *tables.SHEET_NAMES[1:])
+SECTIONS = ('Обзор', *tables.SHEET_NAMES[1:6])  # RFM is a subsection of Clients in HTML.
 ASSETS = Path(__file__).with_name('statistics_html_assets')
 TEXT_TRANSLATION = str.maketrans({'ё': 'е', 'Ё': 'Е', '—': '-', '–': '-'})
 IDENTIFIER_HEADERS = {'Код', 'Код категории', 'Артикул', 'Системное название', 'Система идентификаторов', 'Статус'}
@@ -86,6 +86,11 @@ class _Section:
             (label, tables._Numeric(Decimal(str(value)), tables.PERCENT_FORMAT)
              if label.startswith('Доля') and value is not None and not isinstance(value, str) else value)
             for label, value in values])
+
+    def buyer_cards(self, values):
+        self.cards(values)
+        # Same whitelist cells as the adjacent metric table, no DTO serialization.
+        self.blocks.insert(len(self.blocks)-1, {'kind': 'buyer_cards', 'rows': self.blocks[-1]['rows']})
 
 
 def _trace(name, values, labels, details=None, *, horizontal=False, line=False, pie=False):
@@ -192,6 +197,7 @@ def presentation(result):
     tables._orders_page(sections[2], result)
     tables._products_page(sections[3], result)
     tables._clients_technical(sections[4], sections[5], result)
+    tables._rfm_page(sections[4], result)
     return sections
 
 
@@ -248,6 +254,10 @@ def build_statistics_html(result):
         for block_index, block in enumerate(section.blocks):
             if block['kind'] == 'heading':
                 content.append(f'<h3 class="section-title">{escape(block["text"])}</h3>')
+            elif block['kind'] == 'buyer_cards':
+                content.append('<div class="kpis buyer-kpis">' + ''.join(
+                    '<article class="kpi"><span>' + escape(row[0]['text']) + '</span><strong>' +
+                    escape(row[1]['text']) + '</strong></article>' for row in block['rows']) + '</div>')
             else:
                 unavailable = index == 4 and result['customers'] is None and block['headers'][0] in ('Пол', 'Возрастная группа')
                 content.append(_table_html(block, f'table-{index}-{block_index}', unavailable=unavailable))

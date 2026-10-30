@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,8 +22,10 @@ from Application.statistics_presentation import (
     CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows,
     CUSTOMER_SCOPE_NOTES, customer_scope_sections, customer_scope_context,
     PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL,
+    buyer_sections,
 )
 from Application import statistics_charts as charts
+from Application.statistics_rfm_presentation import rfm_sections
 from Application.loading_errors import format_error
 from Application.paths import ICONS_DIR, PROJECT_ROOT
 from Application.analysis_filter import AnalysisFilter
@@ -143,6 +146,30 @@ def _decimal_display(value, *, money=True):
     number = Decimal(value)
     formatted = format(number, ",.2f" if money else ",f").replace(",", " ")
     return formatted if money or "." not in formatted else formatted.rstrip("0").rstrip(".")
+
+
+def _buyer_display(value):
+    if isinstance(value, Decimal):
+        return _decimal_display(str(value))
+    if isinstance(value, date):
+        return value.strftime('%d.%m.%Y')
+    return value
+
+
+def _buyer_page(layout, result):
+    for title, cards, tables, notes in (*buyer_sections(result), *rfm_sections(result)):
+        section = _section_heading(layout, title)
+        if cards:
+            _cards(section, [(label, _buyer_display(value)) for label, value in cards])
+        for headers, rows in tables:
+            table = _table(section, headers, [tuple(_buyer_display(value) for value in row) for row in rows])
+            for column, header in enumerate(headers):
+                table.setColumnWidth(column, max(table.columnWidth(column), table.fontMetrics().horizontalAdvance(header.upper()) + 32))
+            table.horizontalHeader().sectionResized.connect(table.resizeRowsToContents)
+            table.resizeRowsToContents()
+            table.fit_height()
+        if notes:
+            section.addWidget(_label('\n'.join(f'{label}: {text}' for label, text in notes)))
 
 
 def _actions_page(layout, result):
@@ -718,6 +745,7 @@ class DatasetStatisticsTab(QWidget):
             ("Среднее число заказов на покупателя", result["mean_orders_per_buyer"]),
             ("Медиана числа заказов на покупателя", result["median_orders_per_buyer"]),
             ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
+        _buyer_page(customers, result)
         _table(technical, ["Диагностика", "Количество"],
                [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
                + [("Заказы выбранного среза" if filtered else "Исходные заказы", result["orders"]),

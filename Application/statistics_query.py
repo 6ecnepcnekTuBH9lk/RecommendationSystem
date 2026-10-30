@@ -88,6 +88,7 @@ class IndexedInput:
                     clauses.append("("+" OR ".join(parts)+")")
             self.selected_items = {r[0] for r in db.execute("SELECT code FROM items WHERE "+" AND ".join(clauses), parameters)}
         self._batch_products, self._batch_lines = {}, {}
+        self.rfm_interval = None
 
     def records(self, name, sources):
         # IDs are global raw occurrence positions, already in effective source order.
@@ -103,6 +104,9 @@ class IndexedInput:
             where = (f" WHERE id IN (SELECT id FROM {name} WHERE event_us>=? AND event_us<? "
                      f"UNION SELECT id FROM {name} WHERE {exceptional})")
             args = [first, last]
+            if name == 'orders' and self.rfm_interval is not None:
+                where = where[:-1] + ' UNION SELECT id FROM orders WHERE event_us>=? AND event_us<?)'
+                args.extend(map(microseconds, self.rfm_interval))
         cursor = self.db.execute(f"SELECT * FROM {name}{where} ORDER BY id", args)
         try:
             while True:

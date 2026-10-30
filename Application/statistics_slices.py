@@ -28,6 +28,7 @@ from Application.paths import PROJECT_ROOT
 from Application.product_resolution import DEFAULT_CATALOG_PATH
 from Application.statistics_cache import _unique_object, validate_result
 from Application.statistics_period import shared_intervals
+from Application.statistics_rfm_validation import rfm_cutoff
 
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "filtered_data" / "dataset_statistics_slices"
 SCHEMA_VERSION = 1
@@ -80,6 +81,12 @@ def _algorithm_version():
         "product_resolution.py",
         "customer_demographics.py",
         "customer_statistics_scope.py",
+        "statistics_purchase_policy.py",
+        "statistics_purchase_facts.py",
+        "statistics_buyer_aggregates.py",
+        "statistics_buyer_validation.py",
+        "statistics_rfm_core.py",
+        "statistics_rfm_validation.py",
     )
     # Include adapters, identity, strict reader and publication rules recursively.
     paths = [package / name for name in names] + sorted(
@@ -171,6 +178,8 @@ def capture_sources(raw_root, catalog_path, analysis_filter, *, already_locked=F
             else analysis_filter
         )
         local = (calculated_at or datetime.now(timezone.utc)).astimezone()
+        cutoff = rfm_cutoff(shared_intervals([], [(e['since'], e['until']) for e in entries['orders']]),
+                            analysis_filter.end_date, local)
         context = getcontext()
         decimal_config = {
             name: getattr(context, name)
@@ -200,6 +209,7 @@ def capture_sources(raw_root, catalog_path, analysis_filter, *, already_locked=F
             "timezone": str(local.tzinfo),
             "filter": effective.to_dict(),
             "customer_period": {"start_date": analysis_filter.start_date, "end_date": analysis_filter.end_date},
+            "rfm_as_of": cutoff.isoformat() if cutoff is not None else None,
         }
         # Freeze to JSON primitives, so comparisons survive disk round trips.
         return json.loads(_json(source)), effective
@@ -222,6 +232,10 @@ def load_slice(directory, provenance):
             return None
         result = validate_result(payload["result"])
         if result.get('customer_scope') is not None and result['customer_scope']['period'] != provenance['customer_period']:
+            return None
+        if result.get('buyer_statistics') is not None and result['buyer_statistics']['period'] != provenance['customer_period']:
+            return None
+        if result.get('rfm_statistics') is not None and result['rfm_statistics']['as_of_date'] != provenance['rfm_as_of']:
             return None
         if (
             AnalysisFilter.from_dict(result["analysis_filter"]).to_dict()
@@ -250,6 +264,10 @@ def save_slice(directory, provenance, result):
     validate_result(result)
     if result.get('customer_scope') is not None and result['customer_scope']['period'] != provenance['customer_period']:
         raise ValueError('Customer period differs from provenance')
+    if result.get('buyer_statistics') is not None and result['buyer_statistics']['period'] != provenance['customer_period']:
+        raise ValueError('Buyer period differs from provenance')
+    if result.get('rfm_statistics') is not None and result['rfm_statistics']['as_of_date'] != provenance['rfm_as_of']:
+        raise ValueError('RFM cutoff differs from provenance')
     path = Path(directory) / (_digest(provenance) + ".json")
     if path.is_symlink():
         raise ValueError("Unsafe statistics slice path")

@@ -374,7 +374,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
-        for index, counts in enumerate((8, 7, 9, 9)):
+        for index, counts in enumerate((8, 7, 9, 11)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = next(table for table in tab.sections.widget(3).findChildren(QTableWidget)
                          if table.horizontalHeaderItem(0).text() == 'Пол')
@@ -665,9 +665,10 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
         assert headings == ["ОХВАТ КЛИЕНТСКОЙ БАЗЫ", "ЦИФРОВАЯ АКТИВНОСТЬ КЛИЕНТОВ", "ПОКУПАТЕЛИ И КЛИЕНТЫ БЕЗ ПОКУПОК",
                             "ПОРТРЕТ КЛИЕНТА", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ",
-                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ"]
+                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ",
+                            "ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА — STRICT / EXTENDED", "RFM-АНАЛИЗ ПОКУПАТЕЛЕЙ"]
         tables = page.findChildren(QTableWidget)
-        assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7, 5, 3]
+        assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7, 5, 3, 1, 1]
         assert tables[5].item(8, 1).text() == "50.00"
         for table in tables:
             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
@@ -718,7 +719,7 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
         assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
-        assert len(page.findChildren(QTableWidget)) == 9
+        assert len(page.findChildren(QTableWidget)) == 11
         assert len(page.findChildren(StatisticsChart)) == 3
         assert len(tab.findChildren(StatisticsChart)) == 17
         assert card_titles(page) == ['Профили текущего среза', 'Клиенты с товарными взаимодействиями', 'Покупатели',
@@ -1136,9 +1137,11 @@ def test_export_contains_every_visible_table_and_card(window, sample_result, tmp
     path = tmp_path / 'complete.xlsx'
     export_statistics(sample_result, path)
     book = load_workbook(path)
-    for index, name in enumerate(SHEET_NAMES[1:]):
+    for index, name in enumerate(SHEET_NAMES[1:6]):
         sheet = book[name]
         rows = list(sheet.values)
+        if name == 'Клиенты':
+            rows.extend(book['RFM-анализ'].values)  # GUI subsection has its own XLSX sheet.
         page = tab.sections.widget(index)
         for table in page.findChildren(QTableWidget):
             headers = tuple(table.horizontalHeaderItem(i).text() for i in range(table.columnCount()))
@@ -1407,7 +1410,7 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         QApplication.processEvents()
         assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(5)] == [4, 6, 4, 3, 0]
-        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 9, 5]
+        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 11, 5]
         chart_widgets = tab.findChildren(StatisticsChart)
         assert len(chart_widgets) == 17
         actions = _visual_items(tab.sections.widget(0).widget().layout())

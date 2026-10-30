@@ -19,14 +19,16 @@ from Application.statistics_presentation import (
     CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows,
     CUSTOMER_SCOPE_NOTES, customer_scope_sections, customer_scope_context,
     PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL,
+    buyer_sections,
 )
 from Application.analysis_filter import AnalysisFilter
+from Application.statistics_rfm_presentation import rfm_sections
 from Application.statistics_cache import parse_timestamp
 from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, DIAGNOSTIC_LABELS,
                                                  _date, _date_time, _calculation_message)
 
 
-SHEET_NAMES = ("Сводка", "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация")
+SHEET_NAMES = ("Сводка", "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация", "RFM-анализ")
 INK = "242424"
 HEADER_FILL = "D6E5F2"
 SECTION_FILL = "EAF1F7"
@@ -63,6 +65,10 @@ class _Sheet:
         widths = (34, 48, 18, 20, 20, 20, 22)
         if worksheet.title == "Товары":
             widths = (20, 48, 72, 18, 20, 20, 20, 22)
+        elif worksheet.title == "Клиенты":
+            widths = (*widths, 24, 28)
+        elif worksheet.title == "RFM-анализ":
+            widths = (34, 64, 36, 26, 26, 30, 26, 26, 26)
         for column, width in enumerate(widths, 1):
             self.ws.column_dimensions[get_column_letter(column)].width = width
         self.write(["KANZLER AI"], section=True)
@@ -152,6 +158,9 @@ class _Sheet:
              if label.startswith("Доля") and value is not None and not isinstance(value, str) else value)
             for label, value in values])
 
+    def buyer_cards(self, values):
+        self.cards(values)
+
 
 def _selection_values(values):
     return "Все значения" if values is None else "; ".join("Не указано" if v is None else v for v in values)
@@ -200,6 +209,7 @@ def export_statistics(result, path):
         _orders_page(sheets[2], result)
         _products_page(sheets[3], result)
         _clients_technical(sheets[4], sheets[5], result)
+        _rfm_page(sheets[6], result)
         for sheet in sheets:
             sheet.finish()
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".statistics-", suffix=".xlsx", delete=False) as stream:
@@ -212,6 +222,19 @@ def export_statistics(result, path):
         book.close()
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _rfm_page(sheet, result):
+    def value(v):
+        return _Numeric(v, '#,##0.00') if isinstance(v, Decimal) else v
+    for title, cards, tables, notes in rfm_sections(result):
+        sheet.heading(title)
+        if cards:
+            sheet.buyer_cards([(label,value(v)) for label,v in cards])
+        for headers, rows in tables:
+            sheet.table(headers, [tuple(value(v) for v in row) for row in rows])
+        if notes:
+            sheet.table(['Пояснение RFM','Определение'],notes)
 
 
 def _actions_page(layout, result):
@@ -381,6 +404,16 @@ def _clients_technical(customers, technical, result):
         ("Среднее число заказов на покупателя", result["mean_orders_per_buyer"]),
         ("Медиана числа заказов на покупателя", result["median_orders_per_buyer"]),
         ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
+    def buyer_value(value):
+        return _Numeric(value, '#,##0.00') if isinstance(value, Decimal) else value
+    for title, cards, tables, notes in buyer_sections(result):
+        customers.heading(title)
+        if cards:
+            customers.buyer_cards([(label, buyer_value(value)) for label, value in cards])
+        for headers, rows in tables:
+            customers.table(headers, [tuple(buyer_value(value) for value in row) for row in rows])
+        if notes:
+            customers.table(['Пояснение покупательской аналитики', 'Определение'], notes)
     technical.table(["Диагностика", "Количество"],
            [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
            + [("Заказы выбранного среза" if filtered else "Исходные заказы", result["orders"]),

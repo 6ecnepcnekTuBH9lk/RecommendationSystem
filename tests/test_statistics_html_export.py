@@ -70,7 +70,7 @@ def test_six_sections_all_kpi_filters_snapshot_and_no_external_resources(sample_
 
 def test_presentation_cells_match_xlsx_source_values_and_formats(sample_result):
     sections = html.presentation(complete_snapshot(sample_result))
-    assert sum(block['kind'] == 'table' for section in sections for block in section.blocks) == 58
+    assert sum(block['kind'] == 'table' for section in sections for block in section.blocks) == 60
     cell = html._cell(xlsx._Numeric(Decimal('12345678901234567890.123456789'), '#,##0.00'))
     assert cell == {'text': '12 345 678 901 234 567 890,12', 'sort': '12345678901234567890.123456789', 'kind': 'number'}
     assert html._cell('000001')['text'] == '000001'

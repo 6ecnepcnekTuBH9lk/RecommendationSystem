@@ -41,7 +41,7 @@ def exact(data, day, selection=AnalysisFilter()):
     expected = reference.calculate_statistics(raw_root=data[0], catalog_path=data[1],
                                               analysis_filter=selection, calculated_at=at)
     actual = query(data, selection, calculated_at=at)
-    assert len(asdict(actual)) == 90
+    assert len(asdict(actual)) == 92
     assert asdict(actual) == asdict(expected)
     return actual
 

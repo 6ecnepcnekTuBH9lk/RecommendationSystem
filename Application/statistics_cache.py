@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import tempfile
 from Application.customer_statistics_scope import validate_customer_scope
+from Application.statistics_buyer_validation import validate_buyer_statistics
+from Application.statistics_rfm_validation import validate_rfm_statistics
 
 from Application.paths import USER_SETTINGS_DIR
 from Application.analysis_filter import AnalysisFilter
@@ -376,6 +378,15 @@ def validate_result(result):
                 parse_timestamp(source["updated"])
         if sources != {"Actions", "Orders", "CustomerMerges", "Customers"}:
             raise ValueError
+        validate_buyer_statistics(result.get('buyer_statistics'),
+                                  coverage=next(v['intervals'] for v in result['coverage'] if v['source'] == 'Orders'),
+                                  profiles_available=result['customers'] is not None,
+                                  customer_scope=result.get('customer_scope'))
+        original = result.get('customer_scope') or result.get('buyer_statistics')
+        selected_end = original['period']['end_date'] if original is not None else result['analysis_filter']['end_date']
+        validate_rfm_statistics(result.get('rfm_statistics'),
+                                coverage=next(v['intervals'] for v in result['coverage'] if v['source'] == 'Orders'),
+                                selected_end=selected_end, calculated_at=parse_timestamp(result['calculated_at']))
     except (KeyError, TypeError, ValueError, OverflowError, DecimalException):
         raise StatisticsCacheError("Неполный или некорректный результат статистики.") from None
     return result
