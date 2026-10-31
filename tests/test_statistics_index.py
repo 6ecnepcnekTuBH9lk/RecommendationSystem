@@ -48,7 +48,7 @@ def normalized(value):
 def golden(dataset, selection):
     expected = reference.calculate_statistics(raw_root=dataset[0], catalog_path=dataset[1], analysis_filter=selection)
     actual = query(dataset, selection)
-    assert len(fields(expected)) == len(fields(actual)) == 92
+    assert len(fields(expected)) == len(fields(actual)) == 93
     assert normalized(actual) == normalized(expected)
     return actual
 

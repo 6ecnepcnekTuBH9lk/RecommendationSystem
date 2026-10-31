@@ -27,6 +27,36 @@ real_cities = filters.mapping.load_cities
 OPTIONS = AnalysisOptions("2025-01-01", "2025-12-31", ("Брюки", "Рубашки", None), ("Зима", "Лето", None))
 
 
+@pytest.fixture(autouse=True)
+def synthetic_recommendation_sidepanel(app, tmp_path, monkeypatch):
+    """The nested panel must not read workstation CSV/rules or outlive QApplication."""
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from Application.recommendation_catalog import RecommendationCatalog
+    from Application.tabs import recommendation_rules_widget as rules_ui
+
+    references = tmp_path/'recommendation_references'
+    references.mkdir()
+    products = references/'nomenclature.csv'
+    categories = references/'site_categories.csv'
+    products.write_text(
+        'КодНоменклатуры|ВидНоменклатуры|Коллекция|Остаток\n'
+        'SYNTHETIC-REFERENCE|Синтетический вид|Синтетический сезон|1\n',
+        encoding='utf-8-sig')
+    categories.write_text('КодКатегории|НазваниеКатегории|КодРодительскойКатегории\n',
+                          encoding='utf-8-sig')
+    task = rules_ui._Task
+    monkeypatch.setattr(rules_ui, 'RecommendationCatalog',
+                        lambda: RecommendationCatalog(products, categories))
+    monkeypatch.setattr(rules_ui, '_Task',
+                        lambda _path, rules=None: task(references/'rules.json', rules))
+    yield
+    # Drain actual tasks and queued results while their QApplication still exists.
+    for _ in range(2):
+        app.processEvents()
+        assert QThreadPool.globalInstance().waitForDone(5000), 'GUI fixture left a live worker'
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
 @pytest.fixture
 def filter_tab(app, monkeypatch):
     monkeypatch.setattr(filters, "load_analysis_options", lambda: OPTIONS)
@@ -621,3 +651,11 @@ def test_delegate_hundred_stores_no_persistent_editors_and_one_click(filter_tab,
     finally:
         tab.close()
         tab.deleteLater()
+
+
+def test_nested_recommendation_panel_uses_synthetic_catalog_and_finishes(filter_tab):
+    panel = filter_tab.recommendation_rules
+    wait_until(lambda: panel._initialized and panel._task is None)
+    assert panel._available_collections == frozenset({'Синтетический сезон'})
+    assert panel.kinds.items.count() == 1
+    assert panel.kinds.items.item(0).text() == 'Синтетический вид'

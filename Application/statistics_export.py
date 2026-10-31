@@ -23,12 +23,13 @@ from Application.statistics_presentation import (
 )
 from Application.analysis_filter import AnalysisFilter
 from Application.statistics_rfm_presentation import rfm_sections
+from Application.statistics_cohorts_presentation import cohort_sections
 from Application.statistics_cache import parse_timestamp
 from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, DIAGNOSTIC_LABELS,
                                                  _date, _date_time, _calculation_message)
 
 
-SHEET_NAMES = ("Сводка", "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация", "RFM-анализ")
+SHEET_NAMES = ("Сводка", "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация", "RFM-анализ", "Когортный анализ")
 INK = "242424"
 HEADER_FILL = "D6E5F2"
 SECTION_FILL = "EAF1F7"
@@ -69,6 +70,8 @@ class _Sheet:
             widths = (*widths, 24, 28)
         elif worksheet.title == "RFM-анализ":
             widths = (34, 64, 36, 26, 26, 30, 26, 26, 26)
+        elif worksheet.title == "Когортный анализ":
+            widths = (34, 64, *(24 for _ in range(12)))
         for column, width in enumerate(widths, 1):
             self.ws.column_dimensions[get_column_letter(column)].width = width
         self.write(["KANZLER AI"], section=True)
@@ -210,6 +213,7 @@ def export_statistics(result, path):
         _products_page(sheets[3], result)
         _clients_technical(sheets[4], sheets[5], result)
         _rfm_page(sheets[6], result)
+        _cohorts_page(sheets[7], result)
         for sheet in sheets:
             sheet.finish()
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".statistics-", suffix=".xlsx", delete=False) as stream:
@@ -235,6 +239,17 @@ def _rfm_page(sheet, result):
             sheet.table(headers, [tuple(value(v) for v in row) for row in rows])
         if notes:
             sheet.table(['Пояснение RFM','Определение'],notes)
+
+
+def _cohorts_page(sheet, result):
+    for title, cards, tables, notes in cohort_sections(result, include_extended=True):
+        sheet.heading(title)
+        if cards:
+            sheet.buyer_cards(cards)
+        for headers, rows in tables:
+            sheet.table(headers, rows)
+        if notes:
+            sheet.table(['Пояснение когорт', 'Определение'], notes)
 
 
 def _actions_page(layout, result):

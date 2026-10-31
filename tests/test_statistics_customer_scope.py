@@ -157,8 +157,14 @@ def test_orders_own_coverage_original_period_and_cache_keys_do_not_change_legacy
     selected = AnalysisFilter('2026-01-01', '2026-01-01')
     all_history, day = asdict(calculate(source)), asdict(calculate(source, selected))
     assert all_history['analysis_filter'] == day['analysis_filter']  # Existing full-period normalization.
-    assert {k: v for k, v in all_history.items() if k not in ('customer_scope','buyer_statistics','rfm_statistics')} == {
-        k: v for k, v in day.items() if k not in ('customer_scope','buyer_statistics','rfm_statistics')}
+    assert {k: v for k, v in all_history.items() if k not in ('customer_scope','buyer_statistics','rfm_statistics','cohort_statistics')} == {
+        k: v for k, v in day.items() if k not in ('customer_scope','buyer_statistics','rfm_statistics','cohort_statistics')}
+    assert all_history['cohort_statistics']['as_of_date'] == '2026-01-02'
+    assert day['cohort_statistics']['as_of_date'] == '2026-01-01'
+    assert all_history['cohort_statistics']['cohort_bounds'] == dict(start=None, end=None)
+    assert day['cohort_statistics']['cohort_bounds'] == dict(start='2026-01', end='2026-01')
+    assert all_history['cohort_statistics']['policies']['EXTENDED_COMPLETED']['base_buyers'] == 2
+    assert day['cohort_statistics']['policies']['EXTENDED_COMPLETED']['base_buyers'] == 1
     assert all_history['buyer_statistics']['policies']['EXTENDED_COMPLETED']['orders'] == 2
     assert day['buyer_statistics']['policies']['EXTENDED_COMPLETED']['orders'] == 1
     assert all_history['customer_scope']['buyers'] == 2 and day['customer_scope']['buyers'] == 1
@@ -234,6 +240,7 @@ def test_customer_period_is_attested_in_slices_not_only_the_normalized_legacy_fi
     result = asdict(calculate(source))
     result.pop('buyer_statistics')  # Isolate the existing schema-10 customer-scope attestation.
     result.pop('rfm_statistics')
+    result.pop('cohort_statistics')  # Isolate period attestation from optional cohort cross-validation.
     provenance, _ = slices.capture_sources(source[0], source[1], AnalysisFilter(), calculated_at=AT)
     folder = source[0] / 'slices'
     slices.save_slice(folder, provenance, result)
@@ -257,3 +264,13 @@ def test_cancellation_is_checked_while_folding_unique_customer_flags():
 
     with pytest.raises(InterruptedError):
         scope.result(cancel)
+
+
+def test_cohort_snapshot_rejects_customer_period_mismatch_before_slice_attestation(source):
+    result = asdict(calculate(source))
+    result.pop('buyer_statistics')
+    result.pop('rfm_statistics')
+    cache.validate_result(result)
+    result['customer_scope']['period'] = dict(start_date='2026-01-01', end_date='2026-01-01')
+    with pytest.raises(cache.StatisticsCacheError):
+        cache.validate_result(result)

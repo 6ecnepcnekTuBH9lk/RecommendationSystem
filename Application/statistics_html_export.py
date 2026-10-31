@@ -198,6 +198,7 @@ def presentation(result):
     tables._products_page(sections[3], result)
     tables._clients_technical(sections[4], sections[5], result)
     tables._rfm_page(sections[4], result)
+    tables._cohorts_page(sections[4], result)
     return sections
 
 

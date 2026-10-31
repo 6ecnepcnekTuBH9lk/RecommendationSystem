@@ -89,6 +89,7 @@ class IndexedInput:
             self.selected_items = {r[0] for r in db.execute("SELECT code FROM items WHERE "+" AND ".join(clauses), parameters)}
         self._batch_products, self._batch_lines = {}, {}
         self.rfm_interval = None
+        self.cohort_until = None
 
     def records(self, name, sources):
         # IDs are global raw occurrence positions, already in effective source order.
@@ -107,6 +108,11 @@ class IndexedInput:
             if name == 'orders' and self.rfm_interval is not None:
                 where = where[:-1] + ' UNION SELECT id FROM orders WHERE event_us>=? AND event_us<?)'
                 args.extend(map(microseconds, self.rfm_interval))
+            if name == 'orders' and self.cohort_until is not None:
+                # Same cursor and source order; retain exceptional rows above.
+                # Full history before cutoff, never a second Orders query.
+                where = where[:-1] + ' UNION SELECT id FROM orders WHERE event_us<?)'
+                args.append(microseconds(self.cohort_until))
         cursor = self.db.execute(f"SELECT * FROM {name}{where} ORDER BY id", args)
         try:
             while True:

@@ -327,6 +327,7 @@ def test_original_period_is_attested_in_slices_even_without_customer_scope(datas
     selected = asdict(statistics.calculate_statistics(raw_root=dataset[0],catalog_path=dataset[1],calculated_at=AT,
                                                       analysis_filter=AnalysisFilter('2026-01-01','2026-01-01')))
     full['customer_scope'] = None
+    full.pop('cohort_statistics')  # Isolate buyer-period validation.
     full.pop('rfm_statistics')  # Isolate buyer-period provenance from the new RFM cutoff context.
     provenance, _ = slices.capture_sources(dataset[0],dataset[1],AnalysisFilter(),calculated_at=AT)
     folder = dataset[0]/'buyer-slices'
@@ -364,6 +365,7 @@ def test_every_legacy_field_equals_published_driver_including_customer_scope_and
             expected, actual = asdict(previous.calculate_statistics(**options)), asdict(statistics.calculate_statistics(**options))
             actual.pop('buyer_statistics')
             actual.pop('rfm_statistics')
+            actual.pop('cohort_statistics')
             assert actual == expected
     finally:
         del sys.modules[previous.__name__]

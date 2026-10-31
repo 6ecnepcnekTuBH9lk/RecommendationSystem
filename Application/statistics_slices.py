@@ -87,6 +87,8 @@ def _algorithm_version():
         "statistics_buyer_validation.py",
         "statistics_rfm_core.py",
         "statistics_rfm_validation.py",
+        "statistics_cohorts_core.py",
+        "statistics_cohorts_validation.py",
     )
     # Include adapters, identity, strict reader and publication rules recursively.
     paths = [package / name for name in names] + sorted(
@@ -237,6 +239,8 @@ def load_slice(directory, provenance):
             return None
         if result.get('rfm_statistics') is not None and result['rfm_statistics']['as_of_date'] != provenance['rfm_as_of']:
             return None
+        if result.get('cohort_statistics') is not None and result['cohort_statistics']['as_of_date'] != provenance['rfm_as_of']:
+            return None
         if (
             AnalysisFilter.from_dict(result["analysis_filter"]).to_dict()
             != AnalysisFilter.from_dict(provenance["filter"]).to_dict()
@@ -268,6 +272,8 @@ def save_slice(directory, provenance, result):
         raise ValueError('Buyer period differs from provenance')
     if result.get('rfm_statistics') is not None and result['rfm_statistics']['as_of_date'] != provenance['rfm_as_of']:
         raise ValueError('RFM cutoff differs from provenance')
+    if result.get('cohort_statistics') is not None and result['cohort_statistics']['as_of_date'] != provenance['rfm_as_of']:
+        raise ValueError('Cohort cutoff differs from provenance')
     path = Path(directory) / (_digest(provenance) + ".json")
     if path.is_symlink():
         raise ValueError("Unsafe statistics slice path")

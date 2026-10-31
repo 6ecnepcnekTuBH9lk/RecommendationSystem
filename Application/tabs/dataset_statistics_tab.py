@@ -12,7 +12,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog,
+    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog, QMessageBox, QDialog,
 )
 
 from Application.statistics_presentation import (
@@ -26,12 +26,17 @@ from Application.statistics_presentation import (
 )
 from Application import statistics_charts as charts
 from Application.statistics_rfm_presentation import rfm_sections
+from Application.statistics_cohorts_presentation import cohort_sections, cohort_display
 from Application.loading_errors import format_error
 from Application.paths import ICONS_DIR, PROJECT_ROOT
 from Application.analysis_filter import AnalysisFilter
 from Application.analysis_filter_settings import load_filter
 from Application.settings.set_status import set_status_processing, schedule_status_reset, set_status_ok, set_status_error
 from Application.statistics_bundle_export import export_statistics_bundle, suggested_filename
+from Application.statistics_detail_process import DetailExportProcess
+from Application.statistics_detail_job import ERRORS as DETAIL_ERRORS, STAGES as DETAIL_STAGES, inspect_sources
+from Application.tabs.statistics_detail_dialog import DetailExportDialog
+from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT
 from Application.statistics_cache import CACHE_PATH, load_result, save_result, validate_result
 from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, WARNING_LABELS, DIAGNOSTIC_LABELS,
                                                  _date, _date_time, _calculation_message)
@@ -157,12 +162,14 @@ def _buyer_display(value):
 
 
 def _buyer_page(layout, result):
-    for title, cards, tables, notes in (*buyer_sections(result), *rfm_sections(result)):
+    sections = [(section, _buyer_display) for section in (*buyer_sections(result), *rfm_sections(result))]
+    sections.extend((section, cohort_display) for section in cohort_sections(result))
+    for (title, cards, tables, notes), display in sections:
         section = _section_heading(layout, title)
         if cards:
-            _cards(section, [(label, _buyer_display(value)) for label, value in cards])
+            _cards(section, [(label, display(value)) for label, value in cards])
         for headers, rows in tables:
-            table = _table(section, headers, [tuple(_buyer_display(value) for value in row) for row in rows])
+            table = _table(section, headers, [tuple(display(value) for value in row) for row in rows])
             for column, header in enumerate(headers):
                 table.setColumnWidth(column, max(table.columnWidth(column), table.fontMetrics().horizontalAdvance(header.upper()) + 32))
             table.horizontalHeader().sectionResized.connect(table.resizeRowsToContents)
@@ -372,6 +379,10 @@ class DatasetStatisticsTab(QWidget):
         self.cache_path = CACHE_PATH
         self.displayed_result = None
         self._export_task = None
+        self.detail_process = None
+        self._detail_dialog_open = False
+        self._detail_closing = self._detail_quitting = False
+        self._detail_options = None
         filter_tab = getattr(window, "analysis_filter_tab", None)
         self.configured_filter = filter_tab.configured_filter if filter_tab is not None else load_filter()
         if filter_tab is not None:
@@ -408,6 +419,9 @@ class DatasetStatisticsTab(QWidget):
         self.export_button.setIconSize(QSize(17, 17))
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export)
+        self.detail_export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт данных покупателей")
+        self.detail_export_button.setIconSize(QSize(17, 17))
+        self.detail_export_button.clicked.connect(self.export_details)
 
         self.refresh.setIconSize(QSize(17, 17))
         self.cancel_button.setIconSize(QSize(17, 17))
@@ -422,9 +436,9 @@ class DatasetStatisticsTab(QWidget):
         self.status.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.status.setWordWrap(False)
+        self.status.setWordWrap(True)
         self.status.setSizePolicy(
-            QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Preferred,
         )
 
@@ -462,15 +476,36 @@ class DatasetStatisticsTab(QWidget):
 
         controls.addWidget(self.refresh)
         controls.addWidget(self.export_button)
+        controls.addWidget(self.detail_export_button)
         controls.addWidget(self.cancel_button)
         controls.addWidget(self.status)
         controls.addWidget(self.progress_container, 1)
 
         layout.addLayout(controls)
+        self.detail_panel = QWidget()
+        detail_layout = QHBoxLayout(self.detail_panel)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        self.detail_status = _label("")
+        self.detail_progress = QProgressBar()
+        self.detail_progress.setRange(0, 0)
+        self.detail_progress.setTextVisible(False)
+        self.detail_progress.setMaximumWidth(180)
+        self.detail_cancel = QPushButton("Отменить экспорт")
+        self.detail_force = QPushButton("Завершить принудительно…")
+        self.detail_force.hide()
+        self.detail_cancel.clicked.connect(self.cancel_details)
+        self.detail_force.clicked.connect(self.force_details)
+        detail_layout.addWidget(self.detail_status, 1)
+        detail_layout.addWidget(self.detail_progress)
+        detail_layout.addWidget(self.detail_cancel)
+        detail_layout.addWidget(self.detail_force)
+        self.detail_panel.hide()
+        layout.addWidget(self.detail_panel)
         self.sections = QTabWidget()
         layout.addWidget(self.sections, 1)
         self._pages()
         window.installEventFilter(self)
+        QApplication.instance().installEventFilter(self)
         QApplication.instance().aboutToQuit.connect(self._shutdown)
         timer = getattr(window, "_status_reset_timer", None)
         if timer is not None:
@@ -478,21 +513,27 @@ class DatasetStatisticsTab(QWidget):
             # leave an active statistics process displaying "ready".
             timer.timeout.connect(self._keep_processing_status)
         self._update_description()
+        self._update_export_button()
         saved = load_result(self.cache_path)
         if saved is not None:
             self.render(saved)
 
     def _update_export_button(self):
+        detail_busy = self.detail_process is not None or self._detail_dialog_open
         self.export_button.setEnabled(self.process is None and self.displayed_result is not None
-                                      and self._export_task is None)
+                                      and self._export_task is None and not detail_busy)
+        self.detail_export_button.setEnabled(self.process is None and self._export_task is None and not detail_busy)
+        self.refresh.setEnabled(self.process is None and not detail_busy)
 
     def export(self):
-        if self.process is not None or self.displayed_result is None or self._export_task is not None:
+        if (self.process is not None or self.displayed_result is None or self._export_task is not None
+                or self.detail_process is not None or self._detail_dialog_open):
             return
         directory = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
         path, _ = QFileDialog.getSaveFileName(self, "Экспорт статистики",
                                             str(Path(directory) / suggested_filename(self.displayed_result)), "ZIP (*.zip)")
-        if not path or self.process is not None or self._export_task is not None:
+        if (not path or self.process is not None or self._export_task is not None
+                or self.detail_process is not None or self._detail_dialog_open):
             return
         if not path.lower().endswith(".zip"):
             path += ".zip"
@@ -511,6 +552,109 @@ class DatasetStatisticsTab(QWidget):
             set_status_error(self.window, "Не удалось экспортировать статистику")
         schedule_status_reset(self.window, 5)
         self._keep_processing_status()
+
+    def export_details(self):
+        if (self.process is not None or self._export_task is not None or self.detail_process is not None
+                or self._detail_dialog_open):
+            return
+        try:
+            source = inspect_sources(DEFAULT_RAW_ROOT)
+        except Exception:
+            self.detail_panel.show()
+            self.detail_progress.hide()
+            self.detail_cancel.hide()
+            self.detail_force.hide()
+            self.detail_status.setText(DETAIL_ERRORS['SOURCE_NOT_READY'])
+            return
+        self._detail_dialog_open = True
+        self._update_export_button()
+        try:
+            dialog = DetailExportDialog(self, source, self.configured_filter, DEFAULT_RAW_ROOT)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            options = dialog.options
+        finally:
+            self._detail_dialog_open = False
+            self._update_export_button()
+        self._start_details(options)
+
+    def _start_details(self, options):
+        if self.detail_process is not None or self.process is not None or self._export_task is not None:
+            return
+        self._detail_closing = self._detail_quitting = False
+        self._detail_options = dict(options)
+        self.detail_process = DetailExportProcess(self)
+        self.detail_process.progress.connect(self._detail_progress)
+        self.detail_process.completed.connect(self._detail_finished)
+        self.detail_process.stalled.connect(self._detail_stalled)
+        self.detail_status.setText("Проверка источников…")
+        self.detail_panel.show()
+        self.detail_progress.show()
+        self.detail_cancel.show()
+        self.detail_cancel.setEnabled(True)
+        self.detail_force.hide()
+        self._update_export_button()
+        self.calculation_running_changed.emit(True)
+        self._keep_processing_status()
+        self.detail_process.start(options)
+
+    def _detail_progress(self, message):
+        if self.detail_process is not None and not self.detail_process.cancel_requested:
+            self.detail_status.setText(DETAIL_STAGES[message['stage']]+f" · обработано: {message['processed']:,}".replace(',', ' '))
+
+    def cancel_details(self):
+        if self.detail_process is not None:
+            self.detail_cancel.setEnabled(False)
+            self.detail_status.setText("Отмена экспорта… Ожидается закрытие и очистка временных файлов.")
+            self.detail_process.cancel()
+
+    def _detail_stalled(self):
+        if self.detail_process is not None:
+            self.detail_force.show()
+            self.detail_status.setText("Worker ещё завершает отмену. Можно продолжить ожидание или завершить аварийно; "
+                                      "при аварийном завершении очистка не гарантируется.")
+
+    def force_details(self):
+        if self.detail_process is not None:
+            answer = QMessageBox.warning(self, "Принудительное завершение", "Временные файлы с персональными данными "
+                "могут остаться. Готовый ZIP мог быть сохранён непосредственно перед остановкой. Завершить процесс?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self.detail_process.force_stop()
+
+    def _detail_finished(self, message):
+        worker, self.detail_process = self.detail_process, None
+        if worker is None:
+            return
+        worker.deleteLater()
+        self.detail_progress.hide()
+        self.detail_cancel.hide()
+        self.detail_force.hide()
+        if message['event'] == 'finished':
+            rows = message['rows']
+            self.detail_status.setText("Детальная выгрузка покупателей сохранена. "
+                f"Клиентов: {rows['clients']}; заказов: {rows['orders']}; позиций: {rows['order_lines']}. "
+                +str(self._detail_options['destination'])
+                +(" Запрос отмены поступил после завершения публикации." if worker.cancel_requested else ""))
+        elif message['event'] == 'cancelled':
+            self.detail_status.setText("Экспорт отменён. Временное состояние очищено; прежний ZIP сохранён.")
+        else:
+            code = message['code']
+            text = DETAIL_ERRORS[code]+" Код: "+code
+            if 'technical_path' in message:
+                text += " Путь для проверки: "+message['technical_path']
+            if code in ('FORCED_STOP', 'WORKER_CRASHED', 'WORKER_PROTOCOL_ERROR') or code.startswith('SENSITIVE_'):
+                text += (" Проверьте временный каталог: "+str(self._detail_options['temporary_root'])
+                         +" и файлы .statistics-detail-*.partial в "+str(Path(self._detail_options['destination']).parent)
+                         +". Автоматическое удаление неизвестных файлов не выполняется.")
+            self.detail_status.setText(text)
+        self.calculation_running_changed.emit(False)
+        self._update_export_button()
+        schedule_status_reset(self.window, 0)
+        if self._detail_quitting:
+            QTimer.singleShot(0, QApplication.instance().quit)
+        elif self._detail_closing:
+            QTimer.singleShot(0, self.window.close)
 
     def set_analysis_filter(self, selection):
         self.configured_filter = selection
@@ -544,7 +688,7 @@ class DatasetStatisticsTab(QWidget):
         return layouts
 
     def start(self):
-        if self.process is not None:
+        if self.process is not None or self.detail_process is not None or self._detail_dialog_open:
             return
         self.buffer.clear()
         self.pending = self.failure = None
@@ -574,6 +718,8 @@ class DatasetStatisticsTab(QWidget):
     def _keep_processing_status(self):
         if self.process is not None:
             set_status_processing(self.window, PROCESSING_STATUS)
+        elif self.detail_process is not None:
+            set_status_processing(self.window, "Экспорт данных покупателей…")
 
     def _read(self):
         if self.process is None:
@@ -653,12 +799,21 @@ class DatasetStatisticsTab(QWidget):
             self.process.kill()
 
     def _shutdown(self):
+        if self.detail_process is not None:
+            self.detail_process.shutdown()
         if self.process is not None:
             process = self.process
             process.kill()
             process.waitForFinished(1000)
 
     def eventFilter(self, watched, event):
+        if (self.detail_process is not None and event.type() in (QEvent.Type.Close, QEvent.Type.Quit)
+                and watched in (self.window, QApplication.instance())):
+            event.ignore()
+            self._detail_quitting = self._detail_quitting or event.type() == QEvent.Type.Quit
+            self._detail_closing = self._detail_closing or watched is self.window
+            self.cancel_details()
+            return True
         if watched is self.window and event.type() == QEvent.Type.Close and self.process is not None:
             event.ignore()
             self.closing = True

@@ -48,7 +48,7 @@ def empirical_thresholds(histogram):
     values = sorted(histogram)
     cumulative = list(accumulate(histogram[value] for value in values))
     total = cumulative[-1]
-    return tuple(values[bisect_left(cumulative, (k*total+4)//5)] for k in range(1, 5))
+    return tuple(values[bisect_left(cumulative, rank)] for rank in empirical_ranks(total))
 
 
 def rfm_score(value, thresholds, *, recency=False):
@@ -316,3 +316,71 @@ class RfmAggregates:
         # by modifying an earlier result. Nothing reads or writes a cache here.
         return dict(as_of_date=self.as_of_date.isoformat(), windows={
             name: _coverage(self.coverage, *bounds) for name, bounds in self.windows.items()}, policies=policies)
+
+
+
+def empirical_ranks(total):
+    """The same four weighted nearest ranks for in-memory and disk histograms."""
+    if type(total) is not int or total < 0:
+        raise ValueError('Invalid RFM population')
+    return tuple((k*total+4)//5 for k in range(1,5)) if total else ()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RfmObservation:
+    policy: str
+    window: str
+    currency: str
+    in_base: bool
+    in_currency_base: bool
+    complete_window: bool
+    recency: int | None = None
+    recency_reliable: bool | None = None
+    frequency: int | None = None
+    monetary: Decimal | None = None
+
+    def scores(self, r_cuts, f_cuts, m_cuts):
+        """Read-only scoring with the core's existing functions and availability."""
+        if not self.in_currency_base:
+            return None,None,None,None
+        rs = rfm_score(self.recency,r_cuts,recency=True) if self.complete_window and self.recency_reliable else None
+        fs = rfm_score(self.frequency,f_cuts) if self.complete_window else None
+        ms = rfm_score(self.monetary,m_cuts) if self.complete_window else None
+        return rs,fs,ms,rfm_segment(rs,fs,ms,self.frequency)
+
+
+class RfmCustomerState:
+    """Bounded one-customer adapter; the aggregate implementation stays private.
+
+    Callers own unique facts, history identity and common population thresholds.
+    observations() returns scalar snapshots, never _Buyer/_Window references.
+    """
+    def __init__(self, as_of_date, coverage, *, identity_space, check=None):
+        self._aggregate = RfmAggregates(as_of_date,coverage,identity_space=identity_space,check=check)
+        self._customer = None
+
+    def add(self, fact):
+        if not isinstance(fact,PurchaseOrderFact):
+            raise ValueError('Invalid RFM customer fact')
+        if self._customer is not None and self._customer != fact.customer_id:
+            raise ValueError('RFM customer state cannot combine customers')
+        self._aggregate.add(fact)
+        self._customer = fact.customer_id
+
+    def observations(self):
+        a = self._aggregate
+        result = []
+        for policy in POLICIES:
+            buyer = a._buyers[policy].get(self._customer)
+            for index,window in enumerate(WINDOWS[:3]):
+                a.check()
+                complete = a.observation[window]['status']=='FULL'
+                for currency,unit in enumerate(CURRENCIES):
+                    assigned = buyer is not None and currency in buyer.currency_last
+                    if assigned:
+                        r,reliable,f,m = _observation(buyer,index,currency,a.as_of_date,a.reliable_since,complete)
+                        result.append(RfmObservation(policy,window,unit,True,True,complete,r,reliable,f,m))
+                    else:
+                        result.append(RfmObservation(policy,window,unit,buyer is not None,False,complete))
+        a.check()
+        return tuple(result)

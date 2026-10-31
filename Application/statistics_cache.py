@@ -11,6 +11,7 @@ import tempfile
 from Application.customer_statistics_scope import validate_customer_scope
 from Application.statistics_buyer_validation import validate_buyer_statistics
 from Application.statistics_rfm_validation import validate_rfm_statistics
+from Application.statistics_cohorts_validation import validate_cohort_statistics
 
 from Application.paths import USER_SETTINGS_DIR
 from Application.analysis_filter import AnalysisFilter
@@ -387,6 +388,10 @@ def validate_result(result):
         validate_rfm_statistics(result.get('rfm_statistics'),
                                 coverage=next(v['intervals'] for v in result['coverage'] if v['source'] == 'Orders'),
                                 selected_end=selected_end, calculated_at=parse_timestamp(result['calculated_at']))
+        validate_cohort_statistics(result.get('cohort_statistics'),
+            coverage=next(v['intervals'] for v in result['coverage'] if v['source'] == 'Orders'),
+            selected_start=original['period']['start_date'] if original is not None else result['analysis_filter']['start_date'],
+            selected_end=selected_end, calculated_at=parse_timestamp(result['calculated_at']))
     except (KeyError, TypeError, ValueError, OverflowError, DecimalException):
         raise StatisticsCacheError("Неполный или некорректный результат статистики.") from None
     return result

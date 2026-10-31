@@ -35,6 +35,8 @@ from Application.customer_statistics_scope import CustomerScope
 from Application.statistics_buyer_aggregates import BuyerAggregates
 from Application.statistics_purchase_facts import build_purchase_order_fact
 from Application.statistics_rfm_core import RfmAggregates
+from Application.statistics_cohorts_core import CohortAggregates
+from Application.statistics_cohorts_validation import cohort_cutoff
 from Application.statistics_rfm_validation import rfm_cutoff
 
 
@@ -147,6 +149,7 @@ class DatasetStatistics:
     customer_scope: dict | None = None
     buyer_statistics: dict | None = None
     rfm_statistics: dict | None = None
+    cohort_statistics: dict | None = None
 
 
 def _distribution(counts, labels):
@@ -486,8 +489,14 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     rfm_date = rfm_cutoff(order_scope_period, customer_filter.end_date, calculated_at)
     rfm = (RfmAggregates(rfm_date, order_scope_period, identity_space=buyer_aggregates.identity_space, check=check)
            if rfm_date is not None else None)
+    cohort_date = cohort_cutoff(order_scope_period, customer_filter.end_date, calculated_at)
+    cohorts = (CohortAggregates(cohort_date, order_scope_period, identity_space=buyer_aggregates.identity_space,
+                               cohort_start=customer_filter.start_date[:7] if customer_filter.start_date else None,
+                               cohort_end=customer_filter.end_date[:7] if customer_filter.end_date else None, check=check)
+               if cohort_date is not None else None)
     if input_source is not None:
         input_source.rfm_interval = rfm.windows['LAST_48M'] if rfm is not None else None
+        input_source.cohort_until = cohorts.end if cohorts is not None else None
     products = ProductResolver(product_catalog)
 
     def matches(product):
@@ -559,6 +568,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     snapshots = input_source.snapshots() if input_source is not None else OrderSnapshots()
     scope_only_orders = set()  # Only orders selected outside the legacy shared coverage.
     rfm_orders = set()  # First eligible snapshot in the independent 48-month area.
+    cohort_orders = set()  # Full-history first snapshot, independent of other scopes and status.
     prepared_lines = prepared_fact = None
 
     def purchase_fact(raw, lines, ordered_at):
@@ -588,6 +598,14 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     for raw in records("orders", entries["orders"]):
         prepared_lines = prepared_fact = None
         ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
+        if (cohorts is not None and ordered_at < cohorts.end
+                and any(a <= ordered_at < b for a, b in order_scope_period)):
+            key = identifier(raw, 'ids.mindboxId')
+            if key not in cohort_orders:
+                eligible = [line for line in objects(raw, 'lines', required=True)
+                            if (quantity := number(line, 'quantity')) == quantity.to_integral_value()]
+                cohorts.add(purchase_fact(raw, adapted_lines(raw, eligible), ordered_at))
+                cohort_orders.add(key)
         if (rfm is not None and rfm.windows['LAST_48M'][0] <= ordered_at < rfm.windows['LAST_48M'][1]
                 and any(a <= ordered_at < b for a, b in order_scope_period)):
             key = identifier(raw, 'ids.mindboxId')
@@ -711,6 +729,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
         customer_scope=scope.result(check),
         buyer_statistics=buyer_aggregates.result(as_of, check),
         rfm_statistics=rfm.result() if rfm is not None else None,
+        cohort_statistics=cohorts.result() if cohorts is not None else None,
         product_category_paths=tuple((code, category_paths.get(code))
                                      for code, *_ in product_result["product_category_statistics"] if code is not None),
         source_actions=sum(action_types.values()),

@@ -44,6 +44,7 @@ def test_rfm_saved_snapshot_gui_xlsx_html_identical_values_no_raw_access(dataset
             coverage = [(cache.parse_timestamp('2026-01-01T00:00:00Z'),cache.parse_timestamp('2026-09-01T00:00:00Z'))]
             next(s for s in result['coverage'] if s['source']=='Orders')['intervals'] = [(a.isoformat(),b.isoformat()) for a,b in coverage]
             result['buyer_statistics'] = None
+        result['cohort_statistics'] = None  # This fixture replaces Orders coverage for RFM only.
         rfm = RfmAggregates(cache.parse_timestamp('2026-08-31T00:00:00Z').date(),coverage,identity_space=SPACE)
         if scenario=='partial':
             rfm.add(ready_fact())
@@ -83,8 +84,9 @@ def test_rfm_saved_snapshot_gui_xlsx_html_identical_values_no_raw_access(dataset
     tables = page.findChildren(QTableWidget)
     start = 9+sum(len(t) for _,_,t,_ in buyer_sections(result))
     expected = [(headers,rows) for _,_,blocks,_ in sections for headers,rows in blocks]
-    assert len(tables[start:])==len(expected)
-    for table,(headers,rows) in zip(tables[start:],expected):
+    rfm_tables = tables[start:start+len(expected)]
+    assert len(rfm_tables)==len(expected)
+    for table,(headers,rows) in zip(rfm_tables,expected):
         assert [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]==list(headers)
         assert [[table.item(r,c).text() for c in range(table.columnCount())] for r in range(table.rowCount())]==[
             [ui._number(ui._buyer_display(v)) for v in row] for row in rows]
@@ -119,6 +121,7 @@ def test_rfm_saved_snapshot_gui_xlsx_html_identical_values_no_raw_access(dataset
 def test_old_cache_opens_on_startup_and_exports_without_recalculation(dataset,window,tmp_path,monkeypatch):
     result = calculate(dataset)
     result.pop('rfm_statistics')
+    result.pop('cohort_statistics')
     path = tmp_path/'old-cache.json'
     cache.save_result(path,result)
     before = path.read_bytes()
