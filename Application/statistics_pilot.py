@@ -30,6 +30,7 @@ from Application.statistics_index import (
 )
 from Application.statistics_slices import DEFAULT_CACHE_DIR, _digest, capture_sources
 from Application.statistics_index import source_version
+from Application.statistics_storage_safety import path_identity, reject_reparse
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ def prepare_pilot(*, plan, raw_root, catalog_path, destination, limits=PilotLimi
         raise StatisticsIndexError("PILOT_STALE_PLAN")
     destination.mkdir()
     destination = destination.resolve()
+    parent_id, destination_id = path_identity(destination.parent), path_identity(destination)
     started = perf_counter()
     timings, counts = {}, {}
     try:
@@ -217,7 +219,12 @@ def prepare_pilot(*, plan, raw_root, catalog_path, destination, limits=PilotLimi
         return marker
     except Exception:
         # Only the directory exclusively created by this call, never user files.
-        if destination.is_symlink() or destination.resolve() != destination:
+        try:
+            reject_reparse(destination)
+            if (path_identity(destination.parent) != parent_id
+                    or path_identity(destination) != destination_id):
+                raise StatisticsIndexError("PILOT_CLEANUP_PATH_CHANGED")
+        except (OSError, StatisticsIndexError):
             raise StatisticsIndexError("PILOT_CLEANUP_PATH_CHANGED") from None
         shutil.rmtree(destination)
         raise

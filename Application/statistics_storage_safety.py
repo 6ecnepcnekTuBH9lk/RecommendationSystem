@@ -69,6 +69,29 @@ def local_volume(path):
         raise StatisticsIndexError("WRITABLE_NTFS_REQUIRED")
 
 
+def _powershell_environment():
+    """Restrict this child's module lookup to the OS Windows PowerShell modules."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    kernel.GetSystemDirectoryW.restype = wintypes.UINT
+    directory = ctypes.create_unicode_buffer(32768)
+    length = kernel.GetSystemDirectoryW(directory, len(directory))
+    if not 0 < length < len(directory):
+        raise StatisticsIndexError("ACL_INSPECTION_FAILED")
+    modules = reject_reparse(Path(directory.value) / "WindowsPowerShell" / "v1.0" / "Modules")
+    for name in ("Microsoft.PowerShell.Security", "Microsoft.PowerShell.Utility"):
+        manifest = reject_reparse(modules / name / (name + ".psd1"))
+        if not manifest.is_file():
+            raise StatisticsIndexError("ACL_INSPECTION_FAILED")
+    environment = {key: value for key, value in os.environ.items()
+                   if key.casefold() != "psmodulepath"}
+    environment["PSModulePath"] = str(modules)
+    return environment
+
+
 def inspect_acls(paths):
     """One Windows API/.NET batch; return masks/booleans, never SID/name values."""
     literals = ",".join("'" + str(p).replace("'", "''") + "'" for p in paths)
@@ -92,14 +115,32 @@ $rows=foreach($p in @(__PATHS__)) {
 }
 ConvertTo-Json -InputObject @($rows) -Depth 6 -Compress
 """.replace("__PATHS__", literals)
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-        base64.b64encode(command.encode("utf-16le")).decode("ascii")], capture_output=True, timeout=30)
+    try:
+        environment = _powershell_environment()
+        # Windows PowerShell startup can prepend user/all-user module paths.
+        # Pin the lookup again inside the child before either module autoloads.
+        command = "$env:PSModulePath='" + environment["PSModulePath"].replace("'", "''") + "'\n" + command
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+            base64.b64encode(command.encode("utf-16le")).decode("ascii")],
+            env=environment, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError, StatisticsIndexError):
+        raise StatisticsIndexError("ACL_INSPECTION_FAILED") from None
     if result.returncode:
         raise StatisticsIndexError("ACL_INSPECTION_FAILED")
     try:
         facts = json.loads(result.stdout.decode("utf-8-sig"))
         if not isinstance(facts, list) or len(facts) != len(paths):
             raise ValueError
+        for fact in facts:
+            if (not isinstance(fact, dict) or set(fact) != {"owner_trusted", "protected", "unsupported", "rules"}
+                    or any(type(fact[key]) is not bool for key in ("owner_trusted", "protected", "unsupported"))
+                    or not isinstance(fact["rules"], list)):
+                raise ValueError
+            for rule in fact["rules"]:
+                if (not isinstance(rule, dict) or set(rule) != {"trusted", "current", "allow", "inherit_only", "mask"}
+                        or any(type(rule[key]) is not bool for key in ("trusted", "current", "allow", "inherit_only"))
+                        or type(rule["mask"]) is not int or not -(2**31) <= rule["mask"] < 2**32):
+                    raise ValueError
         return facts
     except (UnicodeError, ValueError, TypeError):
         raise StatisticsIndexError("ACL_INSPECTION_FAILED") from None

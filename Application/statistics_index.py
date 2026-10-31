@@ -30,7 +30,8 @@ from Application.statistics_facts import SCHEMA, DEMOGRAPHY_SCHEMA, INDEXES, Pro
 from Application.statistics_period import shared_intervals
 from Application.statistics_slices import capture_sources
 from Application.statistics_storage_safety import (
-    StatisticsIndexError, check_owned_staging, path_identity, reject_reparse, validate_storage_root,
+    StatisticsIndexError, _powershell_environment, check_acl_facts, check_owned_staging,
+    inspect_acls, path_identity, reject_reparse, validate_storage_root,
 )
 
 SCHEMA_VERSION = 2
@@ -55,21 +56,89 @@ def component_digest(path, check=lambda: None):
     return digest.hexdigest()
 
 
+def _windows_user_sid():
+    """Read the process user's SID without a shell; never expose it in errors."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SidAndAttributes(ctypes.Structure):
+        _fields_ = [("sid", wintypes.LPVOID), ("attributes", wintypes.DWORD)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.restype = wintypes.HANDLE
+    security.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    security.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    security.GetTokenInformation.restype = wintypes.BOOL
+    security.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    security.ConvertSidToStringSidW.restype = wintypes.BOOL
+    token, text = wintypes.HANDLE(), wintypes.LPWSTR()
+    try:
+        if not security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            raise ValueError("User token unavailable")
+        size = wintypes.DWORD()
+        if (security.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+                or ctypes.get_last_error() != 122
+                or not ctypes.sizeof(SidAndAttributes) <= size.value <= 65536):
+            raise ValueError("Invalid user token size")
+        buffer = ctypes.create_string_buffer(size.value)
+        if not security.GetTokenInformation(token, 1, buffer, size.value, ctypes.byref(size)):
+            raise ValueError("User token unavailable")
+        user = ctypes.cast(buffer, ctypes.POINTER(SidAndAttributes)).contents
+        if not user.sid or not security.ConvertSidToStringSidW(user.sid, ctypes.byref(text)):
+            raise ValueError("User SID unavailable")
+        if not text.value:
+            raise ValueError("User SID unavailable")
+        return text.value
+    finally:
+        if text:
+            kernel.LocalFree(ctypes.cast(text, wintypes.HANDLE))
+        if token:
+            kernel.CloseHandle(token)
+
+
 def protect_directory(path):
-    """Narrow access on a newly created owned directory only; fail closed."""
+    """Protect a newly created owned directory and attest its private ACL."""
     if os.name != "nt":
         path.chmod(0o700)
         return
-    import base64
     import subprocess
-    literal = "'" + str(path.resolve()).replace("'", "''") + "'"
-    command = (f"$p={literal}; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
-               '& icacls.exe $p /inheritance:r /grant:r "*$($sid):(OI)(CI)F" '
-               "'*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null; exit $LASTEXITCODE")
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                             base64.b64encode(command.encode("utf-16le")).decode("ascii")], capture_output=True)
-    if result.returncode:
-        raise StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+    try:
+        target = reject_reparse(path)
+        if not target.is_dir():
+            raise ValueError("Missing directory")
+        identity = path_identity(target)
+        # This existing helper derives the system path from GetSystemDirectoryW,
+        # validates built-in modules and never trusts PATH/SystemRoot from env.
+        modules = Path(_powershell_environment()["PSModulePath"])
+        icacls = reject_reparse(modules.parents[2] / "icacls.exe")
+        if not icacls.is_file():
+            raise ValueError("Missing system executable")
+        sid = _windows_user_sid()
+        result = subprocess.run(
+            [str(icacls), str(target), "/inheritance:r", "/grant:r",
+             f"*{sid}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode:
+            raise ValueError("ACL assignment failed")
+        if path_identity(reject_reparse(target)) != identity:
+            raise ValueError("Directory changed")
+        facts = inspect_acls([target])
+        if len(facts) != 1:
+            raise ValueError("Invalid ACL facts")
+        check_acl_facts(facts[0], private=True, root=True)
+        if not target.is_dir() or path_identity(reject_reparse(target)) != identity:
+            raise ValueError("Directory changed")
+    except Exception:
+        # Neither native output nor identity-bearing exception details escape.
+        raise StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED") from None
 
 
 def read_pointer(directory):

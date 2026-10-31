@@ -205,3 +205,62 @@ def test_incomplete_or_mismatched_daily_window_not_presented_as_full_day(source)
     # the pilot's complete-pair guard. Both preserve the fail-closed contract.
     with pytest.raises((index.StatisticsIndexError,TrainingBatchError)):
         plan(source)
+
+
+def test_prepare_acl_failure_stops_before_copy_and_preserves_other_files(source, tmp_path, monkeypatch):
+    destination = tmp_path / "new-private"
+    foreign = tmp_path / "foreign.txt"
+    foreign.write_text("preserve")
+    calls = []
+
+    def failure(path):
+        calls.append(path)
+        raise index.StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+
+    monkeypatch.setattr(pilot, "protect_directory", failure)
+    monkeypatch.setattr(pilot.shutil, "copyfile", lambda *a, **kw: pytest.fail("No copy after ACL failure"))
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        pilot.prepare_pilot(plan=plan(source), raw_root=source[0],
+                            catalog_path=source[1], destination=destination)
+    assert len(calls) == 1
+    assert not destination.exists()
+    assert not (destination / "PILOT_ONLY.json").exists()
+    assert foreign.read_text() == "preserve"
+
+
+def test_prepare_acl_failure_never_cleans_substituted_directory(source, tmp_path, monkeypatch):
+    destination = tmp_path / "new-private"
+    retained = tmp_path / "retained-owned"
+
+    def failure(path):
+        path.rename(retained)
+        path.mkdir()
+        (path / "foreign.txt").write_text("preserve")
+        raise index.StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+
+    monkeypatch.setattr(pilot, "protect_directory", failure)
+    with pytest.raises(index.StatisticsIndexError, match="^PILOT_CLEANUP_PATH_CHANGED$"):
+        pilot.prepare_pilot(plan=plan(source), raw_root=source[0],
+                            catalog_path=source[1], destination=destination)
+    assert retained.is_dir()
+    assert (destination / "foreign.txt").read_text() == "preserve"
+    assert not (destination / "PILOT_ONLY.json").exists()
+
+
+def test_prepare_partial_acl_failure_reports_cleanup_failure(source, tmp_path, monkeypatch):
+    destination = tmp_path / "new-private"
+
+    def failure(path):
+        (path / "partial-attempt.txt").write_text("synthetic partial failure")
+        raise index.StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+
+    def cleanup(path):
+        raise PermissionError("Synthetic cleanup failure")
+
+    monkeypatch.setattr(pilot, "protect_directory", failure)
+    monkeypatch.setattr(pilot.shutil, "rmtree", cleanup)
+    with pytest.raises(PermissionError):
+        pilot.prepare_pilot(plan=plan(source), raw_root=source[0],
+                            catalog_path=source[1], destination=destination)
+    assert (destination / "partial-attempt.txt").is_file()
+    assert not (destination / "PILOT_ONLY.json").exists()

@@ -507,3 +507,352 @@ def test_explicit_cli_build_success_and_status_use_same_published_generation(dat
     assert events[-1]["value"]["counts"]["actions"] == 7
     assert main([*arguments,"--status"]) == 0
     assert json.loads(capsys.readouterr().out) == {"state":"READY"}
+
+
+@pytest.fixture
+def private_protection(tmp_path, monkeypatch):
+    """Never execute a native ACL utility; inspect only synthetic ACL facts."""
+    import subprocess
+    from types import SimpleNamespace
+
+    folder = tmp_path / "private"
+    folder.mkdir()
+    modules = tmp_path / "Windows" / "System32" / "WindowsPowerShell" / "v1.0" / "Modules"
+    executables = {modules.parent / "powershell.exe", modules.parents[2] / "icacls.exe"}
+    original_is_file = type(folder).is_file
+    monkeypatch.setattr(type(folder), "is_file",
+                        lambda p: p in executables or original_is_file(p))
+    environment = {"PSModulePath": str(modules), "PATH": "UNTRUSTED_PATH"}
+    monkeypatch.setattr(index, "_powershell_environment", lambda: environment.copy())
+    monkeypatch.setattr(index, "_windows_user_sid", lambda: "S-1-0-0")
+    facts = dict(owner_trusted=True, protected=True, unsupported=False, rules=[
+        dict(trusted=True, current=True, mask=0x1F01FF, allow=True, inherit_only=False)])
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"Successfully processed", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(index, "inspect_acls", lambda paths: [facts])
+    return SimpleNamespace(folder=folder, modules=modules, calls=calls, facts=facts)
+
+
+def test_protect_success_requires_private_acl_attestation(private_protection, monkeypatch):
+    p = private_protection
+    inspections = []
+
+    def inspect(paths):
+        inspections.append(paths)
+        return [p.facts]
+
+    monkeypatch.setattr(index, "inspect_acls", inspect)
+    monkeypatch.setattr(index, "validate_storage_root",
+                        lambda *a, **kw: pytest.fail("No production parent requirement"))
+    index.protect_directory(p.folder)
+    assert inspections == [[p.folder]]
+    assert len(p.calls) == 1
+    args, kwargs = p.calls[0]
+    assert args[0] == str(p.modules.parents[2] / "icacls.exe")
+    assert args[1] == str(p.folder)
+    assert args[2:4] == ["/inheritance:r", "/grant:r"]
+    assert kwargs["timeout"] == 30
+    assert kwargs["capture_output"] is True
+    assert not kwargs.get("shell", False)
+
+
+@pytest.mark.parametrize("name", [
+    "space folder", "Кириллица (скобки)", "apostrophe'folder",
+    "dollar$semicolon;" + chr(96) + "ampersand&", "__PATHS__ __MODULES__",
+])
+def test_protect_path_is_one_native_argument(private_protection, name):
+    p = private_protection
+    folder = p.folder / name
+    folder.mkdir()
+    index.protect_directory(folder)
+    args, kwargs = p.calls[0]
+    assert args[0] == str(p.modules.parents[2] / "icacls.exe")
+    assert args[1] == str(folder)
+    assert args[2:4] == ["/inheritance:r", "/grant:r"]
+    assert len(args) == 7
+    assert not kwargs.get("shell", False)
+    assert "/T" not in args
+
+
+def test_protect_missing_trusted_executable_has_no_path_fallback(private_protection, monkeypatch):
+    p = private_protection
+    original = type(p.folder).is_file
+    monkeypatch.setattr(type(p.folder), "is_file",
+                        lambda path: False if path.name == "icacls.exe" else original(path))
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(p.folder)
+    assert not p.calls
+
+
+@pytest.mark.parametrize("failure", ["missing", "denied", "invalid_arguments", "timeout", "unexpected"])
+def test_protect_subprocess_exceptions_are_safe(private_protection, monkeypatch, capsys, failure):
+    import subprocess
+    p = private_protection
+
+    def run(*a, **kw):
+        if failure == "missing":
+            raise FileNotFoundError("SENSITIVE_NATIVE_DETAIL")
+        if failure == "denied":
+            raise PermissionError("SENSITIVE_NATIVE_DETAIL")
+        if failure == "invalid_arguments":
+            raise ValueError("SENSITIVE_NATIVE_DETAIL")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("SENSITIVE_COMMAND", 30, stderr=b"SENSITIVE_STDERR")
+        raise RuntimeError("SENSITIVE_NATIVE_DETAIL")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(index.StatisticsIndexError) as caught:
+        index.protect_directory(p.folder)
+    assert str(caught.value) == "PRIVATE_INDEX_ACL_FAILED"
+    assert caught.value.__suppress_context__
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("code", [1, 2, 5])
+def test_protect_nonzero_native_exit_never_attests(private_protection, monkeypatch, capsys, code):
+    import subprocess
+    from types import SimpleNamespace
+    p = private_protection
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw:
+                        SimpleNamespace(returncode=code, stdout=b"SENSITIVE_STDOUT", stderr=b"SENSITIVE_STDERR"))
+    monkeypatch.setattr(index, "inspect_acls", lambda *a: pytest.fail("Failed assignment must stop"))
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(p.folder)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("damage", [
+    "owner", "unsupported", "not_protected", "owner_readonly",
+    "foreign_allow", "foreign_inherit_only", "deny", "invalid_shape",
+])
+def test_protect_zero_exit_with_bad_acl_is_not_success(private_protection, damage):
+    p = private_protection
+    if damage == "owner":
+        p.facts["owner_trusted"] = False
+    elif damage == "unsupported":
+        p.facts["unsupported"] = True
+    elif damage == "not_protected":
+        p.facts["protected"] = False
+    elif damage == "owner_readonly":
+        p.facts["rules"][0]["mask"] = 0x120089
+    elif damage in ("foreign_allow", "foreign_inherit_only"):
+        p.facts["rules"].append(dict(trusted=False, current=False, mask=0x1301BF,
+                                    allow=True, inherit_only=damage.endswith("only")))
+    elif damage == "deny":
+        p.facts["rules"][0]["allow"] = False
+    else:
+        p.facts.clear()
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(p.folder)
+    assert len(p.calls) == 1
+
+
+@pytest.mark.parametrize("reply", [None, [], [None], [{}, {}]])
+def test_protect_invalid_acl_reply_is_safe(private_protection, monkeypatch, reply):
+    monkeypatch.setattr(index, "inspect_acls", lambda paths: reply)
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(private_protection.folder)
+
+
+def test_protect_unavailable_inspection_is_safe(private_protection, monkeypatch):
+    def unavailable(paths):
+        raise index.StatisticsIndexError("ACL_INSPECTION_FAILED")
+    monkeypatch.setattr(index, "inspect_acls", unavailable)
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(private_protection.folder)
+
+
+def test_protect_reparse_is_rejected_before_native_call(private_protection, monkeypatch):
+    p = private_protection
+    original = type(p.folder).lstat
+
+    def reparse(path):
+        if path == p.folder:
+            return type("Info", (), dict(st_mode=0o40700, st_file_attributes=0x400))()
+        return original(path)
+
+    monkeypatch.setattr(type(p.folder), "lstat", reparse)
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(p.folder)
+    assert not p.calls
+
+
+@pytest.mark.parametrize("stage", ["native", "inspection"])
+def test_protect_replacement_is_detected_and_not_removed(private_protection, monkeypatch, stage):
+    import subprocess
+    from types import SimpleNamespace
+    p = private_protection
+
+    def replace():
+        p.folder.rename(p.folder.with_name("retained-original"))
+        p.folder.mkdir()
+        (p.folder / "foreign.txt").write_text("preserve")
+
+    if stage == "native":
+        def run(*a, **kw):
+            replace()
+            return SimpleNamespace(returncode=0)
+        monkeypatch.setattr(subprocess, "run", run)
+    else:
+        def inspect(paths):
+            replace()
+            return [p.facts]
+        monkeypatch.setattr(index, "inspect_acls", inspect)
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(p.folder)
+    assert (p.folder / "foreign.txt").read_text() == "preserve"
+
+
+def test_protect_missing_directory_is_not_created(private_protection):
+    p = private_protection
+    missing = p.folder / "missing"
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(missing)
+    assert not missing.exists() and not p.calls
+
+
+def test_protect_failure_never_opens_sqlite_or_changes_old_generation(dataset, monkeypatch):
+    old = build(dataset)
+    directory = dataset[0] / "analytics"
+    pointer = (directory / "current.json").read_bytes()
+    calls = []
+
+    def failure(path):
+        calls.append(path)
+        (path / "partial-attempt.txt").write_text("synthetic partial failure")
+        raise index.StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+
+    monkeypatch.setattr(index, "protect_directory", failure)
+    monkeypatch.setattr(index.sqlite3, "connect", lambda *a, **kw: pytest.fail("No SQLite after ACL failure"))
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        build(dataset)
+    assert len(calls) == 1
+    assert (directory / "current.json").read_bytes() == pointer
+    assert {p.name for p in directory.iterdir() if p.is_dir()} == {old["generation"]}
+
+
+def test_protect_failure_cleanup_does_not_delete_replaced_staging(dataset, monkeypatch):
+    old = build(dataset)
+    directory = dataset[0] / "analytics"
+    pointer = (directory / "current.json").read_bytes()
+    replacements = []
+
+    def failure(path):
+        path.rename(directory / "retained-owned-staging")
+        path.mkdir()
+        marker = path / "foreign.txt"
+        marker.write_text("preserve")
+        replacements.append(marker)
+        raise index.StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+
+    monkeypatch.setattr(index, "protect_directory", failure)
+    with pytest.raises(index.StatisticsIndexError, match="^STAGING_PATH_CHANGED$"):
+        build(dataset)
+    assert replacements[0].read_text() == "preserve"
+    assert (directory / "current.json").read_bytes() == pointer
+    assert (directory / old["generation"]).is_dir()
+
+
+def test_protect_failure_cleanup_error_remains_a_failure(dataset, monkeypatch):
+    old = build(dataset)
+    directory = dataset[0] / "analytics"
+    pointer = (directory / "current.json").read_bytes()
+    staging = []
+
+    def failure(path):
+        staging.append(path)
+        raise index.StatisticsIndexError("PRIVATE_INDEX_ACL_FAILED")
+
+    def cleanup(path):
+        raise PermissionError("Synthetic cleanup failure")
+
+    monkeypatch.setattr(index, "protect_directory", failure)
+    monkeypatch.setattr(index.shutil, "rmtree", cleanup)
+    with pytest.raises(PermissionError):
+        build(dataset)
+    assert staging[0].is_dir()
+    assert (directory / old["generation"]).is_dir()
+    assert (directory / "current.json").read_bytes() == pointer
+
+
+@pytest.mark.parametrize("failure", [
+    None, "open", "size", "query", "convert", "convert_partial", "empty",
+])
+def test_windows_user_sid_reads_token_and_releases_resources(monkeypatch, failure):
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    closed, freed = [], []
+    sid_buffer = ctypes.create_unicode_buffer("" if failure == "empty" else "S-1-0-0")
+
+    def open_token(process, access, output):
+        assert access == 0x0008
+        if failure == "open":
+            return False
+        ctypes.cast(output, ctypes.POINTER(wintypes.HANDLE))[0] = wintypes.HANDLE(123)
+        return True
+
+    def token_information(token, kind, buffer, length, needed):
+        assert kind == 1
+        if buffer is None:
+            ctypes.cast(needed, ctypes.POINTER(wintypes.DWORD))[0] = wintypes.DWORD(32)
+            ctypes.set_last_error(87 if failure == "size" else 122)
+            return False
+        if failure == "query":
+            return False
+        ctypes.cast(buffer, ctypes.POINTER(wintypes.LPVOID))[0] = wintypes.LPVOID(456)
+        return True
+
+    def convert_sid(sid, output):
+        assert sid == 456
+        if failure == "convert":
+            return False
+        ctypes.cast(output, ctypes.POINTER(wintypes.LPWSTR))[0] = ctypes.cast(sid_buffer, wintypes.LPWSTR)
+        return failure != "convert_partial"
+
+    def close(token):
+        closed.append(token.value)
+        return True
+
+    def free(pointer):
+        freed.append(pointer.value)
+        return None
+
+    kernel = SimpleNamespace(GetCurrentProcess=lambda: -1, CloseHandle=close, LocalFree=free)
+    security = SimpleNamespace(OpenProcessToken=open_token, GetTokenInformation=token_information,
+                               ConvertSidToStringSidW=convert_sid)
+    monkeypatch.setattr(ctypes, "WinDLL",
+                        lambda name, **kw: kernel if name == "kernel32" else security, raising=False)
+    if failure is None:
+        assert index._windows_user_sid() == "S-1-0-0"
+    else:
+        with pytest.raises(ValueError):
+            index._windows_user_sid()
+    assert closed == ([] if failure == "open" else [123])
+    assert len(freed) == (1 if failure in (None, "convert_partial", "empty") else 0)
+
+
+def test_protect_sid_lookup_failure_is_safe(private_protection, monkeypatch):
+    def unavailable():
+        raise RuntimeError("SENSITIVE_TOKEN_DETAIL")
+    monkeypatch.setattr(index, "_windows_user_sid", unavailable)
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(private_protection.folder)
+    assert not private_protection.calls
+
+
+def test_protect_replayed_false_zero_with_existing_directory_is_rejected(private_protection, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    p = private_protection
+    p.facts["protected"] = False
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=b"Successfully processed", stderr=b"CommandNotFoundException"))
+    with pytest.raises(index.StatisticsIndexError, match="^PRIVATE_INDEX_ACL_FAILED$"):
+        index.protect_directory(p.folder)
