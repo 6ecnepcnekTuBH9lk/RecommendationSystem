@@ -1,8 +1,11 @@
 """Read-only storage admission, never an ACL repair or a production path change.
 
 Trust the current Windows user, SYSTEM, administrators and OS servicing. Other
-principals must not be able to read private objects or mutate their namespace.
-Concurrent hostile actions by those trusted principals are outside this model.
+principals must not be able to read private objects. Windows parent admission is
+for a single-user local installation: foreign Modify on ancestors is tolerated.
+It does NOT protect against other users able to mutate those parents. Private
+roots/children remain strict. No existing Windows ACL is changed by admission.
+Concurrent hostile actions by trusted principals are outside this model.
 """
 
 import base64
@@ -146,7 +149,7 @@ ConvertTo-Json -InputObject @($rows) -Depth 6 -Compress
         raise StatisticsIndexError("ACL_INSPECTION_FAILED") from None
 
 
-def check_acl_facts(fact, *, private, root=False):
+def check_acl_facts(fact, *, private, root=False, local_parent=False):
     # Conservative allowlist admission, NOT an arbitrary-token AccessCheck:
     # foreign allows are rejected even if another ACE could deny that token.
     if fact["unsupported"] or not fact["owner_trusted"]:
@@ -166,7 +169,12 @@ def check_acl_facts(fact, *, private, root=False):
             if not rule["trusted"]:
                 # Private objects also reject inherit-only foreign grants: they
                 # could expose newly created journals/pointer/children.
-                if private or (not rule["inherit_only"] and mask & 0xD0150):
+                # Only local ancestors may carry up to Modify. Generic bits
+                # have already been mapped above; WRITE_DAC/OWNER, DELETE_CHILD
+                # and GENERIC_ALL remain forbidden. This never relaxes private.
+                local_modify = local_parent and not (mask & 0x0FFFFFFF & ~0x1301BF)
+                if private or (not rule["inherit_only"] and mask & 0xD0150
+                               and not local_modify):
                     raise StatisticsIndexError("UNSAFE_STORAGE_ACL")
         elif private:
             raise StatisticsIndexError("UNSUPPORTED_PRIVATE_DENY_ACL")
@@ -175,7 +183,13 @@ def check_acl_facts(fact, *, private, root=False):
 
 
 def validate_storage_root(directory, *, children=()):
-    """A root must be prepared separately; do not create it or alter its ACL."""
+    """Admit a separately prepared private root; never create/repair ACLs.
+
+    Windows ancestors use the accepted single-user local policy (up to foreign
+    Modify). This cannot secure the namespace against other users who can
+    change those parents. Owner/ACL, local volume and reparse checks still apply.
+    The root and every inspected child always use strict private admission.
+    """
     root = reject_reparse(directory)
     for name in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
         value = os.environ.get(name)
@@ -195,7 +209,9 @@ def validate_storage_root(directory, *, children=()):
         try:
             facts = inspect_acls(paths)
             for position, fact in enumerate(facts):
-                check_acl_facts(fact, private=position == 0 or position > len(root.parents), root=position == 0)
+                private = position == 0 or position > len(root.parents)
+                check_acl_facts(fact, private=private, root=position == 0,
+                                local_parent=not private)
         except StatisticsIndexError:
             raise
         except (OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError):

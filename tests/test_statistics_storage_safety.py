@@ -445,3 +445,69 @@ def test_acl_helper_reparse_module_location_is_a_safe_inspection_error(helper_sy
     monkeypatch.setattr(safety.subprocess, "run", lambda *a, **kw: pytest.fail("No module path fallback"))
     with pytest.raises(safety.StatisticsIndexError, match="^ACL_INSPECTION_FAILED$"):
         safety.inspect_acls([Path("D:/")])
+
+
+@pytest.mark.parametrize("mask", [0x1301BF, 0x40000000, 0x1200A9])
+def test_single_user_parent_accepts_at_most_modify_without_relaxing_strict_default(mask):
+    value = fact()
+    value["rules"].append(dict(trusted=False, current=False, mask=mask,
+                              allow=True, inherit_only=False))
+    safety.check_acl_facts(value, private=False, local_parent=True)
+    if mask != 0x1200A9:
+        with pytest.raises(index.StatisticsIndexError, match="UNSAFE_STORAGE_ACL"):
+            safety.check_acl_facts(value, private=False)
+    with pytest.raises(index.StatisticsIndexError, match="UNSAFE_STORAGE_ACL"):
+        safety.check_acl_facts(value, private=True, root=True, local_parent=True)
+
+
+@pytest.mark.parametrize("mask", [0x1301BF | 0x40, 0x1301BF | 0x40000,
+                                  0x1301BF | 0x80000, 0x10000000])
+def test_single_user_parent_still_rejects_broader_foreign_rights(mask):
+    value = fact()
+    value["rules"].append(dict(trusted=False, current=False, mask=mask,
+                              allow=True, inherit_only=False))
+    with pytest.raises(index.StatisticsIndexError, match="UNSAFE_STORAGE_ACL"):
+        safety.check_acl_facts(value, private=False, local_parent=True)
+
+
+@pytest.mark.parametrize("damage", ["none", "owner", "unsupported", "root_inheritance",
+                                    "root_foreign", "child_foreign", "pointer_foreign"])
+def test_local_storage_validation_relaxes_only_parents(tmp_path, monkeypatch, damage):
+    from types import SimpleNamespace
+    root = tmp_path / "index"
+    root.mkdir()
+    child = root / "generation"
+    child.mkdir()
+    pointer = root / "current.json"
+    pointer.write_text("synthetic")
+    value = fact()
+    value["rules"].append(dict(trusted=False, current=False, mask=0x1301BF,
+                              allow=True, inherit_only=False))
+    monkeypatch.setattr(safety, "os", SimpleNamespace(
+        name="nt", environ=safety.os.environ, path=safety.os.path))
+    monkeypatch.setattr(safety, "local_volume", lambda _: None)
+
+    def inspect(paths):
+        result = []
+        for path in paths:
+            parent = path in root.parents
+            row = {**fact(), "rules": [dict(rule) for rule in
+                                      (value if parent else fact())["rules"]]}
+            if parent and damage in ("owner", "unsupported"):
+                row["owner_trusted" if damage == "owner" else "unsupported"] = damage != "owner"
+            if path == root and damage == "root_inheritance":
+                row["protected"] = False
+            if ((path == root and damage == "root_foreign")
+                    or (path == child and damage == "child_foreign")
+                    or (path == pointer and damage == "pointer_foreign")):
+                row["rules"].append(dict(trusted=False, current=False, mask=0x120089,
+                                         allow=True, inherit_only=False))
+            result.append(row)
+        return result
+
+    monkeypatch.setattr(safety, "inspect_acls", inspect)
+    if damage == "none":
+        assert safety.validate_storage_root(root, children=(child,)) == safety.path_identity(root)
+    else:
+        with pytest.raises(index.StatisticsIndexError):
+            safety.validate_storage_root(root, children=(child,))
