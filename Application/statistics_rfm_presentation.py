@@ -38,13 +38,69 @@ RFM_NOTES = (
 )
 
 
+
+RFM_BUSINESS_TITLE = 'Бизнес-портрет и денежный вклад RFM-сегментов'
+RFM_BUSINESS_LEGACY_TEXT = 'Бизнес-показатели RFM отсутствуют в сохранённом результате. Для их получения пересчитайте статистику.'
+RFM_BUSINESS_ACTIONS = {
+    'CHAMPIONS':'Удержание ценных покупателей, персональные предложения',
+    'LOYAL':'Поддержание регулярных покупок, дополнительные категории',
+    'NEW_OR_RECENT':'Работа с повторной покупкой, знакомство с ассортиментом',
+    'AT_RISK':'Анализ причин снижения активности, реактивационные предложения',
+    'HIBERNATING':'Осторожная реактивация и оценка целесообразности коммуникаций',
+    'OTHER':'Дополнительное изучение поведения',
+    'UNSCORABLE':'Проверка полноты данных, без назначения поведенческого статуса',
+}
+
+
+def _business_sections(saved):
+    notes=[('Базы','Только подтверждённые покупки. Для каждого окна сохранена прежняя валютная база за 48 месяцев, '
+        'включая покупателей без покупок этого окна. Покупатель может входить в RUB и KZT; базы и суммы валют не складываются.'),
+        ('Денежные показатели','Известная сумма — наблюдаемый подытог принятых товарных позиций, не чистая выручка, прибыль или LTV. '
+         'Средний известный чек использует только оценённые заказы. Достоверные нулевые суммы включены. '
+         'Средняя полная M использует только покупателей с полной M по прежним правилам.'),
+        ('Недостоверность','Любой недостоверно оценённый заказ политики в окне, включая неизвестную или смешанную валюту, '
+         'может сделать полную M недоступной в обеих валютах. Известный подытог при этом сохранён. '
+         'При неполном покрытии окончательные сегменты недоступны. Строка «Оценка недоступна» показывает только '
+         'наблюдаемые известные суммы и не даёт достоверного поведенческого статуса.'),
+        ('Интерпретация','Сравнение долей покупателей и известной суммы описывает наблюдаемую денежную значимость, '
+         'без причинного вывода или рейтинга выгодности.')]
+    available = saved is not None and all('segment_business' in saved['policies'][POLICIES[0]]['windows'][name]['currencies'][unit]
+                                          for name in tuple(WINDOW_LABELS)[:3] for unit in ('RUB','KZT'))
+    if not available:
+        table=(['Показатель','Доступность'],[('Нет данных',RFM_BUSINESS_LEGACY_TEXT)])
+    else:
+        rows=[]
+        show=lambda v:'Нет данных' if v is None else v
+        money=lambda v:'Нет данных' if v is None else Decimal(v)
+        for name in tuple(WINDOW_LABELS)[:3]:
+            for unit in ('RUB','KZT'):
+                c=saved['policies'][POLICIES[0]]['windows'][name]['currencies'][unit]
+                for row in c['segment_business']:
+                    rows.append((WINDOW_LABELS[name],unit,SEGMENT_LABELS[row['segment']][0],
+                        row['buyers'],show(row['buyer_rate']),row['observed_orders'],row['valued_orders'],
+                        money(row['known_amount']),money(row['known_amount_rate']),money(row['mean_known_order']),
+                        row['complete_m_buyers'],money(row['mean_complete_m'])))
+        table=(['Окно','Валюта','Сегмент','Покупателей','Доля покупателей, %','Заказов данной валюты',
+                'Заказов с достоверной суммой','Известная сумма покупок','Доля известной суммы, %',
+                'Средний известный чек','Покупателей с полной M','Средняя полная M'],rows)
+        statuses={'FULL':'полное','PARTIAL':'частичное','NONE':'нет покрытия'}
+        notes.append(('Покрытие окон','; '.join(f"{WINDOW_LABELS[name]}: {statuses[saved['windows'][name]['status']]}"
+                                             for name in tuple(WINDOW_LABELS)[:3])))
+    return [(RFM_BUSINESS_TITLE,[],[table],notes),
+        ('Возможные направления работы с RFM-сегментами',[],[
+            (['Сегмент','Возможная бизнес-интерпретация'],[(SEGMENT_LABELS[code][0],action) for code,action in RFM_BUSINESS_ACTIONS.items()])],
+            [('Справка','Возможные направления не являются автоматически назначенными маркетинговыми кампаниями. '
+              'Недавняя наблюдаемая покупка не доказывает новизну клиента для компании; давние редкие покупки '
+              'не означают гарантированную потерю клиента. Новые пороги и сегменты не вводятся.')])]
+
+
 def rfm_sections(result, *, compact=False):
     saved = result['rfm_statistics'] if 'rfm_statistics' in result else None
     if saved is None:
         message = (RFM_LEGACY_TEXT if 'rfm_statistics' not in result else
                    'Нет достоверной даты покрытия заказов' if not any(s['intervals'] for s in result['coverage'] if s['source']=='Orders')
                    else RFM_LEGACY_TEXT)
-        return [('RFM-анализ покупателей', [], [(['Показатель RFM','Значение'], [('RFM',message)])], [])]
+        return [('RFM-анализ покупателей', [], [(['Показатель RFM','Значение'], [('RFM',message)])], [])] + _business_sections(None)
     show = lambda v: 'Нет данных' if v is None else v
     money = lambda v: 'Нет данных' if v is None else Decimal(v)
     primary = saved['policies'][POLICIES[0]]
@@ -99,6 +155,7 @@ def rfm_sections(result, *, compact=False):
           'Медианная полная M','Достоверный R: покупателей'],observations)], []))
     sections.append(('RFM — сегменты: подтверждённые покупки', [], [
         (['Окно','Валюта','Сегмент','Покупателей','Доля валютной базы, %','Определение'],segments)], []))
+    sections.extend(_business_sections(saved))
     sections.append(('RFM — баллы и пороги: подтверждённые покупки', [], [
         (['Окно','Валюта','Компонент','Балл 1','Балл 2','Балл 3','Балл 4','Балл 5','Оценка недоступна'],score_rows),
         (['Окно','Валюта','Компонент','Основание порогов: покупателей','Порог 20%','Порог 40%','Порог 60%','Порог 80%'],threshold_rows)], []))

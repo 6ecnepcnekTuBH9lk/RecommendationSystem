@@ -132,7 +132,7 @@ def test_both_currency_annual_tables_show_inclusive_calendar_years_without_mutat
     compact = buyer_sections(result, compact=True)
     assert compact == detailed[:-1]
     assert detailed[-1][0] == "Качество и ограничения покупательской аналитики"
-    annual = [(title, tables[-1]) for title, _, tables, _ in compact if title.startswith("Денежные показатели")]
+    annual = [(title, tables[-1]) for title, _, tables, _ in compact if title.startswith("Денежные показатели подтверждённых покупок")]
     assert len(annual) == 2
     for title, (headers, rows) in annual:
         assert headers[0] == "Год"
@@ -168,7 +168,9 @@ def test_buyer_navigation_groups_are_stable_and_keep_public_export_order():
     before = deepcopy(saved)
     assert CUSTOMER_GROUP_ORDER == ("overview", "purchases", "money", "rfm", "cohorts")
     compact = grouped_buyer_sections(saved, compact=True)
-    assert [group for group, _ in compact] == ["purchases", "purchases", "money", "money", "overview", "purchases"]
+    assert [group for group, _ in compact] == [
+        "purchases", "purchases", "money", "money", "overview", "overview", "overview",
+        "money", "money", "money", "money", "money", "purchases", *["purchases"]*4]
     for is_compact in (False, True):
         tagged = grouped_buyer_sections(saved, compact=is_compact)
         assert [section for _, section in tagged] == buyer_sections(saved, compact=is_compact)

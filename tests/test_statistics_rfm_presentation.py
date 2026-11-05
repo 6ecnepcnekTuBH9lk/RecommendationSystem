@@ -133,7 +133,7 @@ def test_old_cache_opens_on_startup_and_exports_without_recalculation(dataset,wi
     assert path.read_bytes()==before
     assert any(label.text()==RFM_LEGACY_TEXT for label in tab.findChildren(QLabel)) is False  # Table placeholder, no fake card.
     tables = tab.customer_sections.widget(3).findChildren(QTableWidget)
-    assert tables[-1].item(0,1).text()==RFM_LEGACY_TEXT
+    assert any(table.item(0,1).text()==RFM_LEGACY_TEXT for table in tables)
     tab._shutdown()
 
 
@@ -158,7 +158,21 @@ def test_compact_analytics_keep_kpis_and_tables_and_localize_only_display(datase
         for title, cards, tables, notes in compact:
             texts.append(title)
             texts.extend(label for label, _ in cards)
-            assert not notes
+            if provider is buyer_sections and title == "Совместные покупки категорий" and not tables:
+                assert notes
+            elif provider is buyer_sections and title in (
+                    "Покупательская активность по возрасту", "Денежные показатели покупателей по демографии"):
+                assert notes  # Required age-at-calculation and known-money limitations.
+            elif provider is rfm_sections and title in (
+                    "Бизнес-портрет и денежный вклад RFM-сегментов", "Возможные направления работы с RFM-сегментами"):
+                assert notes
+            else:
+                if provider is cohort_sections and title in (
+                        "Денежные показатели месячных когорт", "Денежные показатели второй покупки",
+                        "Каналы первой и второй покупки", "Категории первой и второй покупки"):
+                    assert notes
+                else:
+                    assert not notes
             for headers, rows in tables:
                 texts.extend(headers)
                 texts.extend(str(value) for row in rows for value in row)

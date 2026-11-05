@@ -2,7 +2,7 @@
 
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import math
 
 from Application.order_statistics import CURRENCIES, histogram_median
@@ -44,7 +44,7 @@ def _slice(value, complete, *, currency=False):
     if currency:
         fields += (' known_amount valued_orders monetary incomplete_money_buyers unavailable_monetary_buyers '
                    'thresholds score_counts segments')
-    _keys(value, fields)
+    _keys(value, fields + (' segment_business' if currency and 'segment_business' in value else ''))
     n, active, inactive, orders, reliable = (_count(value[k]) for k in
         ('buyers', 'active_buyers', 'without_observed_orders', 'observed_orders', 'reliable_recency_buyers'))
     _require(active+inactive == n and active <= orders and reliable <= n)
@@ -120,6 +120,48 @@ def _slice(value, complete, *, currency=False):
     _require(value['segments'][-1][1] == missing)
 
 
+
+def _segment_business(rows,value,complete):
+    _require(isinstance(rows,(list,tuple)) and len(rows)==len(SEGMENTS))
+    _require([r.get('segment') for r in rows if isinstance(r,dict)]==list(SEGMENTS))
+    population=value['buyers']
+    total=_money(value['known_amount'])
+    expected_segments={segment:(n,share) for segment,n,share in value['segments']}
+    orders=valued=full=0
+    amount=full_amount=Decimal(0)
+    for row in rows:
+        _keys(row,'segment buyers buyer_rate observed_orders valued_orders known_amount known_amount_rate '
+                  'mean_known_order complete_m_buyers complete_m_amount mean_complete_m')
+        n,count,known,complete_n=(_count(row[k]) for k in (
+            'buyers','observed_orders','valued_orders','complete_m_buyers'))
+        segment=row['segment']
+        _require(n==expected_segments[segment][0] and known<=count and complete_n<=n)
+        _require(n>0 or count==known==complete_n==0)
+        _require(count<=value['observed_orders'])
+        _ratio(row['buyer_rate'],n,population,percent=True)
+        a,b=_money(row['known_amount']),_money(row['complete_m_amount'])
+        _require(b<=a and (known>0 or a==0) and (complete_n>0 or b==0))
+        if segment!='UNSCORABLE':
+            _require(complete_n==n)
+        if not complete:
+            _require(complete_n==0 and b==0)
+        with localcontext():
+            _ratio(row['known_amount_rate'],a,total,percent=True,decimal=True)
+            _require(row['known_amount_rate'] is None or _money(row['known_amount_rate'])<=100)
+            _ratio(row['mean_known_order'],a,known,decimal=True)
+            _ratio(row['mean_complete_m'],b,complete_n,decimal=True)
+            amount+=a
+            full_amount+=b
+        orders+=count
+        valued+=known
+        full+=complete_n
+    _require(orders==value['observed_orders'] and valued==value['valued_orders'] and amount==total)
+    _require(full==value['monetary']['buyers'])
+    with localcontext():
+        expected=sum((_money(m)*n for m,n in value['monetary']['distribution']),Decimal(0))
+    _require(full_amount==expected)
+
+
 def _signed(value):
     _require(isinstance(value, str) and value == value.strip())
     number = Decimal(value)
@@ -163,6 +205,9 @@ def validate_rfm_statistics(value, *, coverage, selected_end, calculated_at):
             for currency in CURRENCIES:
                 c = w['currencies'][currency]
                 _slice(c, complete[name], currency=True)
+                if 'segment_business' in c:
+                    _require(policy==POLICIES[0] and name in WINDOWS[:3])
+                    _segment_business(c['segment_business'],c,complete[name])
                 _require(c['buyers'] <= n and c['observed_orders'] <= w['behavior']['observed_orders'])
                 _require(c['buyers'] == p['windows']['LAST_48M']['currencies'][currency]['buyers'])
             _require(sum(c['observed_orders'] for c in w['currencies'].values()) <= w['behavior']['observed_orders'])
@@ -176,6 +221,10 @@ def validate_rfm_statistics(value, *, coverage, selected_end, calculated_at):
             _require(max(q[k] for k in ('UNKNOWN_CURRENCY','MIXED_CURRENCY','INVALID_PRICE')) <= q['unvalued_orders'] <=
                      sum(q[k] for k in ('UNKNOWN_CURRENCY','MIXED_CURRENCY','INVALID_PRICE')))
             _require(sum(c['valued_orders'] for c in w['currencies'].values())+q['unvalued_orders'] == orders)
+        if policy == POLICIES[0]:
+            present = ['segment_business' in p['windows'][name]['currencies'][unit]
+                       for name in WINDOWS[:3] for unit in CURRENCIES]
+            _require(not any(present) or all(present))
         for group in ('behavior', *CURRENCIES):
             rows = [p['windows'][name]['behavior'] if group=='behavior' else p['windows'][name]['currencies'][group]
                     for name in WINDOWS]

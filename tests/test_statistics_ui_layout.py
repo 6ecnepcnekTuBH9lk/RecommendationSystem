@@ -152,7 +152,7 @@ def test_four_real_six_card_blocks_and_all_39_tables_keep_sources(window, rich_c
         assert group.columns == 3
         assert sorted({card.y() for card in group.cards}) == [group.cards[0].y(), group.cards[3].y()]
         assert abs(group.cards[0].width()-group.cards[-1].width()) <= 1
-    assert len(tab.customer_sections.findChildren(QTableWidget)) == 39
+    assert len(tab.customer_sections.findChildren(QTableWidget)) == 60  # 39 existing + six demographic + four cohort-money + three channel + three category + three co-purchase + two RFM business tables.
     assert rich_customer_result == before
 
 

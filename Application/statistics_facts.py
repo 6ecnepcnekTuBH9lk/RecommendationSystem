@@ -35,7 +35,7 @@ CREATE TABLE orders(
  id INTEGER PRIMARY KEY, event_us INTEGER, date_bad INTEGER NOT NULL,
  outside INTEGER NOT NULL, customer INTEGER, order_sid INTEGER, fingerprint BLOB,
  header_bad INTEGER NOT NULL, adapter_bad INTEGER NOT NULL,
- aggregate_bad INTEGER NOT NULL, details TEXT NOT NULL);
+ aggregate_bad INTEGER NOT NULL, details TEXT NOT NULL, cohort_order_rank INTEGER);
 CREATE TABLE order_lines(
  event INTEGER NOT NULL REFERENCES orders(id), ordinal INTEGER NOT NULL,
  quantity TEXT NOT NULL, status TEXT, namespace TEXT, value TEXT,
@@ -154,21 +154,36 @@ class Projector:
                     adapter_bad = 1
                 try:
                     key = identifier(raw, "firstAction.channel.ids.externalId", required=False)
-                    # Read only the fields OrderAggregates actually consumes.
+                    # Preserve channel metadata even if unrelated aggregate fields fail below.
                     channel_name = text(raw, "firstAction.channel.name") if key is not None else None
+                    details = dict(firstAction={"channel": {"ids": {"externalId": key}, "name": channel_name}})
                     method = text(raw, "customFields.orderingMethod")
                     delivery_type = text(raw, "customFields.deliveryType")
                     payments = [{"type": text(p, "type")} for p in objects(raw, "payments")]
                     delivery = number(raw, "deliveryCost", required=False)
-                    details = dict(firstAction={"channel": {"ids": {"externalId": key}, "name": channel_name}},
-                                   customFields={"orderingMethod": method, "deliveryType": delivery_type},
+                    details.update(customFields={"orderingMethod": method, "deliveryType": delivery_type},
                                    payments=payments, deliveryCost=str(delivery) if delivery is not None else None)
                 except AdapterError:
                     aggregate_bad = 1
-        self.db.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        self.db.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                         (ordinal, event, bad_date, outside, customer, order_sid, fingerprint,
-                         header_bad, adapter_bad, aggregate_bad, dump(details)))
+                         header_bad, adapter_bad, aggregate_bad, dump(details), None))
         self.db.executemany("INSERT INTO order_lines VALUES(?,?,?,?,?,?,?,?,?)", rows)
+
+    def finalize_order_ranks(self):
+        """Keep source-ID tie ordering after deleting the private ID mapping.
+
+        Both adapters expose string order IDs. SQLite BINARY ordering matches
+        their Unicode lexical order. Only an integer rank is published; facts
+        keep their established SID identities for deduplication and RFM.
+        The scratch table stays in the private database on the selected disk,
+        and is dropped before publication. The build connection's SQL progress
+        handler retains resource/cancel guards.
+        """
+        self.db.execute("CREATE TABLE cohort_order_ranks(sid INTEGER PRIMARY KEY, rank INTEGER NOT NULL)")
+        self.db.execute("INSERT INTO cohort_order_ranks SELECT sid, row_number() OVER (ORDER BY source COLLATE BINARY) FROM order_ids")
+        self.db.execute("UPDATE orders SET cohort_order_rank=(SELECT rank FROM cohort_order_ranks WHERE sid=orders.order_sid)")
+        self.db.execute("DROP TABLE cohort_order_ranks")
 
     def profiles(self, root, demographics, check):
         from Application.mindbox.adapters._common import birth_date

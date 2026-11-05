@@ -342,7 +342,7 @@ def test_original_period_is_attested_in_slices_even_without_customer_scope(datas
         slices.save_slice(folder,provenance,payload['result'])
 
 
-@pytest.mark.parametrize('name',['statistics_purchase_policy.py','statistics_purchase_facts.py','statistics_buyer_aggregates.py'])
+@pytest.mark.parametrize('name',['statistics_purchase_policy.py','statistics_purchase_facts.py','statistics_buyer_aggregates.py','statistics_buyer_demography.py'])
 def test_new_business_modules_are_in_algorithm_provenance(name, monkeypatch):
     before = slices._algorithm_version()
     original = slices._hash_file

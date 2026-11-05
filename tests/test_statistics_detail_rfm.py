@@ -48,7 +48,13 @@ def aggregate(coverage):
 
 @pytest.mark.parametrize('coverage',[FULL,GAP])
 def test_aggregate_result_matches_pre_change_golden(coverage):
-    data=json.dumps(aggregate(coverage),sort_keys=True,separators=(',',':'))
+    result=aggregate(coverage)
+    # Compare every pre-existing field against the original immutable golden.
+    for policy in result['policies'].values():
+        for window in policy['windows'].values():
+            for currency in window['currencies'].values():
+                currency.pop('segment_business',None)
+    data=json.dumps(result,sort_keys=True,separators=(',',':'))
     assert hashlib.sha256(data.encode()).hexdigest()==GOLDEN['full' if coverage==FULL else 'gap']
 
 

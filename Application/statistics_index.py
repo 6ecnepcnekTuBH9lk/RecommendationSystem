@@ -34,7 +34,7 @@ from Application.statistics_storage_safety import (
     inspect_acls, path_identity, reject_reparse, validate_storage_root,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_INDEX_DIR = PROJECT_ROOT / "filtered_data" / "statistics_index"
 GIB = 1024**3
 
@@ -325,6 +325,7 @@ def build_statistics_index(*, raw_root=DEFAULT_RAW_ROOT, catalog_path=DEFAULT_CA
                         if progress and (count == 1 or count % 100000 == 0):
                             progress(f"Индекс {name}: {count:,}".replace(",", " "))
                     counts[name] = count
+                projector.finalize_order_ranks()
                 projector.profiles(root, demographics, guard.check)
                 counts["profiles"] = demographics.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
                 for name in ("actions", "orders"):

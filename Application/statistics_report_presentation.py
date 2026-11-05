@@ -22,7 +22,7 @@ from Application.statistics_presentation import (
     WARNING_LABELS, _date, _calculation_message,
 )
 from Application.statistics_rfm_presentation import rfm_sections
-from Application.statistics_cohorts_presentation import cohort_sections, cohort_display
+from Application.statistics_cohorts_presentation import cohort_sections, cohort_display, HORIZON_HEADERS, MATRIX_HEADERS
 from Application.analysis_filter import AnalysisFilter
 
 PAGE_LABELS = ("Действия", "Заказы", "Товары", "Клиенты", "Техническая информация")
@@ -157,7 +157,13 @@ def _customer_purchases_page(layout, result, sections):
     customer_section = _section_heading(layout, 'Покупательская активность')
     _table(customer_section, ['Количество заказов', 'Покупателей', 'Доля покупателей, %'], result['purchase_order_distribution'])
     _table(customer_section, ['Показатель', 'Значение'], [('Среднее число заказов на покупателя', result['mean_orders_per_buyer']), ('Медиана числа заказов на покупателя', result['median_orders_per_buyer']), ('Доля повторных покупателей, %', result['repeat_buyer_rate'])])
-    slots = {(1, 0): (lambda: analytics_chart(buyer_frequency_chart_data(result)),), (2, 0): (lambda: analytics_chart(purchase_policy_comparison_chart_data(result)),)}
+    slots = {}
+    for i, (_, _, tables, _) in enumerate(sections):
+        for j, (headers, _) in enumerate(tables):
+            if tuple(headers) == ('Заказов на покупателя','Покупателей','Доля покупателей, %','Заказов'):
+                slots[i,j] = (lambda: analytics_chart(buyer_frequency_chart_data(result)),)
+            elif tuple(headers) == ('Показатель','Подтверждённые покупки','Расширенный учёт покупок'):
+                slots[i,j] = (lambda: analytics_chart(purchase_policy_comparison_chart_data(result)),)
     _analytics_sections(layout, sections, before_tables=slots)
 
 def _customer_money_page(layout, result, sections):
@@ -174,8 +180,16 @@ def _customer_rfm_page(layout, result):
 def _customer_cohorts_page(layout, result):
     repeat = lambda: analytics_chart(cohort_repeat_chart_data(result))
     heatmap = lambda: CohortRetentionHeatmap(result)
-    slots = {(1, 0): (repeat,), (3, 0): (heatmap,)} if result.get('cohort_statistics') is not None else {(0, 0): (repeat, heatmap)}
-    _analytics_sections(layout, cohort_sections(result, compact=True), cohort_display, slots)
+    sections = cohort_sections(result, compact=True)
+    slots = {(0, 0): (repeat, heatmap)} if result.get('cohort_statistics') is None else {}
+    if result.get('cohort_statistics') is not None:
+        for i, (_, _, tables, _) in enumerate(sections):
+            for j, (headers, _) in enumerate(tables):
+                if tuple(headers) == HORIZON_HEADERS:
+                    slots[i, j] = (repeat,)
+                elif tuple(headers) == MATRIX_HEADERS:
+                    slots[i, j] = (heatmap,)
+    _analytics_sections(layout, sections, cohort_display, slots)
 
 def _actions_page(layout, result):
     section = layout

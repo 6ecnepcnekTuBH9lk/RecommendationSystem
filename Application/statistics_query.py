@@ -156,16 +156,22 @@ class IndexedInput:
         return action_record(raw, self._batch_products.get(raw["_ordinal"], ()))
 
     def _order(self, row):
-        ordinal, event, bad_date, outside, customer, order_sid, fingerprint, header_bad, adapter_bad, aggregate_bad, encoded = row
+        ordinal, event, bad_date, outside, customer, order_sid, fingerprint, header_bad, adapter_bad, aggregate_bad, encoded, order_rank = row
         date = EPOCH+timedelta(microseconds=event) if event is not None else None
         # Outside-global records never reach header validation in the reference.
         if header_bad and not outside and not bad_date:
             raise AdapterError("Indexed order header failed source validation")
+        if not header_bad and not bad_date and (type(order_rank) is not int or order_rank <= 0):
+            raise AdapterError("Indexed cohort order rank is unavailable")
         details = json.loads(encoded)
         channel = details.get("firstAction", {}).get("channel")
+        if not header_bad and not adapter_bad and not bad_date and (
+                not isinstance(channel, dict) or not isinstance(channel.get("ids"), dict)
+                or "externalId" not in channel["ids"] or "name" not in channel):
+            raise AdapterError("Indexed purchase channel metadata is unavailable")
         lines = [] if bad_date else self._batch_lines.get(ordinal, ())
         return dict(details, _ordinal=ordinal, _date=date, _adapter_bad=adapter_bad, _aggregate_bad=aggregate_bad,
-                    _fingerprint=fingerprint, _lines=lines, _header_bad=header_bad, ids={"mindboxId": str(order_sid)},
+                    _fingerprint=fingerprint, _lines=lines, _header_bad=header_bad, _cohort_order_rank=order_rank, ids={"mindboxId": str(order_sid)},
                     customer={"ids": {"mindboxId": str(customer)}},
                     firstAction={"dateTimeUtc": "invalid" if bad_date else date.isoformat(), "channel": channel},
                     lines=[{"quantity": Decimal(quantity), "status": {"ids": {"externalId": status}}}

@@ -2,11 +2,17 @@
 
 from collections import Counter
 from datetime import date, datetime, timedelta
+from decimal import Decimal, localcontext
 import re
 
-from Application.order_statistics import histogram_median
+from Application.order_statistics import CURRENCIES, histogram_median
+from Application.statistics_cohorts_money import _add
+from Application.statistics_cohorts_channels import UNKNOWN_CHANNEL, channel_key
+from Application.statistics_cohorts_categories import (
+    UNKNOWN_CATEGORY, category_key, MAX_ORDER_CATEGORIES, MAX_PAIRS_PER_BUYER, MAX_AGGREGATE_PAIRS,
+)
 from Application.statistics_period import shared_intervals
-from Application.statistics_buyer_validation import _keys, _require, _count, _number, _ratio, _rows, _close
+from Application.statistics_buyer_validation import _keys, _require, _count, _number, _ratio, _rows, _close, _money
 from Application.statistics_cohorts_core import (
     CohortAggregates, HORIZONS, MONTH_OFFSETS, POLICIES, _utc, _month_date,
 )
@@ -111,6 +117,165 @@ def _block(value, size, context, *, month=None):
     return histogram
 
 
+def _valued(value, *, monthly=False):
+    fields = 'known_orders amount mean_order'
+    _keys(value, fields + (' first_orders first_amount repeat_orders repeat_amount repeat_amount_rate' if monthly else ''))
+    n, amount = _count(value['known_orders']), _money(value['amount'])
+    _require(n > 0 or amount == 0)
+    with localcontext():
+        _ratio(value['mean_order'], amount, n, decimal=True)
+    if monthly:
+        first, repeat = _count(value['first_orders']), _count(value['repeat_orders'])
+        a, b = _money(value['first_amount']), _money(value['repeat_amount'])
+        _require(first + repeat == n and _add(a,b) == amount)
+        _require((first > 0 or a == 0) and (repeat > 0 or b == 0))
+        with localcontext():
+            _ratio(value['repeat_amount_rate'], b, amount, percent=True)
+    return n, amount
+
+
+def _monetary(value, policy):
+    """Optional saved extension. Closed keys keep private identities out of DTO."""
+    _keys(value, 'cohorts horizons')
+    _keys(value['cohorts'], policy['cohorts'])
+    totals = {c: [0, Decimal(0)] for c in CURRENCIES}
+    unvalued_total = 0
+    for month, row in value['cohorts'].items():
+        _keys(row, 'cohort_size orders unvalued_orders currencies')
+        old = policy['cohorts'][month]
+        size = _count(row['cohort_size'])
+        orders, unvalued = _count(row['orders']), _count(row['unvalued_orders'])
+        _require(size == old['cohort_size'] and orders >= size + old['observed_repeat_buyers'])
+        _keys(row['currencies'], CURRENCIES)
+        unvalued_total += unvalued
+        known = first = 0
+        for currency in CURRENCIES:
+            money = row['currencies'][currency]
+            n, amount = _valued(money, monthly=True)
+            _require(money['first_orders'] <= size)
+            known += n
+            first += money['first_orders']
+            totals[currency][0] += money['repeat_orders']
+            totals[currency][1] = _add(totals[currency][1], _money(money['repeat_amount']))
+        _require(known + unvalued == orders and first <= size and size - first <= unvalued)
+    _keys(value['horizons'], [str(h) for h in HORIZONS])
+    for horizon, row in value['horizons'].items():
+        _keys(row, 'eligible second_buyers unvalued_orders currencies')
+        old = policy['summary']['horizons'][horizon]
+        _require(_count(row['eligible']) == old['eligible'])
+        _require(_count(row['second_buyers']) == old['repeated'])
+        unvalued = _count(row['unvalued_orders'])
+        _require(unvalued <= unvalued_total)
+        _keys(row['currencies'], CURRENCIES)
+        known = 0
+        for currency in CURRENCIES:
+            n, amount = _valued(row['currencies'][currency])
+            _require(n <= totals[currency][0] and amount <= totals[currency][1])
+            known += n
+        _require(known + unvalued == row['second_buyers'])
+
+
+def _channel_id(value):
+    _require(value is None or isinstance(value,str) and bool(value.strip()) and value == value.strip())
+    return value
+
+
+def _purchase_channels(value, policy):
+    _keys(value, 'buyers repeat_buyers same_known_buyers other_known_buyers unknown_transition_buyers '
+                 'same_known_rate channels transitions')
+    buyers, repeated = _count(value['buyers']), _count(value['repeat_buyers'])
+    _require(buyers == policy['displayed_buyers'] and repeated == policy['summary']['observed_repeat_buyers'])
+    same, other, unknown = (_count(value[k]) for k in (
+        'same_known_buyers','other_known_buyers','unknown_transition_buyers'))
+    _require(same + other + unknown == repeated)
+    _ratio(value['same_known_rate'],same,same+other,percent=True)
+    _require(isinstance(value['channels'],(list,tuple)) and bool(value['channels']))
+    catalog = {}
+    for row in value['channels']:
+        _keys(row,'external_id name first_buyers first_rate second_buyers second_rate')
+        key = _channel_id(row['external_id'])
+        _require(key not in catalog and isinstance(row['name'],str) and bool(row['name'].strip())
+                 and row['name'] == row['name'].strip())
+        _require(key is not None or row['name'] == UNKNOWN_CHANNEL)
+        first, second = _count(row['first_buyers']), _count(row['second_buyers'])
+        _require(key is None or first + second > 0)
+        _ratio(row['first_rate'],first,buyers,percent=True)
+        _ratio(row['second_rate'],second,repeated,percent=True)
+        catalog[key] = row
+    _require(None in catalog and list(catalog) == sorted(catalog,key=channel_key))
+    _require(sum(r['first_buyers'] for r in catalog.values()) == buyers)
+    _require(sum(r['second_buyers'] for r in catalog.values()) == repeated)
+    _require(isinstance(value['transitions'],(list,tuple)))
+    pairs, firsts, seconds = {}, Counter(), Counter()
+    totals = Counter()
+    for row in value['transitions']:
+        _keys(row,'first_external_id second_external_id buyers repeat_rate first_channel_repeat_rate')
+        a, b = _channel_id(row['first_external_id']), _channel_id(row['second_external_id'])
+        count = _count(row['buyers'])
+        _require(a in catalog and b in catalog and (a,b) not in pairs and count > 0)
+        pairs[a,b] = row
+        firsts[a] += count
+        seconds[b] += count
+        totals['unknown' if a is None or b is None else 'same' if a == b else 'other'] += count
+        _ratio(row['repeat_rate'],count,repeated,percent=True)
+    _require(list(pairs) == sorted(pairs,key=lambda pair:(
+        -pairs[pair]['buyers'],channel_key(pair[0]),channel_key(pair[1]))))
+    _require((totals['same'],totals['other'],totals['unknown']) == (same,other,unknown))
+    for key, row in catalog.items():
+        _require(firsts[key] <= row['first_buyers'] and seconds[key] == row['second_buyers'])
+    for (a,_), row in pairs.items():
+        _ratio(row['first_channel_repeat_rate'],row['buyers'],firsts[a],percent=True)
+
+
+def _purchase_categories(value, policy):
+    """Multi-label buyers: validate bounds, never equate label sums to unique buyers."""
+    _keys(value,'buyers repeat_buyers unknown_first_buyers unknown_second_buyers categories transitions')
+    buyers, repeated = _count(value['buyers']), _count(value['repeat_buyers'])
+    _require(buyers == policy['displayed_buyers'] and repeated == policy['summary']['observed_repeat_buyers'])
+    _require(_count(value['unknown_first_buyers']) <= buyers and _count(value['unknown_second_buyers']) <= repeated)
+    _require(isinstance(value['categories'],(list,tuple)) and bool(value['categories']))
+    catalog = {}
+    for row in value['categories']:
+        _keys(row,'code name path first_buyers repeat_buyers observed_repeat_rate second_buyers second_rate')
+        code = _channel_id(row['code'])
+        _require(code not in catalog and isinstance(row['name'],str) and bool(row['name'].strip())
+                 and row['name'] == row['name'].strip())
+        path = row['path']
+        if path is not None:
+            _require(isinstance(path,(list,tuple)) and bool(path) and path[-1] == row['name'])
+            _require(all(isinstance(v,str) and bool(v.strip()) and v == v.strip() for v in path))
+        _require(code is not None or row['name'] == UNKNOWN_CATEGORY and path is None)
+        first, repeat, second = (_count(row[k]) for k in ('first_buyers','repeat_buyers','second_buyers'))
+        _require(repeat <= min(first,repeated) and first <= buyers and second <= repeated)
+        _require(first-repeat <= buyers-repeated and (code is None or first+second > 0))
+        _ratio(row['observed_repeat_rate'],repeat,first,percent=True)
+        _ratio(row['second_rate'],second,repeated,percent=True)
+        catalog[code] = row
+    _require(None in catalog and list(catalog) == sorted(catalog,key=category_key))
+    _require(catalog[None]['first_buyers'] == value['unknown_first_buyers'])
+    _require(catalog[None]['second_buyers'] == value['unknown_second_buyers'])
+    for field, base in (('first_buyers',buyers),('repeat_buyers',repeated),('second_buyers',repeated)):
+        _require(base <= sum(r[field] for r in catalog.values()) <= base*MAX_ORDER_CATEGORIES)
+    _require(isinstance(value['transitions'],(list,tuple)) and len(value['transitions']) <= MAX_AGGREGATE_PAIRS)
+    pairs, firsts, seconds = {}, Counter(), Counter()
+    for row in value['transitions']:
+        _keys(row,'first_code second_code buyers repeat_rate')
+        a, b = _channel_id(row['first_code']), _channel_id(row['second_code'])
+        n = _count(row['buyers'])
+        _require(a in catalog and b in catalog and (a,b) not in pairs and n > 0)
+        _require(n <= min(catalog[a]['repeat_buyers'],catalog[b]['second_buyers']))
+        pairs[a,b] = row
+        firsts[a] += n
+        seconds[b] += n
+        _ratio(row['repeat_rate'],n,repeated,percent=True)
+    _require(list(pairs) == sorted(pairs,key=lambda pair:(
+        -pairs[pair]['buyers'],category_key(pair[0]),category_key(pair[1]))))
+    _require(repeated <= sum(row['buyers'] for row in pairs.values()) <= repeated*MAX_PAIRS_PER_BUYER)
+    for code, row in catalog.items():
+        _require(row['repeat_buyers'] <= firsts[code] <= row['repeat_buyers']*MAX_ORDER_CATEGORIES)
+        _require(row['second_buyers'] <= seconds[code] <= row['second_buyers']*MAX_ORDER_CATEGORIES)
+
+
 def validate_cohort_statistics(value, *, coverage, selected_start, selected_end, calculated_at):
     if value is None:
         return
@@ -140,8 +305,13 @@ def validate_cohort_statistics(value, *, coverage, selected_start, selected_end,
     _count(q['facts_after_cutoff'])
     _count(q['observed_purchase_facts_outside_coverage'])
     _keys(value['policies'], POLICIES)
-    for p in value['policies'].values():
-        _keys(p, 'base_buyers displayed_buyers hidden_buyers cohorts summary')
+    for policy, p in value['policies'].items():
+        has_money = policy == POLICIES[0] and 'monetary' in p
+        has_channels = policy == POLICIES[0] and 'purchase_channels' in p
+        has_categories = policy == POLICIES[0] and 'purchase_categories' in p
+        _keys(p, 'base_buyers displayed_buyers hidden_buyers cohorts summary'
+              + (' monetary' if has_money else '') + (' purchase_channels' if has_channels else '')
+              + (' purchase_categories' if has_categories else ''))
         base, displayed, hidden = (_count(p[k]) for k in ('base_buyers','displayed_buyers','hidden_buyers'))
         _require(displayed+hidden == base and isinstance(p['cohorts'],dict))
         cohort_keys = list(p['cohorts'])
@@ -171,4 +341,10 @@ def validate_cohort_statistics(value, *, coverage, selected_start, selected_end,
         for offset in range(1,13):
             for k in (*COUNT_FIELDS,'active','observed_active','observed_active_ineligible'):
                 _require(summary['retention'][offset][k] == sum(r['retention'][offset][k] for r in rows))
+        if has_money:
+            _monetary(p['monetary'], p)
+        if has_channels:
+            _purchase_channels(p['purchase_channels'], p)
+        if has_categories:
+            _purchase_categories(p['purchase_categories'], p)
     _require(value['policies'][POLICIES[0]]['base_buyers'] <= value['policies'][POLICIES[1]]['base_buyers'])

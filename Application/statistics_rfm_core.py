@@ -13,6 +13,7 @@ from decimal import Decimal
 from itertools import accumulate
 
 from Application.order_statistics import CURRENCIES, histogram_median
+from Application.statistics_rfm_business import SegmentBusiness
 from Application.statistics_purchase_facts import PurchaseOrderFact, MonetaryIssue
 from Application.statistics_purchase_policy import STRICT_COMPLETED, EXTENDED_COMPLETED
 from Application.statistics_period import shared_intervals
@@ -191,7 +192,7 @@ class RfmAggregates:
             for index in indices:
                 self._issues[policy][index].update(purchase.monetary_issues)
 
-    def _slice(self, buyers, window, currency, complete):
+    def _slice(self, buyers, window, currency, complete, *, with_business=False):
         recencies, frequencies, monetary = Counter(), Counter(), Counter()
         reliable_recencies = Counter()
         active = orders = valued = money_incomplete = 0
@@ -233,6 +234,7 @@ class RfmAggregates:
                                                        ('F', f_cuts, count if complete else 0),
                                                        ('M', m_cuts, sum(monetary.values())))})
         scores, segments = Counter(), Counter()
+        business = SegmentBusiness(SEGMENTS) if with_business else None
         for buyer in buyers.values():
             self.check()
             if currency not in buyer.currency_last:
@@ -241,11 +243,18 @@ class RfmAggregates:
             rs = rfm_score(r, r_cuts, recency=True) if reliable else None
             fs, ms = rfm_score(f, f_cuts), rfm_score(m, m_cuts)
             scores[rs, fs, ms] += 1
-            segments[rfm_segment(rs, fs, ms, f)] += 1
+            segment = rfm_segment(rs, fs, ms, f)
+            segments[segment] += 1
+            if business is not None:
+                state = buyer.windows[window]
+                business.add(segment,f,state.valued_orders[currency] if state is not None else 0,
+                             state.amounts[currency] if state is not None else Decimal(0),m)
         # Canonical sorting handles optional scores and makes result independent
         # of source arrival order. Only aggregate score combinations leave here.
         result['score_counts'] = [[*key, scores[key]] for key in sorted(scores, key=lambda row: tuple(v or 0 for v in row))]
         result['segments'] = [[key, segments[key], 100*segments[key]/count if count else None] for key in SEGMENTS]
+        if business is not None:
+            result['segment_business'] = business.result(count,known_amount)
         return result
 
     def _comparison(self, buyers):
@@ -300,7 +309,8 @@ class RfmAggregates:
                         unvalued += state.unvalued
                         incomplete += int(state.unvalued > 0)
                 windows[name] = dict(behavior=self._slice(buyers, index, None, complete),
-                    currencies={currency: self._slice(buyers, index, c, complete) for c, currency in enumerate(CURRENCIES)},
+                    currencies={currency: self._slice(buyers, index, c, complete,
+                        with_business=policy == STRICT_COMPLETED and index < 3) for c, currency in enumerate(CURRENCIES)},
                     quality=dict(unvalued_orders=unvalued, incomplete_money_buyers=incomplete,
                                  **{issue.value: issues[issue] for issue in MonetaryIssue}))
             dual = unassigned = 0

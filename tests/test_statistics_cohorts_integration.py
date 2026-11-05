@@ -106,9 +106,9 @@ def test_single_orders_pass_adaptation_fact_and_shared_objects_in_both_backends(
     monkeypatch.setattr(statistics,'build_purchase_order_fact',observe_fact)
     for cls,name in ((statistics.BuyerAggregates,'buyers'),(statistics.RfmAggregates,'rfm'),(statistics.CohortAggregates,'cohorts')):
         original = cls.add
-        def observe(self,fact,_add=original,_name=name):
+        def observe(self,fact,_add=original,_name=name,**kwargs):
             consumed[_name].append(fact)
-            return _add(self,fact)
+            return _add(self,fact,**kwargs)
         monkeypatch.setattr(cls,'add',observe)
     expected = calculate(dataset)
     assert Counter(reads)['orders'] == Counter(reads)['actions'] == Counter(reads)['customer_merges'] == 1
@@ -226,7 +226,7 @@ def test_schema10_new_and_legacy_results_roundtrip_without_inventing_cohorts(dat
     assert json.loads(path.read_text(encoding='utf-8'))['schema_version']==10
 
 
-@pytest.mark.parametrize('name',['statistics_cohorts_core.py','statistics_cohorts_validation.py'])
+@pytest.mark.parametrize('name',['statistics_cohorts_core.py','statistics_cohorts_validation.py','statistics_cohorts_money.py','statistics_cohorts_channels.py','statistics_cohorts_categories.py'])
 def test_cohort_algorithm_dependencies_invalidate_provenance(name,monkeypatch):
     before = slices._algorithm_version()
     original = slices._hash_file
@@ -281,7 +281,7 @@ def test_consistent_second_purchase_interval_cannot_extend_beyond_cutoff(dataset
         cache.validate_result(result)
 
 
-@pytest.mark.parametrize('name', ['statistics_cohorts_core.py', 'statistics_cohorts_validation.py'])
+@pytest.mark.parametrize('name', ['statistics_cohorts_core.py', 'statistics_cohorts_validation.py', 'statistics_cohorts_money.py','statistics_cohorts_channels.py','statistics_cohorts_categories.py'])
 def test_existing_index_rejects_changed_cohort_dependency_without_publication(dataset, monkeypatch, name):
     from Application import statistics_index as index
 

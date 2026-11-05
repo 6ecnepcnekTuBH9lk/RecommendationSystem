@@ -84,10 +84,16 @@ def _algorithm_version():
         "statistics_purchase_policy.py",
         "statistics_purchase_facts.py",
         "statistics_buyer_aggregates.py",
+        "statistics_buyer_demography.py",
         "statistics_buyer_validation.py",
         "statistics_rfm_core.py",
+        "statistics_rfm_business.py",
         "statistics_rfm_validation.py",
         "statistics_cohorts_core.py",
+        "statistics_cohorts_money.py",
+        "statistics_cohorts_channels.py",
+        "statistics_cohorts_categories.py",
+        "statistics_copurchases.py",
         "statistics_cohorts_validation.py",
     )
     # Include adapters, identity, strict reader and publication rules recursively.

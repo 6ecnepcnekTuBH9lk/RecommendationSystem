@@ -316,10 +316,12 @@ def grouped_buyer_sections(result, *, compact=False):
     Decimal/date values remain typed. No analytical formulas or source reads.
     Group IDs are assigned here; consumers need not inspect visible headings.
     """
+    from Application.statistics_copurchases_presentation import copurchase_sections
     saved = result['buyer_statistics'] if 'buyer_statistics' in result else None
     heading = 'Покупательская аналитика'
     if saved is None:
-        return [('purchases', (heading, [], [(['Показатель', 'Значение'], [('Новые показатели покупателей', BUYER_LEGACY_TEXT)])], []))]
+        return [('purchases', (heading, [], [(['Показатель', 'Значение'], [('Новые показатели покупателей', BUYER_LEGACY_TEXT)])], []))] + _buyer_demographic_sections(None, None) + [
+            ('purchases',section) for section in copurchase_sections(None,legacy=True)]
     from Application.statistics_purchase_policy import STRICT_COMPLETED, EXTENDED_COMPLETED
     strict, extended = (saved['policies'][p] for p in (STRICT_COMPLETED, EXTENDED_COMPLETED))
     sections = []
@@ -389,6 +391,7 @@ def grouped_buyer_sections(result, *, compact=False):
         add('overview', ('Портрет покупателей — подтверждённые покупки', demo_cards, [
             (['Пол покупателей', 'Покупателей', 'Доля, %'], demo['gender'] if demo else [('Нет данных', 'Нет данных', 'Нет данных')]),
             (['Возраст покупателей', 'Покупателей', 'Доля, %'], demo['age'] if demo else [('Нет данных', 'Нет данных', 'Нет данных')])], []))
+        sections.extend(_buyer_demographic_sections(saved, strict))
         comparison = [(label, shown(strict[key]), shown(extended[key])) for label, key in (
             ('Покупатели', 'buyers'), ('Заказы', 'orders'), ('Принятые позиции', 'positions'), ('Повторные покупатели', 'repeat_buyers'),
             ('Доля повторных, %', 'repeat_rate'), ('Среднее заказов на покупателя', 'mean_orders'), ('Медиана заказов', 'median_orders'))]
@@ -419,6 +422,9 @@ def grouped_buyer_sections(result, *, compact=False):
     else:
         message = 'Заказы недоступны' if not saved['orders_available'] else 'Нет покрытия заказов выбранного периода'
         add('purchases', (heading, [], [(['Показатель', 'Значение'], [('Новые показатели покупателей', message)])], []))
+    if strict is None:
+        sections.extend(_buyer_demographic_sections(saved, strict))
+    sections.extend(('purchases',section) for section in copurchase_sections(strict))
     if not compact:
         quality = []
         if strict is not None:
@@ -442,3 +448,59 @@ def grouped_buyer_sections(result, *, compact=False):
     return [(group, (title, [(label, shown(value)) for label, value in cards],
              [(headers, [tuple(shown(value) for value in row) for row in rows]) for headers, rows in tables], notes))
             for group, (title, cards, tables, notes) in sections]
+
+
+BUSINESS_LEGACY_TEXT = "Нет данных в сохраненном результате. Пересчитайте статистику для получения новых показателей"
+
+
+def _buyer_demographic_sections(saved, strict):
+    """Project saved group aggregates only; currency-free unknown orders stay explicit."""
+    if saved is None or strict is not None and "demographic_analytics" not in strict:
+        analytics = None
+        unavailable = BUSINESS_LEGACY_TEXT
+    elif strict is None:
+        analytics = None
+        unavailable = "Заказы недоступны в выбранной области наблюдения"
+    elif strict["demographic_analytics"] is None:
+        analytics = None
+        unavailable = "Клиентские профили недоступны. Демографическая аналитика не рассчитана"
+    else:
+        analytics = strict["demographic_analytics"]
+        unavailable = None
+    shown = lambda value: "Нет данных" if value is None else value
+    money = lambda value: "Нет данных" if value is None else Decimal(value)
+    def table(headers, rows):
+        return [(headers, rows)] if analytics is not None else [
+            (["Состояние", "Значение"], [("Демографическая аналитика", unavailable)])]
+    sections = []
+    for dimension, label, title in (
+            ("gender", "Пол", "Покупательская активность по полу"),
+            ("age", "Возрастная группа", "Покупательская активность по возрасту")):
+        rows = [] if analytics is None else [(g["label"], g["buyers"], shown(g["buyer_rate"]), g["orders"],
+                shown(g["mean_orders"]), g["single_buyers"], g["repeat_buyers"], shown(g["repeat_rate"]))
+                for g in analytics[dimension]]
+        notes = [("Возрастная группа", "Определяется по доступному профилю на дату расчета, "
+                  "а не по возрасту клиента в момент исторического заказа.")] if dimension == "age" else []
+        sections.append(("overview", (title, [], table(
+            [label, "Покупателей", "Доля покупателей, %", "Заказов", "Среднее заказов",
+             "С одним заказом", "Повторных", "Доля повторных, %"], rows), notes)))
+    sections.append(("money", ("Денежные показатели покупателей по демографии", [], [], [
+        ("Суммы", "Известная сумма принятых товарных позиций по priceOfLine; доставка не включена. "
+         "Это не подтвержденная оплата и не чистая выручка."),
+        ("Полнота", "Заказы без достоверной оценки показаны по всей группе, во всех валютах. "
+         "Они не распределяются в RUB/KZT и не входят в средний и медианный чек. "
+         "Показатели относятся к наблюдаемому покрытию выбранного периода.")])))
+    for dimension, label in (("gender", "полу"), ("age", "возрасту")):
+        for currency in ("RUB", "KZT"):
+            rows = []
+            if analytics is not None:
+                for g in analytics[dimension]:
+                    m = g["money"][currency]
+                    rows.append((g["label"], m["known_buyers"], m["known_orders"], g["unvalued_orders"],
+                                 money(m["amount"]), money(m["mean_order"]), money(m["median_order"]), shown(m["amount_rate"])))
+            headers = ["Группа", "Покупателей с известной суммой", "Заказов с суммой",
+                       "Заказы без достоверной денежной оценки (все валюты)",
+                       "Известная сумма принятых товарных позиций, "+currency,
+                       "Средний чек, "+currency, "Медианный чек, "+currency, "Доля известной суммы, %"]
+            sections.append(("money", (f"По {label} — {currency}", [], table(headers, rows), [])))
+    return sections

@@ -229,7 +229,7 @@ def test_utc_cutoff_changes_slice_but_not_index_generation(dataset):
     assert a!=b and index.source_version(a)==index.source_version(b)
 
 
-@pytest.mark.parametrize('name',['statistics_rfm_core.py','statistics_rfm_validation.py'])
+@pytest.mark.parametrize('name',['statistics_rfm_core.py','statistics_rfm_validation.py','statistics_rfm_business.py'])
 def test_rfm_algorithm_dependencies_are_attested(name,monkeypatch):
     before = slices._algorithm_version()
     original = slices._hash_file

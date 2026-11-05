@@ -379,7 +379,7 @@ def test_state_keeps_two_orders_and_a_month_bitmask_not_all_input_facts():
     core = aggregate(fact(order=i + 1) for i in range(3000))
     buyer = core._buyers[POLICIES[0]]['secret-buyer']
     assert buyer.months == 1
-    assert set(buyer.__slots__) == {'first', 'second', 'months'}
+    assert set(buyer.__slots__) == {'first', 'second', 'months', 'money', 'first_channel', 'second_channel', 'first_categories', 'second_categories'}
     assert buyer.first[2] == 1 and buyer.second[2] == 2
     assert row(core)['observed_repeat_buyers'] == 1
 

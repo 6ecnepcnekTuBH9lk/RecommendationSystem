@@ -11,6 +11,9 @@ from datetime import date, datetime, time, timedelta, timezone
 import re
 
 from Application.order_statistics import histogram_median
+from Application.statistics_cohorts_money import BuyerMoney, MonthMoney, SecondMoney
+from Application.statistics_cohorts_channels import ChannelCounts, channel_value
+from Application.statistics_cohorts_categories import CategoryCounts, category_codes as _category_codes, category_reference
 from Application.statistics_period import shared_intervals
 from Application.statistics_purchase_facts import PurchaseOrderFact
 from Application.statistics_purchase_policy import STRICT_COMPLETED, EXTENDED_COMPLETED
@@ -70,8 +73,18 @@ class _Buyer:
     first: tuple | None = None
     second: tuple | None = None
     months: int = 0
+    money: BuyerMoney | None = None
+    first_channel: tuple | None = None
+    second_channel: tuple | None = None
+    first_categories: frozenset | None = None
+    second_categories: frozenset | None = None
 
-    def add(self, key):
+    def add(self, key, purchase=None, channel=None, categories=None):
+        payload = None
+        if purchase is not None:
+            if self.money is None:
+                self.money = BuyerMoney()
+            payload = self.money.record(purchase)
         month = _month(key[0])
         origin = _month(self.first[0]) if self.first is not None else month
         if month < origin:
@@ -82,8 +95,16 @@ class _Buyer:
         # retained, including deterministic ordering of simultaneous orders.
         if self.first is None or key < self.first:
             self.second, self.first = self.first, key
+            self.second_channel, self.first_channel = self.first_channel, channel
+            self.second_categories, self.first_categories = self.first_categories, categories
+            if self.money is not None:
+                self.money.second, self.money.first = self.money.first, payload
         elif self.second is None or key < self.second:
             self.second = key
+            self.second_channel = channel
+            self.second_categories = categories
+            if self.money is not None:
+                self.money.second = payload
 
 
 @dataclass(slots=True)
@@ -134,11 +155,13 @@ class _Cohort:
     second_interval_incomplete: int = 0
     horizons: list = field(default_factory=lambda: [_Counts() for _ in HORIZONS])
     active: list = field(default_factory=lambda: [0] * 13)
+    money: MonthMoney | None = None
+    channels: ChannelCounts | None = None
 
 
 class CohortAggregates:
     def __init__(self, as_of_date, coverage, *, identity_space, policies=POLICIES,
-                 cohort_start=None, cohort_end=None, check=None):
+                 cohort_start=None, cohort_end=None, check=None, category_names=None, category_paths=None):
         if type(as_of_date) is not date:
             raise ValueError('Cohorts require an explicit calendar as_of_date')
         try:
@@ -181,6 +204,7 @@ class CohortAggregates:
         self.check = check if check is not None else lambda: None
         self._buyers = {p: {} for p in self.policies}
         self._future_facts = self._uncovered_purchase_facts = 0
+        self._categories = category_reference(category_names,category_paths) if category_names is not None else None
 
     def _covered(self, start, end):
         index = bisect_right(self._starts, start) - 1
@@ -191,7 +215,7 @@ class CohortAggregates:
         incomplete = start < observed_end and not self._covered(start, observed_end)
         return end > self.end, incomplete
 
-    def add(self, fact: PurchaseOrderFact):
+    def add(self, fact: PurchaseOrderFact, *, channel_external_id=None, channel_name=None, order_sort_rank=None, category_codes=None):
         self.check()
         if not isinstance(fact, PurchaseOrderFact) or fact.identity_space != self.identity_space:
             raise ValueError('Cohorts require facts from one explicit identity space')
@@ -207,18 +231,29 @@ class CohortAggregates:
                     if policy in self._buyers and purchase.has_purchase]
         if not accepted:
             return
+        if order_sort_rank is not None and (type(order_sort_rank) is not int or order_sort_rank <= 0):
+            raise ValueError('Invalid cohort order sort rank')
+        channel = channel_value(channel_external_id, channel_name) if any(
+            policy == STRICT_COMPLETED for policy, _ in accepted) else None
+        categories = _category_codes(category_codes,self._categories) if self._categories is not None and any(
+            policy == STRICT_COMPLETED for policy, _ in accepted) else None
         index = bisect_right(self._starts, occurred) - 1
         self._uncovered_purchase_facts += int(index < 0 or occurred >= self.coverage[index][1])
-        key = occurred, 0 if type(fact.order_id) is int else 1, fact.order_id
+        # INDEXED supplies the source-ID lexical rank, never SID insertion order.
+        # REFERENCE and direct prepared-fact callers retain the original ID key.
+        order_key = fact.order_id if order_sort_rank is None else order_sort_rank
+        key = occurred, 0 if type(order_key) is int else 1, order_key
         # No check halfway through mutation: cancellation cannot leave policies
         # disagreeing about whether this fact was consumed.
-        for policy, _ in accepted:
+        for policy, purchase in accepted:
             buyers = self._buyers[policy]
             if fact.customer_id not in buyers:
                 buyers[fact.customer_id] = _Buyer()
-            buyers[fact.customer_id].add(key)
+            buyers[fact.customer_id].add(key, purchase if policy == STRICT_COMPLETED else None,
+                                         channel if policy == STRICT_COMPLETED else None,
+                                         categories if policy == STRICT_COMPLETED else None)
 
-    def _collect(self, buyers):
+    def _collect(self, buyers, monetary=False, category_counts=None):
         cohorts = {}
         for buyer in buyers.values():
             self.check()
@@ -231,6 +266,14 @@ class CohortAggregates:
                 cohorts[month] = _Cohort()
             cohort = cohorts[month]
             cohort.buyers += 1
+            if category_counts is not None:
+                category_counts.add(buyer.first_categories,buyer.second_categories,self.check)
+            if monetary:
+                if cohort.money is None:
+                    cohort.money = MonthMoney()
+                    cohort.channels = ChannelCounts()
+                cohort.money.add(buyer.money)
+                cohort.channels.add(buyer.first_channel, buyer.second_channel)
             days = (buyer.second[0].date() - first).days if buyer.second is not None else None
             if days is not None:
                 cohort.second_days[days] += 1
@@ -239,12 +282,18 @@ class CohortAggregates:
             for i, horizon in enumerate(HORIZONS):
                 censored, incomplete = self._eligibility(_utc(first), _utc(first + timedelta(days=horizon + 1)))
                 cohort.horizons[i].add(censored, incomplete, days is not None and days <= horizon)
+                if monetary and not censored and not incomplete and days is not None and days <= horizon:
+                    cohort.money.horizons[i].record(buyer.money.second)
             for offset in MONTH_OFFSETS:
                 cohort.active[offset] += (buyer.months >> offset) & 1
         return cohorts
 
-    def _policy_result(self, buyers):
-        cohorts = self._collect(buyers)
+    def _policy_result(self, buyers, monetary=False):
+        category_counts = CategoryCounts() if monetary and self._categories is not None else None
+        cohorts = self._collect(buyers, monetary, category_counts)
+        money_rows = {}
+        channels = ChannelCounts() if monetary else None
+        money_horizons = [SecondMoney() for _ in HORIZONS] if monetary else None
         rows, histogram = {}, Counter()
         horizons = [_Counts() for _ in HORIZONS]
         retention = [_Counts() for _ in MONTH_OFFSETS[1:]]
@@ -252,6 +301,11 @@ class CohortAggregates:
         for month, cohort in sorted(cohorts.items()):
             self.check()
             size += cohort.buyers
+            if monetary:
+                money_rows[_month_key(month)] = cohort.money.result(cohort.buyers)
+                channels.merge(cohort.channels, self.check)
+                for total, value in zip(money_horizons, cohort.money.horizons):
+                    total.merge(value)
             histogram.update(cohort.second_days)
             interval_incomplete += cohort.second_interval_incomplete
             cells = [dict(month_offset=0, month=_month_key(month), kind='COHORT_SIZE', buyers=cohort.buyers)]
@@ -274,18 +328,26 @@ class CohortAggregates:
                                           coverage_incomplete_buyers=cohort.second_interval_incomplete),
                 horizons={str(h): count.result(cohort.buyers) for h, count in zip(HORIZONS, cohort.horizons)},
                 retention=cells)
-        return dict(base_buyers=len(buyers), displayed_buyers=size, hidden_buyers=len(buyers) - size, cohorts=rows,
+        result = dict(base_buyers=len(buyers), displayed_buyers=size, hidden_buyers=len(buyers) - size, cohorts=rows,
             summary=dict(cohort_count=len(rows), cohort_size=size, observed_repeat_buyers=sum(histogram.values()),
                 second_purchase_days=dict(**_interval_summary(histogram), coverage_incomplete_buyers=interval_incomplete),
                 horizons={str(h): count.result(size) for h, count in zip(HORIZONS, horizons)},
                 retention=[dict(month_offset=0, kind='COHORT_SIZE', buyers=size)] + [
                     dict(month_offset=offset, kind='MONTHLY_ACTIVITY', **count.result(size, monthly=True))
                     for offset, count in zip(MONTH_OFFSETS[1:], retention)]))
+        if category_counts is not None:
+            result['purchase_categories'] = category_counts.result(self._categories,self.check)
+        if monetary:
+            result['purchase_channels'] = channels.result(self.check)
+            result['monetary'] = dict(cohorts=money_rows,horizons={
+                str(h): value.result(count.eligible,count.qualified)
+                for h,value,count in zip(HORIZONS,money_horizons,horizons)})
+        return result
 
     def result(self):
         """Fresh deterministic aggregates only; cancelled results are never published."""
         self.check()
-        policies = {policy: self._policy_result(buyers) for policy, buyers in self._buyers.items()}
+        policies = {policy: self._policy_result(buyers, policy == STRICT_COMPLETED) for policy, buyers in self._buyers.items()}
         self.check()
         return dict(as_of_date=self.as_of_date.isoformat(), cutoff_exclusive=self.end.isoformat(),
             cohort_definition='FIRST_OBSERVED_PURCHASE_UTC_MONTH',

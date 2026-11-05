@@ -19,7 +19,7 @@ from types import MappingProxyType
 from Application.analysis_filter import AnalysisFilter, options_from_snapshot
 from Application.interactions import InteractionBuilder, InteractionBuildError, classify_action_system_name
 from Application.mindbox.adapters import adapt_action, adapt_action_system_name, adapt_customer_merge, adapt_order
-from Application.mindbox.adapters._common import AdapterError, birth_date, identifier, number, objects, timestamp
+from Application.mindbox.adapters._common import AdapterError, birth_date, identifier, number, objects, text, timestamp
 from Application.mindbox.canonical_customers import database
 from Application.mindbox.canonical_storage import catalog, checked_directory, storage_lock, effective_entries as _entries
 from Application.mindbox.identity import CustomerIdResolver
@@ -36,6 +36,9 @@ from Application.statistics_buyer_aggregates import BuyerAggregates
 from Application.statistics_purchase_facts import build_purchase_order_fact
 from Application.statistics_rfm_core import RfmAggregates
 from Application.statistics_cohorts_core import CohortAggregates
+from Application.statistics_cohorts_categories import order_category_codes
+from Application.statistics_copurchases import CategoryCoPurchases
+from Application.statistics_purchase_policy import STRICT_COMPLETED
 from Application.statistics_cohorts_validation import cohort_cutoff
 from Application.statistics_rfm_validation import rfm_cutoff
 
@@ -489,10 +492,13 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     rfm_date = rfm_cutoff(order_scope_period, customer_filter.end_date, calculated_at)
     rfm = (RfmAggregates(rfm_date, order_scope_period, identity_space=buyer_aggregates.identity_space, check=check)
            if rfm_date is not None else None)
+    copurchases = CategoryCoPurchases(buyer_aggregates.identity_space,buyer_aggregates.coverage,
+                                     categories,category_paths,check)
     cohort_date = cohort_cutoff(order_scope_period, customer_filter.end_date, calculated_at)
     cohorts = (CohortAggregates(cohort_date, order_scope_period, identity_space=buyer_aggregates.identity_space,
                                cohort_start=customer_filter.start_date[:7] if customer_filter.start_date else None,
-                               cohort_end=customer_filter.end_date[:7] if customer_filter.end_date else None, check=check)
+                               cohort_end=customer_filter.end_date[:7] if customer_filter.end_date else None, check=check,
+                               category_names=categories,category_paths=category_paths)
                if cohort_date is not None else None)
     if input_source is not None:
         input_source.rfm_interval = rfm.windows['LAST_48M'] if rfm is not None else None
@@ -569,7 +575,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     scope_only_orders = set()  # Only orders selected outside the legacy shared coverage.
     rfm_orders = set()  # First eligible snapshot in the independent 48-month area.
     cohort_orders = set()  # Full-history first snapshot, independent of other scopes and status.
-    prepared_lines = prepared_fact = None
+    prepared_lines = prepared_fact = prepared_categories = None
 
     def purchase_fact(raw, lines, ordered_at):
         nonlocal prepared_fact
@@ -583,7 +589,15 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     def scope_order(raw, lines, ordered_at):
         identity = identities.resolve(identifier(raw, 'customer.ids.mindboxId'))
         scope.order(identity, any(line.line_status in builder.rules.purchase_line_statuses for line in lines))
-        buyer_aggregates.add(purchase_fact(raw, lines, ordered_at))
+        fact = purchase_fact(raw, lines, ordered_at)
+        buyer_aggregates.add(fact)
+        copurchases.add(fact,category_codes=category_projection(lines) if fact.strict.has_purchase else None)
+
+    def category_projection(lines):
+        nonlocal prepared_categories
+        if prepared_categories is None:
+            prepared_categories = order_category_codes(lines,products,metadata,categories,check)
+        return prepared_categories
 
     def adapted_lines(raw, eligible):
         nonlocal prepared_lines
@@ -596,7 +610,7 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
     order_aggregates = OrderAggregates()
     outside_period = fractional_lines = 0
     for raw in records("orders", entries["orders"]):
-        prepared_lines = prepared_fact = None
+        prepared_lines = prepared_fact = prepared_categories = None
         ordered_at = timestamp(raw, "firstAction.dateTimeUtc")
         if (cohorts is not None and ordered_at < cohorts.end
                 and any(a <= ordered_at < b for a, b in order_scope_period)):
@@ -604,7 +618,12 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
             if key not in cohort_orders:
                 eligible = [line for line in objects(raw, 'lines', required=True)
                             if (quantity := number(line, 'quantity')) == quantity.to_integral_value()]
-                cohorts.add(purchase_fact(raw, adapted_lines(raw, eligible), ordered_at))
+                lines = adapted_lines(raw, eligible)
+                cohorts.add(purchase_fact(raw, lines, ordered_at),
+                            channel_external_id=identifier(raw, 'firstAction.channel.ids.externalId', required=False),
+                            channel_name=text(raw, 'firstAction.channel.name'),
+                            order_sort_rank=raw.get('_cohort_order_rank') if input_source is not None else None,
+                            category_codes=category_projection(lines))
                 cohort_orders.add(key)
         if (rfm is not None and rfm.windows['LAST_48M'][0] <= ordered_at < rfm.windows['LAST_48M'][1]
                 and any(a <= ordered_at < b for a, b in order_scope_period)):
@@ -721,13 +740,17 @@ def _calculate_statistics(root, catalog_path, progress, check, analysis_filter, 
         ("purchase_lines", interactions.order_lines_purchase),
         ("filtered_by_status", interactions.order_lines_filtered_by_status),
     )
+    buyer_result = buyer_aggregates.result(as_of, check)
+    strict = buyer_result['policies'][STRICT_COMPLETED]
+    if strict is not None:
+        strict['category_copurchases'] = copurchases.result()
     return DatasetStatistics(
         calculated_at=calculated_at.isoformat(),
         coverage=tuple(_coverage(name.title(), entries[name]) for name in ("actions", "orders"))
                  + (_coverage("CustomerMerges", [merge] if merge else []), customer_coverage),
         analysis_filter=analysis_filter,
         customer_scope=scope.result(check),
-        buyer_statistics=buyer_aggregates.result(as_of, check),
+        buyer_statistics=buyer_result,
         rfm_statistics=rfm.result() if rfm is not None else None,
         cohort_statistics=cohorts.result() if cohorts is not None else None,
         product_category_paths=tuple((code, category_paths.get(code))

@@ -374,7 +374,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
-        for index, counts in enumerate((8, 7, 9, 12)):
+        for index, counts in enumerate((8, 7, 9, 33)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = next(table for table in tab.sections.widget(3).findChildren(QTableWidget)
                          if table.horizontalHeaderItem(0).text() == 'Пол')
@@ -666,12 +666,15 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
         assert headings == ["ОХВАТ КЛИЕНТСКОЙ БАЗЫ", "ЦИФРОВАЯ АКТИВНОСТЬ КЛИЕНТОВ", "ПОКУПАТЕЛИ И КЛИЕНТЫ БЕЗ ПОКУПОК",
                             "ПОРТРЕТ КЛИЕНТА", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ",
-                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ"]
+                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ",
+                            "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ ПО ПОЛУ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ ПО ВОЗРАСТУ"]
         assert [label.text() for label in tab.customer_sections.widget(1).findChildren(QLabel)
-                if label.property("class") == "statisticsSection"] == ["ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ", "ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА"]
-        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 12
+                if label.property("class") == "statisticsSection"] == ["ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ", "ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА",
+                    "СОВМЕСТНЫЕ ПОКУПКИ КАТЕГОРИЙ", "КАТЕГОРИИ В СОСТАВЕ ЗАКАЗОВ",
+                    "СОВМЕСТНЫЕ ПОКУПКИ КАТЕГОРИЙ", "СИЛА СОЧЕТАНИЙ КАТЕГОРИЙ"]
+        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 33
         tables = page.findChildren(QTableWidget)
-        assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7]
+        assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7, 1, 1]
         assert tables[5].item(8, 1).text() == "50,00 %"
         for table in tables:
             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
@@ -722,8 +725,8 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
         assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
-        assert len(page.findChildren(QTableWidget)) == 7
-        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 12
+        assert len(page.findChildren(QTableWidget)) == 9
+        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 33
         assert len(page.findChildren(StatisticsChart)) == 3
         assert len(tab.findChildren(StatisticsChart)) == 17
         assert card_titles(page) == ['Профили текущего среза', 'Клиенты с товарными взаимодействиями', 'Покупатели',
@@ -1279,7 +1282,7 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         QApplication.processEvents()
         assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(5)] == [4, 6, 4, 3, 0]
-        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 12, 5]
+        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 33, 5]
         chart_widgets = tab.findChildren(StatisticsChart)
         assert len(chart_widgets) == 17
         actions = _visual_items(tab.sections.widget(0).widget().layout())
@@ -1556,8 +1559,8 @@ def test_analytics_charts_are_immediately_before_original_tables(window, rich_cu
     assert isinstance(preceding(4,lambda h:h[0]=="Горизонт, дней"),StatisticsChart)
     heatmap = preceding(4,lambda h:len(h)>1 and h[1]=="M0: покупателей")
     assert isinstance(heatmap,CohortRetentionHeatmap) and heatmap.model().columnCount()==14
-    # All 39 original numeric tables survive; heatmap is a separate chart view.
-    assert len(tab.customer_sections.findChildren(QTableWidget))==39
+    # All 39 original, six demographic, four cohort-money and three channel and three category and three co-purchase and two RFM business tables survive; heatmap is a separate chart view.
+    assert len(tab.customer_sections.findChildren(QTableWidget))==60
     assert rich_customer_result==before and tab.displayed_result is rich_customer_result
 
 

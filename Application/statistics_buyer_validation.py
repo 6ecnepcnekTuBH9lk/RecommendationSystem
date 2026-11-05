@@ -7,6 +7,8 @@ import re
 
 from Application.analysis_filter import AnalysisFilter
 from Application.customer_demographics import AGE_LABELS
+from Application.statistics_copurchases import MAX_PAIRS_PER_ORDER,MAX_DISTINCT_PAIRS
+from Application.statistics_cohorts_categories import UNKNOWN_CATEGORY,category_key,MAX_ORDER_CATEGORIES
 from Application.order_statistics import CURRENCIES
 from Application.statistics_buyer_aggregates import (
     POLICIES, GENDERS, FREQUENCY_LABELS, INTERVAL_LABELS, ANNUAL_MONEY_FIELDS,
@@ -176,8 +178,14 @@ def _demography(value, buyers, available):
 
 
 def _policy(value, policy, profiles, coverage):
-    _keys(value, 'policy buyers orders positions units single_buyers repeat_buyers repeat_rate mean_orders median_orders '
-          'mean_units frequency first_date last_date first_months last_months intervals money quality demography annual')
+    _require(isinstance(value, dict))
+    fields = ('policy buyers orders positions units single_buyers repeat_buyers repeat_rate mean_orders median_orders '
+              'mean_units frequency first_date last_date first_months last_months intervals money quality demography annual')
+    _keys(value, fields + (' demographic_analytics' if 'demographic_analytics' in value else '')
+          + (' category_copurchases' if 'category_copurchases' in value else ''))
+    if 'category_copurchases' in value:
+        _require(policy == POLICIES[0])
+        _copurchases(value['category_copurchases'],value)
     _require(value['policy'] == policy)
     buyers, orders, positions, single, repeated = (_count(value[k]) for k in
                                                   ('buyers', 'orders', 'positions', 'single_buyers', 'repeat_buyers'))
@@ -253,6 +261,12 @@ def _policy(value, policy, profiles, coverage):
     _require(max(money[c]['known_buyers'] for c in CURRENCIES) <= known_buyers <= sum(money[c]['known_buyers'] for c in CURRENCIES))
     _require(max(money[c]['complete_buyers'] for c in CURRENCIES) <= q['complete_buyers'] <= sum(money[c]['complete_buyers'] for c in CURRENCIES))
     _demography(value['demography'], buyers, profiles)
+    if 'demographic_analytics' in value:
+        _require(policy == POLICIES[0])
+        if profiles:
+            _demographic_analytics(value['demographic_analytics'], value, value['demography'])
+        else:
+            _require(value['demographic_analytics'] is None)
     annual = value['annual']
     _require(isinstance(annual, (list, tuple)))
     years = []
@@ -312,3 +326,103 @@ def validate_buyer_statistics(value, *, coverage, profiles_available, customer_s
     _require(_money(strict['units']) <= _money(extended['units']))
     if customer_scope is not None and customer_scope['orders'] is not None:
         _require(extended['buyers'] <= customer_scope['orders'])  # Scope O counts clients, not orders.
+
+
+def _demographic_analytics(value, policy_stats, demographic):
+    """Validate each independent partition against the existing STRICT totals."""
+    _require(policy_stats["policy"] == POLICIES[0])
+    _keys(value, "gender age")
+    fields = "label buyers buyer_rate orders mean_orders single_buyers repeat_buyers repeat_rate unvalued_orders money"
+    money_fields = "known_buyers known_orders amount mean_order median_order amount_rate"
+    for dimension, labels in (("gender", GENDERS), ("age", AGE_LABELS)):
+        rows = value[dimension]
+        _require(isinstance(rows, (list, tuple)) and len(rows) == len(labels))
+        _require([row.get("label") for row in rows if isinstance(row, dict)] == list(labels))
+        for row, profile_row in zip(rows, demographic[dimension]):
+            _keys(row, fields)
+            buyers, orders, single, repeated, unvalued = (_count(row[k]) for k in
+                ("buyers", "orders", "single_buyers", "repeat_buyers", "unvalued_orders"))
+            _require(buyers == profile_row[1] and single + repeated == buyers)
+            _require(bool(buyers) == bool(orders) and orders >= single + 2*repeated and unvalued <= orders)
+            _ratio(row["buyer_rate"], buyers, policy_stats["buyers"], percent=True)
+            _ratio(row["repeat_rate"], repeated, buyers, percent=True)
+            _ratio(row["mean_orders"], orders, buyers)
+            _keys(row["money"], CURRENCIES)
+            for currency in CURRENCIES:
+                m = row["money"][currency]
+                _keys(m, money_fields)
+                n, known = _count(m["known_orders"]), _count(m["known_buyers"])
+                _require(known <= min(n, buyers) and bool(n) == bool(known))
+                amount = _money(m["amount"])
+                if not n:
+                    _require(amount == 0)
+                _ratio(m["mean_order"], amount, n, decimal=True)
+                _median(m["median_order"], n, amount, decimal=True)
+                if n:
+                    median = _money(m["median_order"])
+                    _require(median <= amount / (n//2 + 1))
+                    if n == 2:
+                        _require(median == amount/2)
+                _ratio(m["amount_rate"], amount, _money(policy_stats["money"][currency]["amount"]), percent=True)
+            _require(sum(row["money"][c]["known_orders"] for c in CURRENCIES) + unvalued == orders)
+            known_buyers = [row["money"][c]["known_buyers"] for c in CURRENCIES]
+            _require(max(known_buyers) <= buyers and sum(known_buyers) >= int(orders > unvalued))
+        for field in ("buyers", "orders", "single_buyers", "repeat_buyers"):
+            _require(sum(row[field] for row in rows) == policy_stats[field])
+        _require(sum(row["unvalued_orders"] for row in rows) == policy_stats["quality"]["unvalued_orders"])
+        for currency in CURRENCIES:
+            for field in ("known_orders", "known_buyers"):
+                _require(sum(row["money"][currency][field] for row in rows) == policy_stats["money"][currency][field])
+            _require(sum((_money(row["money"][currency]["amount"]) for row in rows), Decimal(0)) ==
+                     _money(policy_stats["money"][currency]["amount"]))
+
+
+def _copurchases(value,policy):
+    """Exact counts are computed privately; validate all public bounds/denominators."""
+    _keys(value,'orders buyers multicategory_orders multicategory_rate multicategory_buyers unknown_orders categories pairs')
+    orders,buyers,multi,multi_buyers,unknown=(_count(value[k]) for k in (
+        'orders','buyers','multicategory_orders','multicategory_buyers','unknown_orders'))
+    _require(orders==policy['orders'] and buyers==policy['buyers'])
+    _require(multi<=orders and multi_buyers<=min(multi,buyers) and unknown<=orders)
+    _require(orders-multi>=buyers-multi_buyers)
+    _ratio(value['multicategory_rate'],multi,orders,percent=True)
+    _require(isinstance(value['categories'],(list,tuple)) and isinstance(value['pairs'],(list,tuple)))
+    _require(bool(multi)==bool(multi_buyers)==bool(value['pairs']))
+    catalog={}
+    def code(value):
+        _require(value is None or isinstance(value,str) and bool(value.strip()) and value==value.strip())
+        return value
+    for row in value['categories']:
+        _keys(row,'code name path orders buyers order_rate')
+        key=code(row['code'])
+        _require(key not in catalog and isinstance(row['name'],str) and bool(row['name'].strip()) and row['name']==row['name'].strip())
+        path=row['path']
+        if path is not None:
+            _require(isinstance(path,(list,tuple)) and bool(path) and path[-1]==row['name'])
+            _require(all(isinstance(v,str) and bool(v.strip()) and v==v.strip() for v in path))
+        _require(key is not None or row['name']==UNKNOWN_CATEGORY and path is None)
+        n,b=_count(row['orders']),_count(row['buyers'])
+        _require(0<n<=orders and 0<b<=min(n,buyers))
+        _ratio(row['order_rate'],n,orders,percent=True)
+        catalog[key]=row
+    _require(list(catalog)==sorted(catalog,key=category_key))
+    _require(orders<=sum(r['orders'] for r in catalog.values())<=orders*MAX_ORDER_CATEGORIES)
+    _require(buyers<=sum(r['buyers'] for r in catalog.values())<=sum(r['orders'] for r in catalog.values()))
+    _require(unknown==(catalog[None]['orders'] if None in catalog else 0))
+    _require(len(value['pairs'])<=MAX_DISTINCT_PAIRS)
+    pairs={}
+    for row in value['pairs']:
+        _keys(row,'category1 category2 orders buyers order_rate given_first_rate given_second_rate incomplete')
+        a,b=code(row['category1']),code(row['category2'])
+        _require(a in catalog and b in catalog and category_key(a)<category_key(b) and (a,b) not in pairs)
+        n,users=_count(row['orders']),_count(row['buyers'])
+        _require(0<n<=min(multi,catalog[a]['orders'],catalog[b]['orders']))
+        _require(0<users<=min(n,multi_buyers,catalog[a]['buyers'],catalog[b]['buyers']))
+        _require(type(row['incomplete']) is bool and row['incomplete']==(a is None or b is None))
+        _ratio(row['order_rate'],n,orders,percent=True)
+        _ratio(row['given_first_rate'],n,catalog[a]['orders'],percent=True)
+        _ratio(row['given_second_rate'],n,catalog[b]['orders'],percent=True)
+        pairs[a,b]=row
+    _require(list(pairs)==sorted(pairs,key=lambda pair:(-pairs[pair]['orders'],category_key(pair[0]),category_key(pair[1]))))
+    _require(multi<=sum(r['orders'] for r in pairs.values())<=multi*MAX_PAIRS_PER_ORDER)
+    _require(multi_buyers<=sum(r['buyers'] for r in pairs.values())<=sum(r['orders'] for r in pairs.values()))

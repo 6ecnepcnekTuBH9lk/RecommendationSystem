@@ -1,7 +1,8 @@
 """Saved cohort snapshot parity across actual GUI, XLSX and offline HTML."""
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 import json
 import sqlite3
@@ -14,7 +15,7 @@ from Application import dataset_statistics as statistics, statistics_cache as ca
 from Application import statistics_export as xlsx, statistics_html_export as html
 from Application.analysis_filter import AnalysisFilter
 from Application.statistics_cohorts_core import CohortAggregates
-from Application.statistics_cohorts_presentation import cohort_sections, COHORT_TITLE, COHORT_LEGACY_TEXT, MATRIX_HEADERS
+from Application.statistics_cohorts_presentation import cohort_sections, COHORT_TITLE, COHORT_LEGACY_TEXT, MATRIX_HEADERS, CHANNEL_TITLE
 from Application.tabs import dataset_statistics_tab as ui
 from tests.test_statistics_cohorts_integration import dataset, calculate, SELECTION, save
 from tests.tabs.test_dataset_statistics_tab import window, app
@@ -36,12 +37,26 @@ def _snapshot(dataset, scenario):
             target.update(since='2026-01-01T00:00:00Z',until='2026-01-10T00:00:00Z')
         save(dataset[0],dataset[2])
     result = calculate(dataset,AnalysisFilter('2025-01-01','2025-08-31') if scenario=='empty' else SELECTION)
+    if scenario=='money':
+        from tests.test_statistics_cohorts_money import order, SPACE
+        c = result['cohort_statistics']
+        core = CohortAggregates(date.fromisoformat(c['as_of_date']),c['source_coverage'],identity_space=SPACE,
+                                cohort_start=c['cohort_bounds']['start'],cohort_end=c['cohort_bounds']['end'])
+        for record in [
+                order('2026-01-01',amount='10.11'),order('2026-01-10',id=2,amount='20.13',namespace='kanzlerKz'),
+                order('2026-02-01',id=3,amount='30.14'),order('2026-02-02',id=4,amount='40.16'),
+                order('2026-01-01',buyer='unvalued',amount=None),
+                order('2026-02-01',buyer='unvalued',id=2,amount=None)]:
+            core.add(record)
+        result['cohort_statistics'] = core.result()
     if scenario=='legacy':
         result.pop('cohort_statistics')
+    if scenario=='money_legacy':
+        result['cohort_statistics']['policies']['STRICT_COMPLETED'].pop('monetary')
     return result
 
 
-@pytest.mark.parametrize('scenario',['full','partial','empty','no_orders','legacy'])
+@pytest.mark.parametrize('scenario',['full','partial','empty','no_orders','legacy','money_legacy','money'])
 def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dataset,window,tmp_path,monkeypatch,scenario):
     result = _snapshot(dataset,scenario)
     path = tmp_path/'cohort-result.json'
@@ -110,7 +125,7 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
                 assert any(tuple(r[:len(headers)])==tuple(headers) for r in rows)
                 for value_row in values:
                     assert any([c['text'] for c in r]==[ui._cell_text(v,display=ui.cohort_display,percentage=ui.report.percentage_cell(headers,value_row,c)) for c,v in enumerate(value_row)] for r in all_html_rows)
-                    assert any(all(actual==pytest.approx(v) if isinstance(v,float) else actual==v
+                    assert any(all(actual==pytest.approx(float(v)) if isinstance(v,(float,Decimal)) else actual==v
                                    for actual,v in zip(candidate,value_row)) for candidate in rows)
             assert all(html._cell(text)['text'] in rendered for _,text in notes)
         if scenario=='legacy':
@@ -145,7 +160,7 @@ def test_legacy_cache_opens_on_startup_without_automatic_recalculation(dataset,w
         assert path.read_bytes()==before
         assert any(label.text()==COHORT_TITLE.upper() for label in tab.findChildren(QLabel))
         tables = tab.customer_sections.widget(4).findChildren(QTableWidget)
-        assert tables[-1].item(0,1).text()==COHORT_LEGACY_TEXT
+        assert any(table.item(0,1).text()==COHORT_LEGACY_TEXT for table in tables)
     finally:
         tab._shutdown()
         tab.deleteLater()
@@ -155,7 +170,9 @@ def test_extended_matrices_remain_in_exports_without_duplicating_gui_matrix(data
     result = calculate(dataset)
     gui = cohort_sections(result)
     exports = cohort_sections(result,include_extended=True)
-    assert exports[:len(gui)] == gui
+    shared_tail=next(i for i,s in enumerate(gui) if s[0]==CHANNEL_TITLE)
+    assert exports[:shared_tail] == gui[:shared_tail]
+    assert exports[-(len(gui)-shared_tail):] == gui[shared_tail:]
     assert sum('матрица удержания' in title for title,_,_,_ in gui)==1
     assert sum('матрица удержания' in title for title,_,_,_ in exports)==2
 

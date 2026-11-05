@@ -13,6 +13,7 @@ from Application.customer_demographics import AGE_LABELS, age_group, calendar_ag
 from Application.mindbox.adapters._common import AdapterError, birth_date
 from Application.order_statistics import CURRENCIES, histogram_median
 from Application.statistics_purchase_facts import MonetaryIssue
+from Application.statistics_buyer_demography import OrderAmounts, DemographicSummary
 from Application.statistics_purchase_policy import STRICT_COMPLETED, EXTENDED_COMPLETED
 
 
@@ -127,6 +128,7 @@ class _Buyer:
     days: array = field(default_factory=lambda: array('I'))
     strict_flags: array = field(default_factory=lambda: array('B'))
     profile: tuple | None = None
+    money_codes: array | None = None
 
 
 class _Finance:
@@ -295,6 +297,7 @@ class BuyerAggregates:
         self.histograms = {policy: defaultdict(Counter) for policy in POLICIES}
         self.issues = {policy: Counter() for policy in POLICIES}
         self.return_positions = 0
+        self._demographic_amounts = OrderAmounts()
 
     def add(self, fact):
         if fact.identity_space != self.identity_space:
@@ -304,7 +307,10 @@ class BuyerAggregates:
         self.return_positions += fact.return_line_count
         if not fact.extended.has_purchase:
             return
-        buyer = self.buyers.setdefault(fact.customer_id, _Buyer())
+        buyer = self.buyers.get(fact.customer_id)
+        if buyer is None:
+            self._demographic_amounts.budget.reserve(16)
+            buyer = self.buyers[fact.customer_id] = _Buyer()
         buyer.days.append(fact.order_datetime_utc.date().toordinal())
         buyer.strict_flags.append(int(fact.strict.has_purchase))
         for policy, result in ((STRICT_COMPLETED, fact.strict), (EXTENDED_COMPLETED, fact.extended)):
@@ -319,6 +325,13 @@ class BuyerAggregates:
             year = fact.order_datetime_utc.year
             state.add(year, result)
             if result.monetary_available:
+                if policy == STRICT_COMPLETED:
+                    if buyer.money_codes is None:
+                        self._demographic_amounts.budget.reserve(96)
+                        buyer.money_codes = array('I')
+                    code = self._demographic_amounts.code(result.currency, result.amount)
+                    self._demographic_amounts.budget.reserve(8)
+                    buyer.money_codes.append(code)
                 self.histograms[policy][year, result.currency][result.amount] += 1
             else:
                 self.issues[policy].update(result.monetary_issues)
@@ -337,6 +350,7 @@ class BuyerAggregates:
     def result(self, as_of, check=lambda: None):
         available = self.orders_available and bool(self.coverage)
         summaries = {policy: _Summary() for policy in POLICIES}
+        demographic = DemographicSummary(self._demographic_amounts, GENDERS, check) if available and self.profiles_available else None
         if available:
             for buyer in self.buyers.values():
                 check()
@@ -344,11 +358,17 @@ class BuyerAggregates:
                 summaries[EXTENDED_COMPLETED].add(buyer.extended, [day for day, _ in ordered], buyer.profile, check)
                 if buyer.strict is not None:
                     summaries[STRICT_COMPLETED].add(buyer.strict, [day for day, flag in ordered if flag], buyer.profile, check)
+                    if demographic is not None:
+                        demographic.add(buyer.strict, buyer.profile)
         check()
         complete = bool(self.coverage) and (self.coverage == [self.selection.interval] if self.selection.interval else len(self.coverage) == 1)
+        policies = {p: summaries[p].result(p, self.histograms[p], self.issues[p], self.profiles_available, self.coverage)
+                    if available else None for p in POLICIES}
+        if available:
+            policies[STRICT_COMPLETED]['demographic_analytics'] = (
+                demographic.result(policies[STRICT_COMPLETED]['money'], self.buyers.values()) if demographic is not None else None)
         return dict(period=dict(start_date=self.selection.start_date, end_date=self.selection.end_date),
                     coverage=saved_coverage(self.coverage), coverage_complete=complete,
                     orders_available=self.orders_available, profiles_available=self.profiles_available,
                     as_of=as_of.isoformat(), return_positions=self.return_positions if available else None,
-                    policies={p: summaries[p].result(p, self.histograms[p], self.issues[p], self.profiles_available, self.coverage)
-                              if available else None for p in POLICIES})
+                    policies=policies)
