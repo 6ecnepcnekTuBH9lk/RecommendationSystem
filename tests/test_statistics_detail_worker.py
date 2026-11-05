@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from datetime import date
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -12,19 +13,27 @@ import pytest
 
 from scripts import statistics_detail_export as worker
 from Application.statistics_detail_job import (
-    MAX_MESSAGE, SourceInfo, decode_message, encode_message, inspect_sources,
+    MAX_MESSAGE, decode_message, encode_message, inspect_sources,
 )
 from Application.statistics_detail_storage import DetailExportError
 from tests.test_statistics_detail_backend import job as job_fixture
+from tests.tabs.test_dataset_statistics_tab import sample_result
+
+__all__=['sample_result']
 
 job = job_fixture
 
 
 class PendingControl:
+    payload = b''
     def __init__(self):
+        self.first=True
         self.done = Event()
 
     def readline(self, size):
+        if self.first:
+            self.first=False
+            return self.payload[:size]
         self.done.wait(5)
         return b''
 
@@ -39,18 +48,17 @@ def pending():
 
 
 def options(tmp_path):
-    target = tmp_path/'result.zip'
-    private = tmp_path/'private'
-    private.mkdir(exist_ok=True)
-    return ['--raw-root', str(tmp_path/'source'), '--destination', str(target),
-            '--temporary-root', str(private), '--as-of', '2026-08-31',
-            '--start', '2026-01-01', '--end', '2026-08-31']
+    return ['--destination',str(tmp_path/'result.zip')]
 
 
-@pytest.fixture
-def mocked(monkeypatch):
-    monkeypatch.setattr(worker, 'inspect_sources', lambda *a: SourceInfo(date(2020,1,1),date(2026,8,31)))
-    monkeypatch.setattr(worker, '_prepare_root', lambda *a: None)
+@pytest.fixture(autouse=True)
+def mocked(sample_result, monkeypatch):
+    PendingControl.payload=json.dumps(dict(command="report",snapshot=sample_result)).encode()+b"\n"
+
+
+def completed_result():
+    return SimpleNamespace(files=("Статистика.xlsx","Статистика.html"),
+                           timings=dict(presentation=0.01,excel=0.1,html=0.1,zip=0.01,total=0.22))
 
 
 def messages(output):
@@ -61,21 +69,19 @@ def messages(output):
 
 def test_parameters_safe_json_progress_throttle_and_output_redirection(tmp_path, monkeypatch, mocked):
     captured = {}
-    def export(**kwargs):
+    def export(*args,**kwargs):
         captured.update(kwargs)
         print('SYNTH_PRIVATE_CONTACT@example.invalid')
         for _ in range(100):
-            kwargs['progress'](dict(stage='orders', processed=100))
-        return SimpleNamespace(manifest=dict(rows=dict(clients=1,orders=2,order_lines=3)))
-    monkeypatch.setattr(worker, 'export_detail_statistics', export)
+            kwargs['progress'](dict(stage='statistics_xlsx', processed=0))
+        return completed_result()
+    monkeypatch.setattr(worker, 'export_statistics_bundle', export)
     output = io.StringIO()
     with pending() as control:
         code = worker.main(options(tmp_path), control=control, output=output)
     events = messages(output)
-    assert code == 0 and events[-1] == dict(event='finished',rows=dict(clients=1,orders=2,order_lines=3))
-    assert len(events) <= 3 and captured['as_of_date'] == date(2026,8,31)
-    assert captured['event_period'].start_date == date(2026,1,1)
-    assert captured['order_mode'].value == 'ALL_SELECTED'
+    assert code == 0 and events[-1] == dict(event='finished',files=2)
+    assert len(events) <= 3 and set(captured)=={'progress','cancelled','reserve_bytes','max_temporary_bytes'}
     assert 'SYNTH_PRIVATE' not in output.getvalue()
 
 
@@ -87,9 +93,9 @@ def test_backend_error_has_safe_code_and_preserves_old_target(tmp_path, monkeypa
     args = options(tmp_path)
     target = tmp_path/'result.zip'
     target.write_bytes(b'previous')
-    def fail(**kwargs):
+    def fail(*args,**kwargs):
         raise error
-    monkeypatch.setattr(worker, 'export_detail_statistics', fail)
+    monkeypatch.setattr(worker, 'export_statistics_bundle', fail)
     output = io.StringIO()
     with pending() as control:
         code = worker.main(args, control=control, output=output)
@@ -102,14 +108,14 @@ def test_backend_error_has_safe_code_and_preserves_old_target(tmp_path, monkeypa
     (b'{"customer_id":"SYNTH_SECRET"}\n','error'), (b'x'*(MAX_MESSAGE+1),'error'),
 ])
 def test_cancel_eof_and_invalid_control_are_cooperative(tmp_path, monkeypatch, mocked, control, expected):
-    def export(**kwargs):
+    def export(*args,**kwargs):
         for _ in range(10000):
             if kwargs['cancelled']():
                 raise InterruptedError
         pytest.fail('Cancellation not delivered')
-    monkeypatch.setattr(worker, 'export_detail_statistics', export)
+    monkeypatch.setattr(worker, 'export_statistics_bundle', export)
     output = io.StringIO()
-    code = worker.main(options(tmp_path), control=io.BytesIO(control), output=output)
+    code = worker.main(options(tmp_path), control=io.BytesIO(PendingControl.payload+control), output=output)
     assert code == (2 if expected == 'cancelled' else 1)
     assert messages(output)[-1]['event'] == expected and 'SYNTH_SECRET' not in output.getvalue()
 
@@ -153,34 +159,27 @@ def test_lightweight_source_metadata_does_not_read_orders_or_customers(job, monk
 
 def test_worker_with_real_backend_uses_only_small_synthetic_fixture(job):
     output = io.StringIO()
-    args = ['--raw-root',str(job.root),'--destination',str(job.target),
-            '--temporary-root',str(job.private),'--as-of','2026-08-31']
+    args = ['--destination',str(job.target)]
     with pending() as control:
         code = worker.main(args, output=output, control=control)
-    assert code == 0 and messages(output)[-1]['rows'] == dict(clients=1,orders=1,order_lines=1)
+    assert code == 0 and messages(output)[-1] == dict(event='finished',files=2)
     assert job.target.is_file() and not list(job.private.iterdir())
     assert 'SYNTH_CONTACT' not in output.getvalue()
 
 
 def test_real_child_stdin_cancellation_has_correct_exit_and_no_traceback(tmp_path):
-    script = (
-        "import sys; from scripts import statistics_detail_export as w; "
-        "w.inspect_sources=lambda *a:None; w._prepare_root=lambda *a:None; "
-        "raise SystemExit(w.main(sys.argv[1:]))"
-    )
-    # Cancel is consumed before backend; no real source access or archive creation.
+    script = "from scripts.statistics_detail_export import main; raise SystemExit(main())"
     result = subprocess.run([sys.executable,'-B','-u','-c',script,*options(tmp_path)],
-        input=b'{"command":"cancel"}\n',capture_output=True,cwd=Path(__file__).resolve().parents[1],timeout=10)
+        input=PendingControl.payload+b'{"command":"cancel"}\n',capture_output=True,cwd=Path(__file__).resolve().parents[1],timeout=10)
     assert result.returncode == 2 and result.stderr == b''
     assert decode_message(result.stdout.splitlines()[-1]) == dict(event='cancelled')
 
 
-def test_missing_sources_returns_error_without_export(tmp_path, monkeypatch):
-    monkeypatch.setattr(worker,'export_detail_statistics',lambda **kw:pytest.fail('Unexpected export'))
+def test_missing_snapshot_returns_error_without_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker,'export_statistics_bundle',lambda *a,**kw:pytest.fail('Unexpected export'))
     output=io.StringIO()
-    with pending() as control:
-        code=worker.main(options(tmp_path),control=control,output=output)
-    assert code==1 and messages(output)[-1]['code']=='SOURCE_NOT_READY'
+    code=worker.main(options(tmp_path),control=io.BytesIO(b""),output=output)
+    assert code==1 and messages(output)[-1]['code']=='REPORT_CONTEXT_MISMATCH'
 
 
 def test_real_backend_write_failure_keeps_previous_zip_and_cleans(job,monkeypatch):
@@ -188,13 +187,12 @@ def test_real_backend_write_failure_keeps_previous_zip_and_cleans(job,monkeypatc
     job.target.write_bytes(b'previous')
     original=zipfile.ZipFile.open
     def fail(archive,name,mode='r',*args,**kwargs):
-        if mode=='w' and getattr(name,'filename',name)=='orders.csv':
+        if mode=='w' and getattr(name,'filename',name)=='Статистика.xlsx':
             raise PermissionError('SYNTH_SECRET@example.invalid')
         return original(archive,name,mode,*args,**kwargs)
     monkeypatch.setattr(zipfile.ZipFile,'open',fail)
     output=io.StringIO()
-    args=['--raw-root',str(job.root),'--destination',str(job.target),
-          '--temporary-root',str(job.private),'--as-of','2026-08-31']
+    args=['--destination',str(job.target)]
     with pending() as control:
         code=worker.main(args,control=control,output=output)
     assert code==1 and messages(output)[-1]['code']=='ACCESS_DENIED'
@@ -205,9 +203,10 @@ def test_real_backend_write_failure_keeps_previous_zip_and_cleans(job,monkeypatc
 def test_new_private_root_setup_does_not_repair_existing_root(tmp_path,monkeypatch):
     created=[]
     validated=[]
-    monkeypatch.setattr(worker.storage,'admit_destination',lambda p:None)
-    monkeypatch.setattr(worker.storage,'protect_directory',lambda p:created.append(p))
-    monkeypatch.setattr(worker.storage,'validate_storage_root',lambda p:validated.append(p))
+    from Application import statistics_detail_storage as storage
+    monkeypatch.setattr(storage,'admit_destination',lambda p:None)
+    monkeypatch.setattr(storage,'protect_directory',lambda p:created.append(p))
+    monkeypatch.setattr(storage,'validate_storage_root',lambda p:validated.append(p))
     root=tmp_path/'owned-parent'/'owned-temp'
     worker._prepare_root(root)
     assert created==[root.parent,root] and validated==created
@@ -257,20 +256,21 @@ def test_heartbeat_and_terminal_keep_backend_stdout_stderr_private(tmp_path, mon
 
     output = HeartbeatOutput()
 
-    def export(**kwargs):
-        kwargs['progress'](dict(stage='orders', processed=7))
+    def export(*args,**kwargs):
+        kwargs['progress'](dict(stage='statistics_xlsx', processed=0))
         print('SYNTH_PRIVATE@example.invalid')
         print('SYNTH_PRIVATE@example.invalid', file=sys.stderr)
         assert output.heartbeat.wait(5), 'Worker heartbeat was not delivered'
-        return SimpleNamespace(manifest=dict(rows=dict(clients=1, orders=1, order_lines=1)))
+        return completed_result()
 
-    monkeypatch.setattr(worker, 'export_detail_statistics', export)
+    monkeypatch.setattr(worker, 'export_statistics_bundle', export)
     with pending() as control:
         code = worker.main(options(tmp_path), control=control, output=output)
     events = messages(output)
     assert code == 0 and output.progress_count >= 2
-    assert all(event == dict(event='progress', stage='orders', processed=7) for event in events[:-1])
+    assert all(event == dict(event='progress', stage='statistics_xlsx', processed=0) for event in events[:-1])
     assert events[-1]['event'] == 'finished'
     captured = capsys.readouterr()
-    assert captured.out == captured.err == ''
+    assert captured.out == '' and 'SYNTH_PRIVATE' not in captured.err
+    assert json.loads(captured.err)['format']=='statistics-report-timings-1'
     assert 'SYNTH_PRIVATE' not in output.getvalue()

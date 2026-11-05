@@ -10,6 +10,7 @@ import pytest
 
 from Application import statistics_html_export as html
 from Application import statistics_export as xlsx
+from Application import statistics_report_presentation as report
 from Application.analysis_filter import AnalysisFilter
 from statistics_export_samples import complete_snapshot, empty_snapshot, stress_snapshot
 from tabs.test_dataset_statistics_tab import sample_result
@@ -42,44 +43,47 @@ class Document(HTMLParser):
             self.chart_json += data
 
 
-def test_six_sections_all_kpi_filters_snapshot_and_no_external_resources(sample_result):
-    result = complete_snapshot(sample_result)
-    result['analysis_filter'] = AnalysisFilter('2025-01-01', '2025-01-31', ('Рубашки',), ('Зима',)).to_dict()
-    before = deepcopy(result)
-    doc = Document(html.build_statistics_html(result))
-    assert result == before
-    assert len([a for t, a in doc.tags if t == 'section']) == 6
-    assert len([a for t, a in doc.tags if a.get('class') == 'kpi']) == 8
-    assert len([a for t, a in doc.tags if a.get('id') == 'plotly-library']) == 1
-    assert all(not any(key in attrs for key in ('src', 'href')) for _, attrs in doc.tags)
-    assert not any(tag in ('iframe', 'img', 'object', 'link') for tag, _ in doc.tags)
-    texts = ''.join(doc.texts)
-    assert all(text in texts for text in ('Рубашки', 'Зима', '01.01.2025', '31.01.2025', '24.09.2026',
-                                         'Доля повторных покупателей'))
-    assert 'Не обновляется автоматически.' not in texts and 'Строк:' not in texts
-    charts = json.loads(doc.chart_json)
-    assert len(charts) == 24
-    assert {spec['section'] for spec in charts} == {0, 1, 2, 3, 4}
-    assert all(chart['data'] for chart in charts)
+def test_five_pages_and_five_client_groups_all_kpi_filters_no_external_resources(sample_result):
+    result=complete_snapshot(sample_result)
+    result["analysis_filter"]=AnalysisFilter("2025-01-01","2025-01-31",("Рубашки",),("Зима",)).to_dict()
+    before=deepcopy(result);doc=Document(html.build_statistics_html(result))
+    assert result==before
+    assert len([a for t,a in doc.tags if t=="section"])==10
+    assert len([a for t,a in doc.tags if a.get("role")=="tab"])==10
+    model=report.report_presentation(result)
+    cards=4+sum(len(b.values) for p in model.pages for g in p.groups for b in g.blocks if b.kind=="cards")
+    assert len([a for t,a in doc.tags if a.get("class")=="kpi"])==cards
+    assert len([a for t,a in doc.tags if a.get("id")=="plotly-library"])==1
+    assert all(not any(key in attrs for key in ("src","href")) for _,attrs in doc.tags)
+    assert not any(tag in ("iframe","img","object","link") for tag,_ in doc.tags)
+    texts="".join(doc.texts)
+    assert all(text in texts for text in ("Рубашки","Зима","01.01.2025","31.01.2025","24.09.2026"))
+    charts=json.loads(doc.chart_json)
+    assert len(charts)==19 and sum(bool(c["data"]) for c in charts)==17
+    assert {s["section"] for s in charts}=={0,1,2,3}
     for section in html.presentation(result):
         for block in section.blocks:
-            if block['kind'] == 'table':
-                assert all(header in texts for header in block['headers'])
-                assert all(cell['text'] in texts for row in block['rows'] for cell in row)
+            if block["kind"]=="table":
+                assert all(h in texts for h in block["headers"])
+                assert all(c["text"] in texts for row in block["rows"] for c in row)
 
 
-def test_presentation_cells_match_xlsx_source_values_and_formats(sample_result):
-    sections = html.presentation(complete_snapshot(sample_result))
-    assert sum(block['kind'] == 'table' for section in sections for block in section.blocks) == 61
-    cell = html._cell(xlsx._Numeric(Decimal('12345678901234567890.123456789'), '#,##0.00'))
-    assert cell == {'text': '12 345 678 901 234 567 890,12', 'sort': '12345678901234567890.123456789', 'kind': 'number'}
-    assert html._cell('000001')['text'] == '000001'
-    assert html._cell(None)['kind'] == 'empty'
-    assert html._cell(0)['text'] == '0'
-    assert html._cell(1e-10)['sort'] == '0.0000000001'
-    assert html._cell(xlsx._Numeric(Decimal('43.48'), xlsx.PERCENT_FORMAT))['text'] == '43,48 %'
-    age = next(spec for spec in html.chart_specs(complete_snapshot(sample_result)) if spec['title'] == 'Возрастные группы')
-    assert age['horizontal'] and age['data'][0]['orientation'] == 'h'
+
+def test_presentation_cells_match_gui_types_and_exact_sort_values(sample_result):
+    sections=html.presentation(complete_snapshot(sample_result))
+    assert [s.title for s in sections]==list(report.PAGE_LABELS)
+    model=report.report_presentation(complete_snapshot(sample_result))
+    assert sum(b["kind"]=="table" for s in sections for b in s.blocks)==sum(
+        b.kind=="table" for p in model.pages for g in p.groups for b in g.blocks)
+    cell=html._cell(xlsx._Numeric(Decimal("12345678901234567890.123456789"),"#,##0.00"))
+    assert cell==dict(text="12 345 678 901 234 567 890.12",sort="12345678901234567890.123456789",kind="number")
+    assert html._cell("000001")["text"]=="000001"
+    assert html._cell(None)["kind"]=="empty" and html._cell(0)["text"]=="0"
+    assert html._cell(1e-10)["sort"]=="0.0000000001"
+    assert html._cell(xlsx._Numeric(Decimal("43.48"),xlsx.PERCENT_FORMAT))["text"]=="43,48 %"
+    age=next(s for s in html.chart_specs(complete_snapshot(sample_result)) if s["title"]=="Возрастная структура клиентов")
+    assert not age["horizontal"] and age["data"][0]["type"]=="bar"
+
 
 
 def test_chart_numbers_currencies_ranking_and_full_stress_tables(sample_result):
@@ -87,12 +91,12 @@ def test_chart_numbers_currencies_ranking_and_full_stress_tables(sample_result):
     result['top_favorited_products'] = (('000001', 'Товар', 7, 2, 99, 1),) + result['top_favorited_products'][1:]
     result['order_monthly_dynamics'] = (('2025-01', 1, '12345678901234567890.12345', 2, '123.456'),)
     charts = html.chart_specs(result)
-    rub = next(s for s in charts if s['title'] == 'Сумма покупок - RUB')
-    kzt = next(s for s in charts if s['title'] == 'Сумма покупок - KZT')
+    rub = next(s for s in charts if s['title'] == 'Динамика суммы покупок — RUB')
+    kzt = next(s for s in charts if s['title'] == 'Динамика суммы покупок — KZT')
     assert rub['data'][0]['exact'] == ['12345678901234567890.12345']
-    assert '12 345 678 901 234 567 890,12' in rub['data'][0]['hovertext'][0]
+    assert '12 345 678 901 234 567 890,12345' in rub['data'][0]['hovertext'][0]
     assert kzt['data'][0]['exact'] == ['123.456']
-    fav = next(s for s in charts if s['title'] == 'Избранное товаров - Top-10')
+    fav = next(s for s in charts if s['title'] == 'Популярные товары по избранному')
     assert fav['data'][0]['exact'][0] == '7'
     assert 'Просмотры: 99' in fav['data'][0]['hovertext'][0]
     views = next(s for s in charts if s['title'] == 'Динамика просмотров')
@@ -105,25 +109,27 @@ def test_chart_numbers_currencies_ranking_and_full_stress_tables(sample_result):
     assert len(result['product_season_statistics']) == 60
     for row in result['top_purchased_products']:
         assert any(cells[0]['text'] == row[0] and cells[1]['text'] == row[1] for cells in table_rows)
-    collection = next(s for s in charts if s['title'] == 'Коллекции по покупкам - Top-10')
-    assert len(collection['data'][0]['x']) == 10
+    collection = next(s for s in charts if s['title'] == 'Спрос по сезону')
+    assert len(collection['data'][0]['x']) == 60
 
 
-@pytest.mark.parametrize('missing', [False, True])
-def test_empty_and_missing_profiles_never_create_fictitious_series(sample_result, missing):
-    result = empty_snapshot(sample_result, missing_profiles=missing)
-    assert all(not spec['data'] for spec in html.chart_specs(result))
-    text = html.build_statistics_html(result)
-    assert 'Нет данных для диаграммы.' in text
+@pytest.mark.parametrize("missing",[False,True])
+def test_empty_and_missing_profiles_never_create_fictitious_series(sample_result,missing):
+    result=empty_snapshot(sample_result,missing_profiles=missing)
+    assert all(not spec["data"] for spec in html.chart_specs(result))
+    text=html.build_statistics_html(result)
+    assert "Нет данных для диаграммы." in text
+    section=html.presentation(result)[3]
+    assert next(b for b in section.blocks if b["kind"]=="buyer_cards")["rows"][0][1]["kind"]==("empty" if missing else "number")
     if missing:
-        assert 'Данные профилей клиентов отсутствуют.' not in text
-        section = html.presentation(result)[4]
-        for index, block in enumerate(section.blocks):
-            if block['kind'] == 'table' and block['headers'][0] in ('Пол', 'Возрастная группа'):
-                fragment = text.split(f'<table id="table-4-{index}">', 1)[1].split('</table>', 1)[0]
-                assert fragment.count('Нет данных') == 2 * len(block['rows'])
-                assert '>0<' not in fragment
-    assert html.presentation(result)[4].blocks[0]['rows'][0][1]['kind'] == ('empty' if missing else 'number')
+        assert "Данные профилей клиентов отсутствуют." in text
+    # No export-only substitution of unavailable/zero demographics; shared GUI values are authoritative.
+    groups=report.report_presentation(result).pages[3].groups
+    expected=[report.table_cells(b) for b in groups[0].blocks if b.kind=="table"]
+    actual=[b["rows"] for b in section.blocks if b["kind"]=="table"][:len(expected)]
+    assert [[[c["text"] for c in row] for row in table] for table in actual]==[
+        [[c.text for c in row] for row in table] for table in expected]
+
 
 
 @pytest.mark.parametrize('attack', ['</script><script>window.PWNED=1</script>', '<img src=x onerror="alert(1)">',
@@ -141,9 +147,9 @@ def test_html_and_script_injection_never_create_markup(sample_result, attack):
     assert len([1 for tag, _ in doc.tags if tag == 'script']) == 4
     assert not any(tag == 'img' or any(key.startswith('on') for key in attrs) for tag, attrs in doc.tags)
     assert all(secret not in text for secret in ('SECRET-CUSTOMER', 'PRIVATE@example.test', 'PRIVATE-SOURCE', 'SECRET-TOKEN'))
-    chart = next(s for s in json.loads(doc.chart_json) if s['title'] == 'Просмотры товаров - Top-10')
+    chart = next(s for s in json.loads(doc.chart_json) if s['title'] == 'Популярные товары по просмотрам')
     assert '<script>' not in chart['data'][0]['hovertext'][0]
-    assert '000001' in chart['labels'][0]
+    assert '000001' in chart['data'][0]['hovertext'][0]
 
 
 def test_period_gaps_warnings_and_offline_whitelist(sample_result, monkeypatch):
@@ -156,8 +162,8 @@ def test_period_gaps_warnings_and_offline_whitelist(sample_result, monkeypatch):
     result['warnings'] = ('Canonical Customers отсутствует: число профилей неизвестно.',)
     monkeypatch.setattr(sqlite3, 'connect', lambda *args, **kwargs: pytest.fail('SQLite read'))
     text = html.build_statistics_html(result)
-    assert 'Статистика рассчитана за периоды:' not in text
-    assert '01.01.2024 - 01.02.2024; 01.01.2025 - 01.02.2025' in text
+    assert 'Статистика рассчитана за периоды:' in text
+    assert dict(report.report_presentation(result).header)['Период расчёта'] in text
     assert 'Данные клиентов отсутствуют: число профилей неизвестно.' not in text
 
 
@@ -180,7 +186,7 @@ def test_display_number_rounding_does_not_change_exact_value(value, expected):
         assert html.exact_number(number) == expected
     assert number == Decimal(value)
     assert html._cell(number)['sort'] == format(number, 'f')
-    assert html._cell(number)['text'] == expected
+    assert html._cell(number)['text'] == report.cell_presentation(number).text
 
 
 def test_html_typography_period_and_identifiers_are_presentation_only(sample_result):
@@ -192,15 +198,15 @@ def test_html_typography_period_and_identifiers_are_presentation_only(sample_res
     before = deepcopy(result)
     text = html.build_statistics_html(result)
     doc = Document(text)
-    assert 'Аналитический отчет' in text and 'Дата расчета' in text
-    assert 'Легкие' in text and 'Зимняя-Елка' in text and 'Теплый Еж - 2-5' in text
+    assert 'Статистика' in text and 'Дата расчёта' in text
+    assert 'Лёгкие' in text and 'Зимняя–Ёлка' in text and 'Тёплый Ёж — 2–5' in text
     assert code in text  # Identifiers are explicitly exempt from human text normalization.
-    assert '01.01.2025 - 31.01.2025' in text and 'Статистика рассчитана' not in text
+    assert '01.01.2025–31.01.2025' in text and 'Статистика рассчитана' in text
     assert 'UNIQUE-WARNING-NOT-FOR-EXPORT' not in text
     assert all(token not in text for token in ('class="note"', 'Предупреждения', 'row-count', 'Строк:', 'class="snapshot"'))
     charts = json.loads(doc.chart_json)
-    product = next(spec for spec in charts if spec['title'] == 'Просмотры товаров - Top-10')
-    assert code in product['labels'][0] and 'Теплый Еж - 2-5' in product['data'][0]['hovertext'][0]
+    product = next(spec for spec in charts if spec['title'] == 'Популярные товары по просмотрам')
+    assert code in product['data'][0]['hovertext'][0] and 'Тёплый Ёж — 2–5' in product['data'][0]['hovertext'][0]
     assert result == before
 
 
@@ -209,24 +215,24 @@ def test_split_charts_preserve_all_original_months_and_series(sample_result):
     result['action_monthly_dynamics'] = tuple((month, 1000000, 1, 2, 1) for month, *_ in result['action_monthly_dynamics'])
     result['order_monthly_dynamics'] = tuple((month, 100000, rub, 1, kzt) for month, _, rub, _, kzt in result['order_monthly_dynamics'])
     specs = html.chart_specs(result)
-    assert [sum(spec['section'] == section for spec in specs) for section in range(6)] == [6, 4, 6, 4, 4, 0]
+    assert [sum(spec['section'] == section for spec in specs) for section in range(5)] == [4, 6, 4, 5, 0]
     assert all(len(spec['data']) <= 1 for spec in specs)
-    for section in (0, 2):
+    for section in (1,):
         for currency, expected in (('RUB', '100000'), ('KZT', '1')):
-            spec = next(spec for spec in specs if spec['section'] == section and spec['title'] == f'Количество покупок - {currency}')
+            spec = next(spec for spec in specs if spec['section'] == section and spec['title'] == f'Динамика количества покупок — {currency}')
             assert spec['data'][0]['exact'] == [expected] * 72
     for title, expected in (('Динамика просмотров', '1000000'), ('Динамика избранного', '2')):
         spec = next(spec for spec in specs if spec['section'] == 0 and spec['title'] == title)
         assert spec['data'][0]['exact'] == [expected] * 72
-    assert all(not any(char in spec['title'] for char in 'ёЁ—–') for spec in specs)
+    assert all(spec['title'] for spec in specs)  # Keep the approved GUI typography, including ё and dashes.
 
 
-def test_unavailable_period_and_raw_machine_labels(sample_result):
-    result = deepcopy(sample_result)
-    result['coverage'] = tuple(dict(source, intervals=()) for source in result['coverage'])
-    assert html.period_text(result) == 'Не указан'
-    section = html._Section()
-    section.table(('Код', 'Название'), [('00Ё–', 'Ёлка–товар')])
-    assert section.blocks[0]['rows'][0][0]['text'] == '00Ё–'
-    assert section.blocks[0]['rows'][0][1]['text'] == 'Елка-товар'
-    assert section.blocks[0]['rows'][0][1]['sort'] == 'Ёлка–товар'
+def test_unavailable_period_and_unicode_identifiers(sample_result):
+    result=deepcopy(sample_result)
+    result["coverage"]=tuple(dict(source,intervals=()) for source in result["coverage"])
+    assert html.period_text(result)=="Не указан"
+    block=report.ReportBlock("table",headers=("Код","Название"),rows=(("00Ё–","Ёлка–товар"),))
+    projected=html._project_block(block)
+    assert projected["rows"][0][0]["text"]=="00Ё–"
+    assert projected["rows"][0][1]["text"]=="Ёлка–товар"
+    assert projected["rows"][0][1]["sort"]=="Ёлка–товар"

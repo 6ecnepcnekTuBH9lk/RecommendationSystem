@@ -14,27 +14,18 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from Application.statistics_presentation import (
-    SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING, source_action_rows, source_action_quality_rows,
-    SOURCE_EVENT_QUALITY_HEADING, SOURCE_EVENT_QUALITY_NOTES, RESOLUTION_NOTES, source_event_quality_rows,
-    CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows,
-    CUSTOMER_SCOPE_NOTES, customer_scope_sections, customer_scope_context,
-    PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL,
-    buyer_sections,
+    CATEGORY_HEADERS,
 )
-from Application.analysis_filter import AnalysisFilter
-from Application.statistics_rfm_presentation import rfm_sections
-from Application.statistics_cohorts_presentation import cohort_sections
+from Application import statistics_report_presentation as report
 from Application.statistics_cache import parse_timestamp
-from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, DIAGNOSTIC_LABELS,
-                                                 _date, _date_time, _calculation_message)
 
 
-SHEET_NAMES = ("Сводка", "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация", "RFM-анализ", "Когортный анализ")
+SHEET_NAMES = report.PAGE_LABELS
 INK = "242424"
 HEADER_FILL = "D6E5F2"
 SECTION_FILL = "EAF1F7"
 BORDER_COLOR = "BDCCDA"
-PERCENT_FORMAT = '0.00"%"'  # Snapshot percentages are already on the 0..100 scale.
+PERCENT_FORMAT = '#,##0.00" %"'  # Snapshot percentages are already on the 0..100 scale.
 MAX_ROW_HEIGHT = 96
 ROW_HEIGHT = 21
 
@@ -55,8 +46,9 @@ def _decimal(value, *, money=True):
 class _Sheet:
     """Plain metric/data tables; no charts, navigation or presentation tiles."""
 
-    def __init__(self, worksheet):
+    def __init__(self, worksheet, check=lambda: None):
         self.ws = worksheet
+        self.check = check
         self.row = 1
         self.max_columns = 2
         self.ws.sheet_view.showGridLines = True
@@ -81,10 +73,17 @@ class _Sheet:
 
     def _cell(self, row, column, value, *, header=False, fmt=None):
         cell = self.ws.cell(row, column)
-        if isinstance(value, _Numeric):
+        if isinstance(value, report.ReportCell):
+            value, fmt = value.value if value.kind != "empty" else value.text, value.number_format
+        elif isinstance(value, report.ReportNumber):
+            cell_data = report.cell_presentation(value)
+            value, fmt = cell_data.value, cell_data.number_format
+        elif isinstance(value, _Numeric):
             value, fmt = value.value, value.number_format
         cell.value = value
         if isinstance(value, str):
+            if len(value) > 32767:
+                raise ValueError("Значение превышает лимит ячейки XLSX (32767 символов).")
             cell.data_type = "s"  # Also protects =, +, -, @ labels and leading-zero SKUs.
             fmt = "@"
         cell.number_format = fmt or ("dd.mm.yyyy" if isinstance(value, date) else
@@ -99,10 +98,11 @@ class _Sheet:
         return cell
 
     def write(self, values, *, header=False, section=False, formats=None):
+        self.check()
         height = ROW_HEIGHT
         for column, value in enumerate(values, 1):
             fmt = (formats or {}).get(column)
-            if not header and column == 2 and isinstance(values[0], str) and values[0].startswith("Доля"):
+            if not header and column == 2 and isinstance(values[0], str) and "%" in values[0] and not isinstance(value, report.ReportCell):
                 fmt = PERCENT_FORMAT
             cell = self._cell(self.row, column, value, header=header, fmt=fmt)
             if section:
@@ -126,7 +126,7 @@ class _Sheet:
         self.write(headers, header=True)
         formats = {i: PERCENT_FORMAT for i, label in enumerate(headers, 1) if "%" in label}
         for values in rows:
-            if tuple(headers) == CATEGORY_HEADERS and len(values[2]) > 32767:
+            if tuple(headers) == CATEGORY_HEADERS and len(values[2].value if isinstance(values[2], report.ReportCell) else values[2]) > 32767:
                 raise ValueError("Путь категории превышает лимит ячейки XLSX (32767 символов).")
             self.write(values, formats=formats)
         last = self.row - 1
@@ -156,320 +156,102 @@ class _Sheet:
 
 
     def cards(self, values):
-        self.table(["Показатель", "Значение"], [
-            (label, _Numeric(Decimal(str(value)), PERCENT_FORMAT)
-             if label.startswith("Доля") and value is not None and not isinstance(value, str) else value)
-            for label, value in values])
+        block = report.ReportBlock("cards", values=tuple(values))
+        self.table(("Показатель", "Значение"), [(label, cell) for label, cell in report.kpi_cells(block)])
 
     def buyer_cards(self, values):
         self.cards(values)
 
-
-def _selection_values(values):
-    return "Все значения" if values is None else "; ".join("Не указано" if v is None else v for v in values)
-
-
-def _summary(sheet, result):
-    selection = AnalysisFilter.from_dict(result["analysis_filter"])
-    metadata = [
-        ("Период расчета", _calculation_message(result)),
-        ("Дата и время расчета", _date_time(result["calculated_at"])),
-        ("Вид номенклатуры", _selection_values(selection.nomenclature_types)),
-        ("Сезон", _selection_values(selection.collections)),
-    ]
-    metadata = [(label, (f"Выбрано значений: {len(selection.nomenclature_types if label == 'Вид номенклатуры' else selection.collections)}. "
-                          "Полный список: лист «Техническая информация».")
-                 if label in ("Вид номенклатуры", "Сезон") and isinstance(value, str) and len(value) > 500 else value)
-                for label, value in metadata]
-    sheet.table(["Параметр отчёта", "Значение"], metadata)
-    sheet.heading("Основные показатели")
-    main = (
-        ("Количество взаимодействий", "total_interactions"), ("Количество заказов", "orders"),
-        ("Количество позиций в заказах", "order_lines"), (PROFILE_SLICE_LABEL, "customers"),
-        (ITEM_CLIENTS_LABEL, "interaction_users"), ("Покупатели", "purchase_users"),
-        ("Повторные покупатели", "repeat_buyers"), ("Доля повторных покупателей", "repeat_buyer_rate"))
-    sheet.cards([(label, result[key] if result[key] is not None else "Нет данных") for label, key in main])
 
 
 def suggested_filename(result):
     return "Статистика_" + parse_timestamp(result["calculated_at"]).strftime("%Y-%m-%d_%H-%M-%S") + ".xlsx"
 
 
-def export_statistics(result, path):
-    """Save the displayed snapshot atomically, leaving an old destination intact on failure.
-
-    Decimal values are passed directly to openpyxl. Excel numeric cells retain
-    Excel's native precision limit; formatting never converts numbers to text.
-    """
-    destination = Path(path)
+def write_statistics_xlsx(result, stream, *, check=lambda: None, workspace=None, snapshot_diagnostics=None, presentation=None):
+    """The exact five GUI pages; no report-only analytics or chart duplicates."""
+    model = presentation if presentation is not None else report.report_presentation(result,snapshot_diagnostics=snapshot_diagnostics)
     book = Workbook()
     book.remove(book.active)
+    try:
+        for page in model.pages:
+            check()
+            sheet = _Sheet(book.create_sheet(page.title),check)
+            sheet.table(("Параметр отчёта", "Значение"), model.header)
+            sheet.cards(model.global_cards)
+            for group in page.groups:
+                if page.key == "customers":
+                    sheet.heading(group.title)
+                for block in group.blocks:
+                    check()
+                    if block.kind == "heading":
+                        sheet.heading(block.title)
+                    elif block.kind == "cards":
+                        sheet.table(("Показатель", "Значение"),
+                                    [(label, cell) for label, cell in report.kpi_cells(block)])
+                    elif block.kind == "table":
+                        sheet.table(block.headers, report.table_cells(block))
+                    elif block.kind == "text":
+                        sheet.write((block.title,))
+                    # Adjacent approved tables already contain all plotted values,
+                    # including six RFM combinations and the numeric retention matrix.
+            sheet.finish()
+        check()
+        if workspace is None:
+            _save_report_book(book,stream,check)
+        else:
+            from Application.statistics_detail_xlsx import save_aggregate_book
+            save_aggregate_book(book, stream, workspace)
+        check()
+    finally:
+        book.close()
+
+
+def _save_report_book(book, stream, check):
+    """Aggregate sheets only: one in-memory XML buffer, no individual/temp XML."""
+    from io import BytesIO
+    from zipfile import ZipFile, ZIP_DEFLATED
+    from openpyxl.writer.excel import ExcelWriter
+    from openpyxl.worksheet._writer import WorksheetWriter
+    from openpyxl.drawing.spreadsheet_drawing import SpreadsheetDrawing
+    class ReportWriter(ExcelWriter):
+        def write_worksheet(self, sheet):
+            sheet._drawing=SpreadsheetDrawing()
+            sheet._drawing.charts=sheet._charts
+            sheet._drawing.images=sheet._images
+            with BytesIO() as xml:
+                writer=WorksheetWriter(sheet,out=xml)
+                original=writer.write_row
+                def row(*args,**kwargs):
+                    check()
+                    return original(*args,**kwargs)
+                writer.write_row=row
+                try:
+                    writer.write()
+                    sheet._rels=writer._rels
+                    xml.seek(0)
+                    with self._archive.open(sheet.path[1:],"w",force_zip64=True) as member:
+                        while chunk:=xml.read(64*1024):
+                            check()
+                            member.write(chunk)
+                    self.manifest.append(sheet)
+                finally:
+                    writer.close()
+    with ZipFile(stream,"w",ZIP_DEFLATED,allowZip64=True) as archive:
+        ReportWriter(book,archive).write_data()
+
+
+def export_statistics(result, path):
+    """Atomic public XLSX API; the stream renderer is also used by unified ZIP."""
+    destination = Path(path)
     temporary = None
     try:
-        sheets = [_Sheet(book.create_sheet(name)) for name in SHEET_NAMES]
-        _summary(sheets[0], result)
-        _actions_page(sheets[1], result)
-        _orders_page(sheets[2], result)
-        _products_page(sheets[3], result)
-        _clients_technical(sheets[4], sheets[5], result)
-        _rfm_page(sheets[6], result)
-        _cohorts_page(sheets[7], result)
-        for sheet in sheets:
-            sheet.finish()
         with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".statistics-", suffix=".xlsx", delete=False) as stream:
             temporary = Path(stream.name)
-            book.save(stream)
+            write_statistics_xlsx(result, stream)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
     finally:
-        book.close()
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-
-
-def _rfm_page(sheet, result):
-    def value(v):
-        return _Numeric(v, '#,##0.00') if isinstance(v, Decimal) else v
-    for title, cards, tables, notes in rfm_sections(result):
-        sheet.heading(title)
-        if cards:
-            sheet.buyer_cards([(label,value(v)) for label,v in cards])
-        for headers, rows in tables:
-            sheet.table(headers, [tuple(value(v) for v in row) for row in rows])
-        if notes:
-            sheet.table(['Пояснение RFM','Определение'],notes)
-
-
-def _cohorts_page(sheet, result):
-    for title, cards, tables, notes in cohort_sections(result, include_extended=True):
-        sheet.heading(title)
-        if cards:
-            sheet.buyer_cards(cards)
-        for headers, rows in tables:
-            sheet.table(headers, rows)
-        if notes:
-            sheet.table(['Пояснение когорт', 'Определение'], notes)
-
-
-def _actions_page(layout, result):
-    table = layout.table
-
-    layout.cards([("Просмотры товаров", result["view_interactions"]),
-                    ("Добавления в избранное", result["favorite_interactions"]),
-                    ("Клиенты с просмотрами", result["view_users"]),
-                    ("Клиенты с избранным", result["favorite_users"])])
-    layout.heading(SOURCE_EVENT_QUALITY_HEADING)
-    quality = source_event_quality_rows(result)
-    layout.cards([(name, "Нет данных" if value is None else value) for name, value in quality[6:7]])
-    table(["Показатель", "Значение"],
-          [(name, "Нет данных" if value is None else value) for name, value in quality[:6] + quality[7:]])
-    table(["Пояснение", "Определение"], SOURCE_EVENT_QUALITY_NOTES)
-    layout.heading("Активность клиентов")
-    table(["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"], [
-        ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
-        ("Добавления в избранное", result["favorite_interactions"], result["favorite_users"],
-         result["mean_favorites_per_user"], result["median_favorites_per_user"])])
-    table(["Количество просмотров", "Количество клиентов", "Доля, %"], result["view_user_activity_distribution"])
-    table(["Количество избранного", "Количество клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
-    layout.heading("Каналы взаимодействий")
-    table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
-                    "Избранное", "Клиенты с избранным", "Доля избранного, %"],
-           [row[1:] for row in result["action_channel_statistics"]])
-    layout.heading("Динамика действий")
-    table(["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
-           [(month[5:] + "." + month[:4], *values) for month, *values in result["action_monthly_dynamics"]])
-    layout.heading("Параметры просмотров")
-    table(["Доступность", "Просмотров", "Доля, %"], result["view_availability_distribution"])
-    table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
-           [(currency, n, _decimal(mean), _decimal(middle))
-            for currency, n, mean, middle in result["view_price_statistics"]])
-
-
-def _orders_page(layout, result):
-    table = layout.table
-
-    layout.cards([("Заказы с покупкой", result["purchase_orders"]),
-                    ("Невыкупленные заказы", result["orders_without_purchase"]),
-                    ("Позиции покупок", result["purchase_interactions"]), ("Покупатели", result["purchase_users"])])
-    layout.heading("Корзина заказа")
-    basket_rates = {label: rate for label, _, rate in result["purchase_basket_distribution"]}
-    layout.cards([("Среднее число позиций на заказ", result["mean_purchase_lines_per_order"]),
-                    ("Медиана числа позиций на заказ", result["median_purchase_lines_per_order"]),
-                    ("Доля заказов с 1 позицией", basket_rates["1 позиция"]),
-                    ("Доля заказов с 3+ позициями", sum(basket_rates[key] for key in ("3–5 позиций", "6–10 позиций", "11+ позиций")))])
-    table(["Количество позиций", "Заказов", "Доля, %"], result["purchase_basket_distribution"])
-    layout.heading("Финансовые показатели")
-    table(["Валюта", "Заказов", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа", "Медианная сумма заказа"],
-           [(currency, n, lines, _decimal(units, money=False), *(_decimal(v) for v in (amount, mean, median)))
-            for currency, n, lines, units, amount, mean, median in result["order_financials"]])
-    mixed, unknown = result["mixed_currency_purchase_orders"], result["unknown_currency_purchase_orders"]
-    if mixed or unknown:
-        layout.cards([("Заказы со смешанной валютой", mixed), ("Заказы с неопределённой валютой", unknown)])
-    layout.heading("Динамика покупок")
-    table(["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
-           [(month[5:] + "." + month[:4], rub_n, _decimal(rub), kzt_n, _decimal(kzt))
-            for month, rub_n, rub, kzt_n, kzt in result["order_monthly_dynamics"]])
-    for currency in ("RUB", "KZT"):
-        layout.heading("Магазины и каналы — " + currency)
-        table(["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
-               [(name, n, buyers, lines, _decimal(units, money=False), _decimal(amount), _decimal(mean))
-                for unit, key, name, n, buyers, lines, units, amount, mean in result["store_statistics"] if unit == currency])
-    layout.heading("Оплата")
-    table(["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"], result["payment_type_distribution"])
-    layout.heading("Статусы позиций")
-    table(["Статус", "Позиции", "Доля, %", "Считается покупкой"],
-           [(name, count, 100 * count / result["order_lines"] if result["order_lines"] else 0, "Да" if purchase else "Нет")
-            for name, count, purchase in result["line_statuses"]])
-
-
-def _products_page(layout, result):
-    table = layout.table
-
-    def group(first, field):
-        table([first, "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
-              [(*row[:5], _decimal(row[5], money=False)) for row in result[field]])
-
-    layout.cards([("Товары с взаимодействиями", result["unique_resolved_items"]),
-                    ("Товары с просмотрами", result["products_with_views"]),
-                    ("Товары в избранном", result["products_with_favorites"]),
-                    ("Купленные товары", result["products_with_purchases"])])
-    layout.heading("Популярные товары по просмотрам")
-    table(["Код", "Название", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Покупки"],
-          result["top_viewed_products"])
-    layout.heading("Популярные товары по избранному")
-    table(["Код", "Название", "Добавления в избранное", "Клиенты с избранным", "Просмотры", "Покупки"],
-          result["top_favorited_products"])
-    layout.heading("Популярные товары по покупкам")
-    table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
-          [(*row[:4], _decimal(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
-    layout.heading("Категории товаров")
-    table(["Пояснение", "Определение"], [("Прямые категории", DIRECT_CATEGORY_NOTE)])
-    table(CATEGORY_HEADERS,
-          [(*row[:7], _decimal(row[7], money=False)) for row in product_category_rows(result)])
-    for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
-                         ("Спрос по стилевой группе", "product_style_statistics")):
-        layout.heading(title)
-        group("Значение", field)
-    layout.heading("Качество сопоставления")
-    table(["Пояснение", "Определение"], RESOLUTION_NOTES)
-    table(["Показатель", "Значение"], [
-        ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
-        ("Уникальные распознанные товары", result["unique_resolved_items"]),
-        ("Распознанные взаимодействия", result["resolved_interactions"]),
-        ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-        ("Доля распознанных, %", result["resolution_rate"])])
-    table(["Система идентификаторов", "Взаимодействия", "Распознано", "Не распознано", "Доля распознанных, %"],
-          [("Неподдерживаемая" if name == "unsupported" else name, total, resolved, unresolved, rate)
-           for name, total, resolved, unresolved, rate in result["namespaces"]])
-
-
-def _clients_technical(customers, technical, result):
-    coverage = []
-    for source in result["coverage"]:
-        period = "; ".join(f"{_date(a)} — {_date(b)}" for a, b in source["intervals"])
-        if not period and source["updated"]:
-            period = "Снимок данных от " + _date_time(source["updated"])
-        coverage.append((SOURCE_LABELS[source["source"]], period or "—",
-                         "/".join(SOURCE_KIND_LABELS.get(kind, kind) for kind in source["source_kinds"]) or "—"))
-    technical.table(["Источник", "Период / состояние", "Источник данных"], coverage)
-    filtered = AnalysisFilter.from_dict(result["analysis_filter"]).active
-    base = [("Количество взаимодействий", result["total_interactions"]), ("Заказы", result["orders"]),
-            ("Позиции заказов", result["order_lines"]), ("Профили клиентов", result["customers"]),
-            ("Просмотры", result["view_interactions"]),
-            ("Добавления в избранное", result["favorite_interactions"]),
-            ("Покупки", result["purchase_interactions"]),
-            ("Клиенты с взаимодействиями", result["interaction_users"]),
-            ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
-            ("Уникальные распознанные товары", result["unique_resolved_items"]),
-            ("Распознанные взаимодействия", result["resolved_interactions"]),
-            ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-            ("Доля распознанных, %", result["resolution_rate"])]
-    technical.table(["Показатель", "Значение"], base)
-    technical.heading(SOURCE_ACTIONS_HEADING)
-    technical.table(["Системное название", "Количество", "Доля, %"], source_action_rows(result))
-    technical.heading(ACTION_QUALITY_HEADING)
-    technical.table(["Классификация событий", "Количество"], source_action_quality_rows(result))
-    customers.cards([(PROFILE_SLICE_LABEL, result["customers"]),
-                      (ITEM_CLIENTS_LABEL, result["interaction_users"]),
-                      ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
-    for title, rows in customer_scope_sections(result):
-        customers.heading(title)
-        customers.cards(rows)
-    customers.table(['Пояснение', 'Определение'], [('Период и полнота', customer_scope_context(result)), *CUSTOMER_SCOPE_NOTES])
-    customers.heading("Портрет клиента")
-    customers.table(["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
-    customers.cards([("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
-    customers.table(["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
-    customers.heading("Активность клиентов")
-    customers.table(["Показатель", "Значение"], [
-        ("Клиенты с просмотрами", result["view_users"]),
-        ("Клиенты с добавлениями в избранное", result["favorite_users"]),
-        ("Клиенты с покупками", result["purchase_users"]),
-        ("Клиенты с просмотрами и покупками", result["view_purchase_users"]),
-        ("Клиенты с избранным и покупками", result["favorite_purchase_users"]),
-        ("Клиенты со всеми типами взаимодействий", result["all_interaction_type_users"]),
-        ("Среднее число взаимодействий на активного клиента", result["mean_interactions"]),
-        ("Медиана числа взаимодействий на активного клиента", result["median_interactions"]),
-        ("Доля активных клиентов, совершивших покупку, %", result["active_buyer_rate"])])
-    customers.table(["Количество взаимодействий", "Клиентов", "Доля, %"], result["interaction_activity_distribution"])
-    customers.heading("Покупательская активность")
-    customers.table(["Количество заказов", "Покупателей", "Доля покупателей, %"], result["purchase_order_distribution"])
-    customers.table(["Показатель", "Значение"], [
-        ("Среднее число заказов на покупателя", result["mean_orders_per_buyer"]),
-        ("Медиана числа заказов на покупателя", result["median_orders_per_buyer"]),
-        ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
-    def buyer_value(value):
-        return _Numeric(value, '#,##0.00') if isinstance(value, Decimal) else value
-    for title, cards, tables, notes in buyer_sections(result):
-        customers.heading(title)
-        if cards:
-            customers.buyer_cards([(label, buyer_value(value)) for label, value in cards])
-        for headers, rows in tables:
-            customers.table(headers, [tuple(buyer_value(value) for value in row) for row in rows])
-        if notes:
-            customers.table(['Пояснение покупательской аналитики', 'Определение'], notes)
-    technical.table(["Диагностика", "Количество"],
-           [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
-           + [("Заказы выбранного среза" if filtered else "Исходные заказы", result["orders"]),
-              ("Позиции заказов выбранного среза" if filtered else "Исходные позиции заказов", result["order_lines"]),
-              ("Распознанные взаимодействия", result["resolved_interactions"]),
-              ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-              ("Доля распознанных, %", result["resolution_rate"])])
-    _additional_details(technical, result)
-
-
-def _additional_details(sheet, result):
-    """Retain aggregate DTO fields beyond the GUI's compact selection; no raw identities."""
-    sheet.heading("Дополнительные агрегаты snapshot")
-    sheet.cards([(label, result[key]) for label, key in (
-        ("Клиенты исходных Actions", "action_customers"), ("Клиенты исходных Orders", "order_customers"),
-        ("Просмотры с параметрами", "view_parameter_actions"),
-        ("Распознанные просмотры", "resolved_view_interactions"),
-        ("Распознанное избранное", "resolved_favorite_interactions"),
-        ("Распознанные позиции покупок", "resolved_purchase_interactions"),
-    )] + [(label, _decimal(result[key], money=False)) for label, key in (
-        ("Куплено единиц", "purchase_quantity"), ("Куплено распознанных единиц", "resolved_purchase_quantity"),
-        ("Среднее число единиц на заказ", "mean_purchase_units_per_order"),
-        ("Медиана числа единиц на заказ", "median_purchase_units_per_order"))])
-    for title, field in (("Способы оформления", "ordering_method_distribution"),
-                         ("Способы доставки", "delivery_type_distribution")):
-        sheet.heading(title)
-        sheet.table(["Значение", "Заказов", "Доля, %"], result[field])
-    sheet.heading("Стоимость доставки по валютам")
-    sheet.table(["Валюта", "Заказов с ценой доставки", "Сумма доставки", "Средняя стоимость", "Медианная стоимость"],
-                [(currency, count, *(_decimal(value) for value in amounts))
-                 for currency, count, *amounts in result["delivery_financials"]])
-    sheet.heading("Товары по всем взаимодействиям")
-    sheet.table(["Код", "Название", "Просмотры", "Избранное", "Покупки", "Все взаимодействия"], result["top_products"])
-    selection = AnalysisFilter.from_dict(result["analysis_filter"])
-    sheet.heading("Параметры отбора snapshot")
-    sheet.table(["Параметр отбора", "Выбранное значение"], [
-        (label, "Не указано" if value is None else value)
-        for label, values in (("Вид номенклатуры", selection.nomenclature_types), ("Сезон", selection.collections))
-        for value in (("Все значения",) if values is None else values)])
-    sheet.cards([
-        ("Отбор, по которому рассчитана статистика", selection.summary()),
-        ("Дата начала", date.fromisoformat(selection.start_date) if selection.start_date else "Все значения"),
-        ("Дата окончания", date.fromisoformat(selection.end_date) if selection.end_date else "Все значения"),
-    ])

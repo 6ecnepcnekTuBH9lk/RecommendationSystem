@@ -15,7 +15,7 @@ from Application import dataset_statistics as statistics, statistics_cache as ca
 from Application import statistics_export as xlsx, statistics_html_export as html
 from Application import statistics_slices
 from Application.mindbox import raw_reader
-from Application.statistics_presentation import buyer_sections, BUYER_LEGACY_TEXT
+from Application.statistics_presentation import buyer_sections, grouped_buyer_sections, CUSTOMER_GROUP_ORDER, BUYER_LEGACY_TEXT
 from Application.tabs import dataset_statistics_tab as ui
 from Application.theme.apply_theme import apply_app_theme
 from tests.test_statistics_buyer_aggregates import dataset, AT, aggregate, purchase, save
@@ -81,25 +81,31 @@ def test_saved_buyer_blocks_gui_xlsx_html_parity_no_sources(dataset,window,tmp_p
         xlsx.export_statistics(result,xlsx_path)
         rendered = html.build_statistics_html(result)
     assert result == original and path.read_bytes() == payload
-    sections = buyer_sections(result)
+    sections = buyer_sections(result, compact=True)
     page = tab.sections.widget(3)
     labels = [label.text() for label in page.findChildren(QLabel)]
     assert all(title.upper() in labels for title,_,_,_ in sections)
-    buyer_table_count = sum(len(tables) for _,_,tables,_ in buyer_sections(result))
-    gui_tables = page.findChildren(QTableWidget)[9:9+buyer_table_count]
+    offsets = {"overview": 7, "purchases": 2, "money": 0}
+    gui_tables = []
+    for group, (_, _, tables, _) in grouped_buyer_sections(result, compact=True):
+        group_page = tab.customer_sections.widget(CUSTOMER_GROUP_ORDER.index(group))
+        count = len(tables)
+        gui_tables.extend(group_page.findChildren(QTableWidget)[offsets[group]:offsets[group]+count])
+        offsets[group] += count
     expected_tables = [(headers,rows) for _,_,tables,_ in sections for headers,rows in tables]
     assert len(gui_tables) == len(expected_tables)
     for table,(headers,rows) in zip(gui_tables,expected_tables):
         assert [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] == list(headers)
         assert [[table.item(r,c).text() for c in range(table.columnCount())] for r in range(table.rowCount())] == [
-            [ui._number(ui._buyer_display(v)) for v in row] for row in rows]
+            [ui._cell_text(v, display=ui._buyer_display, percentage="%" in headers[c] or (c > 0 and "%" in str(row[0])))
+             for c,v in enumerate(row)] for row in rows]
         assert all(table.rowHeight(r) >= table.sizeHintForRow(r) for r in range(table.rowCount()))
     book = load_workbook(xlsx_path)
     try:
         sheet = list(book['Клиенты'].values)
-        html_sections = html.presentation(result)[4]
-        html_rows = [r for block in html_sections.blocks if block['kind']=='table' for r in block['rows']]
-        for title,cards,tables,notes in sections:
+        html_sections = html.presentation(result)[3]
+        html_rows = [r for block in html_sections.blocks if block['kind'] in ('table','buyer_cards') for r in block['rows']]
+        for title,cards,tables,notes in buyer_sections(result,compact=True):
             assert any(row[0] == title for row in sheet)
             assert html.display_text(title) in rendered
             for label,value in cards:
@@ -112,13 +118,13 @@ def test_saved_buyer_blocks_gui_xlsx_html_parity_no_sources(dataset,window,tmp_p
             for headers,rows in tables:
                 assert any(tuple(row[:len(headers)])==tuple(headers) for row in sheet)
                 for values in rows:
-                    expected = [html._cell(v)['text'] for v in values]
+                    expected = [ui.report.cell_presentation(ui.report._buyer_display(v), percentage=ui.report.percentage_cell(headers,values,c)).text for c,v in enumerate(values)]
                     assert any([cell['text'] for cell in candidate]==expected for candidate in html_rows)
             assert all(html._cell(text)['text'] in rendered for _,text in notes)
         if scenario == 'legacy':
             assert BUYER_LEGACY_TEXT in rendered
         elif scenario not in ('no_orders','no_coverage'):
-            assert 'buyer-kpis' in rendered
+            assert 'class="kpis"' in rendered
             assert not any(token in rendered for token in ('"customer_id"','"order_id"','identity_space'))
     finally:
         book.close()

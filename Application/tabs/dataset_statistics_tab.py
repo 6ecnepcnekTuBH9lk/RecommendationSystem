@@ -1,54 +1,48 @@
 """Statistics presentation and subprocess lifecycle; no raw-data business rules."""
 
 import json
-import logging
+from copy import deepcopy
+import math
+import re
 import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt, pyqtSignal, QObject, QRunnable, QThreadPool, QStandardPaths
+from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import (
-    QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-    QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog, QMessageBox, QDialog,
-)
+from PyQt6.QtWidgets import QApplication as QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog as QFileDialog, QMessageBox
 
-from Application.statistics_presentation import (
-    SOURCE_ACTIONS_HEADING as SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING as ACTION_QUALITY_HEADING,
-    source_action_rows, source_action_quality_rows,
-    SOURCE_EVENT_QUALITY_HEADING, SOURCE_EVENT_QUALITY_NOTES, RESOLUTION_NOTES, source_event_quality_rows,
-    CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows,
-    CUSTOMER_SCOPE_NOTES, customer_scope_sections, customer_scope_context,
-    PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL,
-    buyer_sections,
-)
+from Application.statistics_presentation import SOURCE_ACTIONS_HEADING as SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING as ACTION_QUALITY_HEADING, source_event_quality_display_rows as source_event_quality_display_rows, CATEGORY_HEADERS as CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE as DIRECT_CATEGORY_NOTE, product_category_rows as product_category_rows, customer_scope_sections as customer_scope_sections, PROFILE_SLICE_LABEL, CUSTOMER_GROUP_ORDER
 from Application import statistics_charts as charts
-from Application.statistics_rfm_presentation import rfm_sections
-from Application.statistics_cohorts_presentation import cohort_sections, cohort_display
+from Application import statistics_report_presentation as report
+from Application.statistics_analytics_charts import analytics_chart, RfmSegmentsWidget, CohortRetentionHeatmap
+from Application.statistics_rfm_presentation import rfm_sections as rfm_sections
+from Application.statistics_cohorts_presentation import cohort_sections as cohort_sections, cohort_display as cohort_display
 from Application.loading_errors import format_error
-from Application.paths import ICONS_DIR, PROJECT_ROOT
+from Application.paths import ICONS_DIR as ICONS_DIR, PROJECT_ROOT as PROJECT_ROOT
 from Application.analysis_filter import AnalysisFilter
 from Application.analysis_filter_settings import load_filter
-from Application.settings.set_status import set_status_processing, schedule_status_reset, set_status_ok, set_status_error
-from Application.statistics_bundle_export import export_statistics_bundle, suggested_filename
+from Application.settings.set_status import set_status_processing, schedule_status_reset
 from Application.statistics_detail_process import DetailExportProcess
-from Application.statistics_detail_job import ERRORS as DETAIL_ERRORS, STAGES as DETAIL_STAGES, inspect_sources
-from Application.tabs.statistics_detail_dialog import DetailExportDialog
-from Application.mindbox.raw_reader import DEFAULT_RAW_ROOT
-from Application.statistics_cache import CACHE_PATH, load_result, save_result, validate_result
-from Application.statistics_presentation import (SOURCE_LABELS, SOURCE_KIND_LABELS, WARNING_LABELS, DIAGNOSTIC_LABELS,
-                                                 _date, _date_time, _calculation_message)
-from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING, PAGE_MARGIN
+from Application.statistics_detail_job import ERRORS as DETAIL_ERRORS, STAGES as DETAIL_STAGES, validate_report_destination
+from Application.statistics_bundle_export import suggested_filename as suggested_report_filename
+from Application.statistics_cache import CACHE_PATH as CACHE_PATH, load_result, save_result, validate_result
+from Application.statistics_presentation import WARNING_LABELS as WARNING_LABELS, DIAGNOSTIC_LABELS as DIAGNOSTIC_LABELS, _date, _calculation_message as _calculation_message
+from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING as CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING as SECTION_SPACING, PAGE_MARGIN
 
 
 SOURCE_DESCRIPTION = "Исходные данные Mindbox. Отбор не установлен."
 PROCESSING_STATUS = "Расчет статистики..."
 PROGRESS_LABELS = {"actions": "Действия", "orders": "Заказы", "customer_merges": "Объединения клиентов"}
 
+CUSTOMER_TAB_LABELS = report.CUSTOMER_TAB_LABELS
+
+
 
 def _number(value):
+    if isinstance(value, report.ReportNumber):
+        return report.number_text(value)
     if value is None:
         return "—"
     if isinstance(value, float):
@@ -85,12 +79,133 @@ def _section_heading(layout, title):
     return section
 
 
+class _NumericText(str):
+    """Keep numeric alignment when an existing display helper returns text."""
+
+
+def _numeric(value, *, percentage=False):
+    if isinstance(value, (int, float, Decimal, _NumericText, report.ReportNumber)) and not isinstance(value, bool):
+        return True
+    # A known percent field may already be formatted by a saved presentation.
+    # Recognize its text without parsing/rounding it or treating identifiers as numbers.
+    return percentage and isinstance(value, str) and re.fullmatch(r"[+-]?\d[\d ]*(?:[.,]\d+)?\s*%?", value) is not None
+
+
+def _cell_text(value, *, display=None, percentage=False):
+    shown = display(value) if display else value
+    return report.cell_presentation(shown, percentage=percentage, numeric_hint=_numeric(value)).text
+
+
 class _StatisticsTable(QTableWidget):
-    """Fit short tables to their rows, keeping long tables scrollable."""
+    """Fit short tables; retain readable columns and bounded long tables."""
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._base_widths = []
+        self._minimum_widths = []
+        self._flex_column = 0
+        self._last_minimum = 0
+        self._adjusting_columns = False
+        self._sizing_rows = False
+        self._row_timer = QTimer(self)
+        self._row_timer.setSingleShot(True)
+        self._row_timer.timeout.connect(self.size_rows)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.horizontalHeader().sectionResized.connect(self._column_resized)
+
+    def size_rows(self):
+        if self._sizing_rows:
+            return
+        self._row_timer.stop()
+        self._sizing_rows = True
+        try:
+            minimum = self.fontMetrics().height() + 2 * CONTROL_SPACING
+            self.verticalHeader().setMinimumSectionSize(minimum)
+            self.verticalHeader().setDefaultSectionSize(minimum)
+            self.resizeRowsToContents()
+            if self.wordWrap():
+                from PyQt6.QtCore import QRect
+                metrics = self.fontMetrics()
+                for row in range(self.rowCount()):
+                    required = self.rowHeight(row)
+                    for column in range(self.columnCount()):
+                        item = self.item(row, column)
+                        if item is None or not item.textAlignment() & Qt.AlignmentFlag.AlignLeft:
+                            continue
+                        width = max(1, self.columnWidth(column)-2*CONTROL_SPACING-4)
+                        height = metrics.boundingRect(QRect(0, 0, width, 100000),
+                            Qt.TextFlag.TextWordWrap | Qt.TextFlag.TextExpandTabs, item.text()).height()
+                        required = max(required, height+2*CONTROL_SPACING)
+                    self.setRowHeight(row, required)
+        finally:
+            self._sizing_rows = False
+        self.fit_height()
+
+    def _column_resized(self, column, old, width):
+        if not self._adjusting_columns and column < len(self._base_widths):
+            minimum = self._minimum_widths[column]
+            if sum(self._minimum_widths) <= self.viewport().width():
+                if column == self._flex_column:
+                    width = minimum  # The last section always occupies the remainder.
+                else:
+                    others = sum(self.columnWidth(c) for c in range(self.columnCount())
+                                 if c not in (column, self._flex_column))
+                    width = min(width, self.viewport().width()-others-self._minimum_widths[-1])
+            self._base_widths[column] = max(minimum, width)
+            self.fit_columns()
+        self._row_timer.start(0)
+
+    def fit_columns(self):
+        if not self._base_widths or self._adjusting_columns:
+            return
+        self._adjusting_columns = True
+        try:
+            widths = [max(a,b) for a,b in zip(self._base_widths,self._minimum_widths)]
+            available = self.viewport().width()
+            if sum(self._minimum_widths) <= available:
+                # A smaller window may require surrendering prior manual expansion,
+                # but never the content/header minima or the final section.
+                overflow = max(0,sum(widths)-available)
+                for c in reversed(range(len(widths)-1)):
+                    reduction = min(overflow,widths[c]-self._minimum_widths[c])
+                    widths[c] -= reduction
+                    overflow -= reduction
+                widths[-1] = available-sum(widths[:-1])
+            for column,width in enumerate(widths):
+                if self.columnWidth(column) != width:
+                    self.setColumnWidth(column,width)
+        finally:
+            self._adjusting_columns = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.fit_columns()
         self.fit_height()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and hasattr(self, "_row_timer"):
+            self._row_timer.start(0)
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta()
+        horizontal = delta.x() or event.pixelDelta().x() or event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        bar = self.verticalScrollBar()
+        vertical = delta.y() or event.pixelDelta().y()
+        movable = ((vertical > 0 and bar.value() > bar.minimum())
+                   or (vertical < 0 and bar.value() < bar.maximum()))
+        if horizontal or movable:
+            super().wheelEvent(event)
+        else:
+            parent = self.parentWidget()
+            while parent is not None and not isinstance(parent, QScrollArea):
+                parent = parent.parentWidget()
+            if parent is not None:
+                QApplication.sendEvent(parent.viewport(), event)
+            else:
+                event.ignore()
 
     def fit_height(self):
         height = self.horizontalHeader().height() + self.verticalHeader().length() + 2 * self.frameWidth()
@@ -100,49 +215,110 @@ class _StatisticsTable(QTableWidget):
         self.setFixedHeight(min(450, height))
 
 
+class _StatisticsCards(QWidget):
+    """Reflow existing cards; every row uses the available width."""
+    def __init__(self, cards):
+        super().__init__()
+        self.setMinimumWidth(0)
+        self.cards = cards
+        self.columns = 0
+        self.units = 0
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(BLOCK_SPACING)
+        self.reflow()
+
+    def reflow(self):
+        count = len(self.cards)
+        preferred = 3 if count in (5, 6) else min(4, max(1, count))
+        minimum = self.fontMetrics().horizontalAdvance("0") * 20 + 2 * PAGE_MARGIN
+        columns = min(preferred, max(1, (self.width()+BLOCK_SPACING) // (minimum+BLOCK_SPACING)))
+        if self.columns == columns:
+            return
+        self.columns = columns
+        grid = self.layout()
+        while grid.count():
+            grid.takeAt(0)
+        for column in range(self.units):
+            grid.setColumnStretch(column, 0)
+        rows = [self.cards[i:i+columns] for i in range(0, count, columns)]
+        self.units = math.lcm(*(len(row) for row in rows)) if rows else 1
+        for column in range(self.units):
+            grid.setColumnStretch(column, 1)
+        for row_index, row in enumerate(rows):
+            span = self.units // len(row)
+            for column, card in enumerate(row):
+                grid.addWidget(card, row_index, column * span, 1, span)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow()
+
+
 def _cards(layout, values):
-    grid = QGridLayout()
-    grid.setContentsMargins(0, 0, 0, 0)
-    grid.setSpacing(BLOCK_SPACING)
-    labels = []
-    for column, (title, value) in enumerate(values):
+    cards, labels = [], []
+    for title, value in values:
         card = QFrame()
+        card.setMinimumWidth(0)
         card.setProperty("class", "statisticsCard")
         box = QVBoxLayout(card)
         box.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
         box.setSpacing(COMPACT_SPACING)
         box.addWidget(_label(title))
-        number = _label(_number(value))
+        number = _label(_cell_text(value, percentage="%" in title or (isinstance(value, str) and value.endswith("%"))))
         number.setProperty("class", "statisticsNumber")
         box.addWidget(number)
-        grid.addWidget(card, column // 4, column % 4)
-        grid.setColumnStretch(column % 4, 1)
+        cards.append(card)
         labels.append(number)
-    layout.addLayout(grid)
+    layout.addWidget(_StatisticsCards(cards))
     return labels
 
 
-def _table(layout, headers, rows):
+def _table(layout, headers, rows, *, display=None):
     table = _StatisticsTable(0, len(headers))
     table.setHorizontalHeaderLabels(headers)
     table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     table.verticalHeader().hide()
     table.setRowCount(len(rows))
+    text_columns = set()
     for row, values in enumerate(rows):
         for column, value in enumerate(values):
-            item = QTableWidgetItem(_number(value))
+            percentage = report.percentage_cell(headers, values, column)
+            item = QTableWidgetItem(_cell_text(value, display=display, percentage=percentage))
+            alignment = Qt.AlignmentFlag.AlignRight if _numeric(value, percentage=percentage) else Qt.AlignmentFlag.AlignLeft
+            item.setTextAlignment(alignment | Qt.AlignmentFlag.AlignVCenter)
             table.setItem(row, column, item)
-    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-    table.horizontalHeader().setStretchLastSection(True)
-    table.resizeColumnsToContents()
-    for column in range(len(headers)):
-        table.setColumnWidth(column, min(440, max(110, table.columnWidth(column))))
-    table.horizontalScrollBar().rangeChanged.connect(table.fit_height)
-    table.horizontalHeader().geometriesChanged.connect(table.fit_height)
-    table.verticalHeader().sectionResized.connect(table.fit_height)
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            if not _numeric(value, percentage=percentage) and value is not None:
+                text_columns.add(column)
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    header.setStretchLastSection(False)
     table.ensurePolished()
-    table.fit_height()
+    header.ensurePolished()
+    table.resizeColumnsToContents()
+    for column, title in enumerate(headers):
+        option = QStyleOptionHeader()
+        option.initFrom(header)
+        option.text = title.upper()
+        header_width = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header).width()
+        content_width = table.columnWidth(column)
+        if column in text_columns:
+            content_width = min(440, content_width)
+        numeric_width = max((table.fontMetrics().horizontalAdvance(table.item(row, column).text()) + 2 * CONTROL_SPACING + 4
+                             for row in range(table.rowCount())
+                             if table.item(row, column) is not None
+                             and table.item(row, column).textAlignment() & Qt.AlignmentFlag.AlignRight), default=0)
+        table.setColumnWidth(column, max(110, header_width, content_width, numeric_width))
+    table._base_widths = [table.columnWidth(c) for c in range(len(headers))]
+    table._minimum_widths = list(table._base_widths)
+    table._flex_column = max(0, len(headers)-1)
+    table._last_minimum = table._base_widths[-1] if table._base_widths else 0
+    table.horizontalScrollBar().rangeChanged.connect(table.fit_height)
+    header.geometriesChanged.connect(table.fit_height)
+    table.verticalHeader().sectionResized.connect(table.fit_height)
+    table.size_rows()
     layout.addWidget(table)
     return table
 
@@ -150,7 +326,7 @@ def _table(layout, headers, rows):
 def _decimal_display(value, *, money=True):
     number = Decimal(value)
     formatted = format(number, ",.2f" if money else ",f").replace(",", " ")
-    return formatted if money or "." not in formatted else formatted.rstrip("0").rstrip(".")
+    return _NumericText(formatted if money or "." not in formatted else formatted.rstrip("0").rstrip("."))
 
 
 def _buyer_display(value):
@@ -161,15 +337,16 @@ def _buyer_display(value):
     return value
 
 
-def _buyer_page(layout, result):
-    sections = [(section, _buyer_display) for section in (*buyer_sections(result), *rfm_sections(result))]
-    sections.extend((section, cohort_display) for section in cohort_sections(result))
-    for (title, cards, tables, notes), display in sections:
+def _analytics_sections(layout, sections, display=_buyer_display, before_tables=None):
+    """Render existing typed sections once, without deriving any statistics."""
+    for section_index, (title, cards, tables, notes) in enumerate(sections):
         section = _section_heading(layout, title)
         if cards:
             _cards(section, [(label, display(value)) for label, value in cards])
-        for headers, rows in tables:
-            table = _table(section, headers, [tuple(display(value) for value in row) for row in rows])
+        for table_index, (headers, rows) in enumerate(tables):
+            for factory in (before_tables or {}).get((section_index, table_index), ()):
+                section.addWidget(factory())
+            table = _table(section, headers, rows, display=display)
             for column, header in enumerate(headers):
                 table.setColumnWidth(column, max(table.columnWidth(column), table.fontMetrics().horizontalAdvance(header.upper()) + 32))
             table.horizontalHeader().sectionResized.connect(table.resizeRowsToContents)
@@ -179,194 +356,80 @@ def _buyer_page(layout, result):
             section.addWidget(_label('\n'.join(f'{label}: {text}' for label, text in notes)))
 
 
-def _actions_page(layout, result):
-    section = layout
-    def table(headers, rows):
-        widget = _table(section, headers, rows)
-        widget.ensurePolished()
-        header = widget.horizontalHeader()
-        header.ensurePolished()
-        # The theme capitalizes headers; measure that text with its styled padding.
-        for column, title in enumerate(headers):
-            option = QStyleOptionHeader()
-            option.initFrom(header)
-            option.text = title.upper()
-            size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
-            widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
 
-    _cards(section, [("Просмотры товаров", result["view_interactions"]),
-                    ("Добавления в избранное", result["favorite_interactions"]),
-                    ("Клиенты с просмотрами", result["view_users"]),
-                    ("Клиенты с избранным", result["favorite_users"])])
-    section = _section_heading(layout, SOURCE_EVENT_QUALITY_HEADING)
-    quality = source_event_quality_rows(result)
-    title, rate = quality[6]
-    _cards(section, [(title, "Нет данных" if rate is None else f"{rate:.2f}".replace(".", ",") + " %")])
-    table(["Показатель", "Значение"],
-          [(name, "Нет данных" if value is None else value) for name, value in quality[:6] + quality[7:]])
-    section.addWidget(_label("\n".join(f"{name}: {text}" for name, text in SOURCE_EVENT_QUALITY_NOTES)))
-    section = _section_heading(layout, "Активность клиентов")
-    table(["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"], [
-        ("Просмотры", result["view_interactions"], result["view_users"], result["mean_views_per_viewer"], result["median_views_per_viewer"]),
-        ("Добавления в избранное", result["favorite_interactions"], result["favorite_users"],
-         result["mean_favorites_per_user"], result["median_favorites_per_user"])])
-    section = _section_heading(layout, charts.activity_distribution_data(result, 'views').title)
-    section.addWidget(charts.create_activity_distribution_chart(result, 'views'))
-    table(["Количество просмотров", "Количество клиентов", "Доля, %"], result["view_user_activity_distribution"])
-    section = _section_heading(layout, charts.activity_distribution_data(result, 'favorites').title)
-    section.addWidget(charts.create_activity_distribution_chart(result, 'favorites'))
-    table(["Количество избранного", "Количество клиентов", "Доля, %"], result["favorite_user_activity_distribution"])
-    section = _section_heading(layout, "Каналы")
-    table(["Канал", "Просмотры", "Клиенты с просмотрами", "Доля просмотров, %",
-                    "Избранное", "Клиенты с избранным", "Доля избранного, %"],
-           [row[1:] for row in result["action_channel_statistics"]])
-    section = _section_heading(layout, "Динамика действий")
-    section.addWidget(charts.create_view_dynamics_chart(result))
-    section.addWidget(charts.create_favorite_dynamics_chart(result))
-    table(["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
-           [(month[5:] + "." + month[:4], *values) for month, *values in result["action_monthly_dynamics"]])
-    section = _section_heading(layout, "Параметры просмотров")
-    table(["Доступность", "Просмотров", "Доля, %"], result["view_availability_distribution"])
-    table(["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
-           [(currency, n, _decimal_display(mean), _decimal_display(middle))
-            for currency, n, mean, middle in result["view_price_statistics"]])
+def _render_report_blocks(layout, blocks):
+    section = layout
+    for block in blocks:
+        if block.kind == "heading":
+            section = _section_heading(layout, block.title)
+        elif block.kind == "cards":
+            _cards(section, block.values)
+        elif block.kind == "table":
+            table = _table(section, block.headers, block.rows, display=_buyer_display)
+            if block.options.get("nowrap"):
+                table.setWordWrap(False)
+            for column in block.options.get("full_width_columns", ()):
+                natural = table.sizeHintForColumn(column)
+                table._minimum_widths[column] = max(table._minimum_widths[column], natural)
+                table._base_widths[column] = table._minimum_widths[column]
+                table.fit_columns()
+            table.size_rows()
+        elif block.kind == "text":
+            section.addWidget(_label(block.title))
+        elif block.kind == "chart":
+            section.addWidget(analytics_chart(block.data) if block.analytics else charts.create_chart(block.data))
+        elif block.kind == "rfm":
+            section.addWidget(RfmSegmentsWidget(choices={(window, currency): data for window, currency, data in block.choices}))
+        elif block.kind == "heatmap":
+            section.addWidget(CohortRetentionHeatmap(data=block.data))
+        else:
+            raise ValueError("Unknown report block")
+
+
+def _customer_overview_page(layout, result, sections):
+    _render_report_blocks(layout, report._blocks(report._customer_overview_page, result, sections))
+
+
+def _customer_purchases_page(layout, result, sections):
+    _render_report_blocks(layout, report._blocks(report._customer_purchases_page, result, sections))
+
+
+def _customer_money_page(layout, result, sections):
+    _render_report_blocks(layout, report._blocks(report._customer_money_page, result, sections))
+
+
+def _customer_rfm_page(layout, result):
+    _render_report_blocks(layout, report._blocks(report._customer_rfm_page, result))
+
+
+def _customer_cohorts_page(layout, result):
+    _render_report_blocks(layout, report._blocks(report._customer_cohorts_page, result))
+
+
+def _scroll_page():
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    content = QWidget()
+    layout = QVBoxLayout(content)
+    layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
+    layout.setSpacing(SECTION_SPACING)
+    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    scroll.setWidget(content)
+    return scroll, layout
+
+
+
+def _actions_page(layout, result):
+    _render_report_blocks(layout, report._blocks(report._actions_page, result))
 
 
 
 def _products_page(layout, result):
-    section = layout
-    def table(headers, rows):
-        widget = _table(section, headers, rows)
-        widget.ensurePolished()
-        header = widget.horizontalHeader()
-        header.ensurePolished()
-        for column, title in enumerate(headers):
-            option = QStyleOptionHeader()
-            option.initFrom(header)
-            option.text = title.upper()
-            size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
-            widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
-        return widget
-
-    def group(first, field):
-        table([first, "Товаров", "Просмотры", "Добавления в избранное", "Покупки", "Продано единиц"],
-              [(*row[:5], _decimal_display(row[5], money=False)) for row in result[field]])
-
-    _cards(section, [("Товары с взаимодействиями", result["unique_resolved_items"]),
-                    ("Товары с просмотрами", result["products_with_views"]),
-                    ("Товары в избранном", result["products_with_favorites"]),
-                    ("Купленные товары", result["products_with_purchases"])])
-    section = _section_heading(layout, "Популярные товары по просмотрам")
-    section.addWidget(charts.create_product_ranking_chart(result, "views"))
-    table(["Код", "Название", "Просмотры", "Клиенты с просмотрами", "Добавления в избранное", "Покупки"],
-          result["top_viewed_products"])
-    section = _section_heading(layout, "Популярные товары по избранному")
-    section.addWidget(charts.create_product_ranking_chart(result, "favorites"))
-    table(["Код", "Название", "Добавления в избранное", "Клиенты с избранным", "Просмотры", "Покупки"],
-          result["top_favorited_products"])
-    section = _section_heading(layout, "Популярные товары по покупкам")
-    section.addWidget(charts.create_purchased_products_chart(result))
-    table(["Код", "Название", "Покупки", "Покупатели", "Продано единиц", "Просмотры", "Добавления в избранное"],
-          [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result["top_purchased_products"]])
-    section = _section_heading(layout, "Категории товаров")
-    section.addWidget(_label(DIRECT_CATEGORY_NOTE))
-    categories = table(CATEGORY_HEADERS,
-                       [(*row[:7], _decimal_display(row[7], money=False)) for row in product_category_rows(result)])
-    # A long saved path remains one complete line, accessible by the table's
-    # horizontal scrollbar; no clipping to the generic 440 px column limit.
-    categories.setWordWrap(False)
-    categories.resizeColumnToContents(2)
-    for title, field in (("Спрос по полу товара", "product_gender_statistics"), ("Спрос по сезону", "product_season_statistics"),
-                         ("Спрос по стилевой группе", "product_style_statistics")):
-        section = _section_heading(layout, title)
-        if field == "product_season_statistics":
-            section.addWidget(charts.create_season_chart(result))
-        group("Значение", field)
-    section = _section_heading(layout, "Качество сопоставления")
-    section.addWidget(_label(" ".join(text for _, text in RESOLUTION_NOTES)))
-    table(["Показатель", "Значение"], [
-        ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
-        ("Уникальные распознанные товары", result["unique_resolved_items"]),
-        ("Распознанные взаимодействия", result["resolved_interactions"]),
-        ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-        ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")])
-    table(["Система идентификаторов", "Взаимодействия", "Распознано", "Не распознано", "Доля распознанных, %"],
-          [("Неподдерживаемая" if name == "unsupported" else name, total, resolved, unresolved, f"{rate:.4f}")
-           for name, total, resolved, unresolved, rate in result["namespaces"]])
+    _render_report_blocks(layout, report._blocks(report._products_page, result))
 
 
 def _orders_page(layout, result):
-    section = layout
-    def table(headers, rows):
-        widget = _table(section, headers, rows)
-        header = widget.horizontalHeader()
-        header.ensurePolished()
-        for column, title in enumerate(headers):
-            option = QStyleOptionHeader()
-            option.initFrom(header)
-            option.text = title.upper()
-            size = header.style().sizeFromContents(QStyle.ContentsType.CT_HeaderSection, option, QSize(), header)
-            widget.setColumnWidth(column, max(widget.columnWidth(column), size.width()))
-
-    _cards(section, [("Заказы с покупкой", result["purchase_orders"]),
-                    ("Невыкупленные заказы", result["orders_without_purchase"]),
-                    ("Позиции покупок", result["purchase_interactions"]), ("Покупатели", result["purchase_users"])])
-    section = _section_heading(layout, "Корзина заказа")
-    basket_rates = {label: rate for label, _, rate in result["purchase_basket_distribution"]}
-    _cards(section, [("Среднее число позиций на заказ", result["mean_purchase_lines_per_order"]),
-                    ("Медиана числа позиций на заказ", result["median_purchase_lines_per_order"]),
-                    ("Доля заказов с 1 позицией", f"{basket_rates['1 позиция']:.2f}%"),
-                    ("Доля заказов с 3+ позициями", f"{sum(basket_rates[key] for key in ('3–5 позиций', '6–10 позиций', '11+ позиций')):.2f}%")])
-    section.addWidget(charts.create_basket_chart(result))
-    table(["Количество позиций", "Заказов", "Доля, %"], result["purchase_basket_distribution"])
-    section = _section_heading(layout, "Финансовые показатели")
-    table(["Валюта", "Заказов", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа", "Медианная сумма заказа"],
-           [(currency, n, lines, _decimal_display(units, money=False), *(_decimal_display(v) for v in (amount, mean, median)))
-            for currency, n, lines, units, amount, mean, median in result["order_financials"]])
-    mixed, unknown = result["mixed_currency_purchase_orders"], result["unknown_currency_purchase_orders"]
-    if mixed or unknown:
-        section.addWidget(_label(f"Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}."))
-    for currency in ('RUB', 'KZT'):
-        section = _section_heading(layout, charts.purchase_count_data(result, currency).title)
-        section.addWidget(charts.create_order_dynamics_chart(result, currency))
-    for currency in ('RUB', 'KZT'):
-        section = _section_heading(layout, 'Динамика суммы покупок — ' + currency)
-        section.addWidget(charts.create_revenue_chart(result, currency))
-    table(["Месяц", "Заказы RUB", "Сумма RUB", "Заказы KZT", "Сумма KZT"],
-           [(month[5:] + "." + month[:4], rub_n, _decimal_display(rub), kzt_n, _decimal_display(kzt))
-            for month, rub_n, rub, kzt_n, kzt in result["order_monthly_dynamics"]])
-    for currency in ("RUB", "KZT"):
-        section = _section_heading(layout, "Магазины и каналы — " + currency)
-        table(["Магазин / канал", "Заказов", "Покупателей", "Позиции", "Единиц", "Сумма покупок", "Средняя сумма заказа"],
-               [(name, n, buyers, lines, _decimal_display(units, money=False), _decimal_display(amount), _decimal_display(mean))
-                for unit, key, name, n, buyers, lines, units, amount, mean in result["store_statistics"] if unit == currency])
-    section = _section_heading(layout, "Оплата")
-    section.addWidget(charts.create_payment_chart(result))
-    table(["Способ оплаты", "Заказов с этим способом", "Доля заказов, %"], result["payment_type_distribution"])
-    section = _section_heading(layout, "Статусы позиций")
-    table(["Статус", "Позиции", "Доля, %", "Считается покупкой"],
-           [(name, count, 100 * count / result["order_lines"] if result["order_lines"] else 0, "Да" if purchase else "Нет")
-            for name, count, purchase in result["line_statuses"]])
-
-
-class _ExportSignals(QObject):
-    finished = pyqtSignal(bool)
-
-
-class _ExportTask(QRunnable):
-    def __init__(self, result, path):
-        super().__init__()
-        self.result, self.path = result, path
-        self.signals = _ExportSignals()
-
-    def run(self):
-        try:
-            export_statistics_bundle(self.result, self.path)
-        except Exception:
-            logging.getLogger(__name__).warning("Не удалось экспортировать статистику.")
-            self.signals.finished.emit(False)
-        else:
-            self.signals.finished.emit(True)
+    _render_report_blocks(layout, report._blocks(report._orders_page, result))
 
 
 class DatasetStatisticsTab(QWidget):
@@ -379,6 +442,7 @@ class DatasetStatisticsTab(QWidget):
         self.cache_path = CACHE_PATH
         self.displayed_result = None
         self._export_task = None
+        self._export_snapshot = None
         self.detail_process = None
         self._detail_dialog_open = False
         self._detail_closing = self._detail_quitting = False
@@ -415,13 +479,10 @@ class DatasetStatisticsTab(QWidget):
             QIcon(str(ICONS_DIR / "failure.png")),
             " Отменить",
         )
-        self.export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт статистики")
+        self.export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт отчета")
         self.export_button.setIconSize(QSize(17, 17))
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export)
-        self.detail_export_button = QPushButton(QIcon(str(ICONS_DIR / "export.png")), " Экспорт данных покупателей")
-        self.detail_export_button.setIconSize(QSize(17, 17))
-        self.detail_export_button.clicked.connect(self.export_details)
 
         self.refresh.setIconSize(QSize(17, 17))
         self.cancel_button.setIconSize(QSize(17, 17))
@@ -476,31 +537,17 @@ class DatasetStatisticsTab(QWidget):
 
         controls.addWidget(self.refresh)
         controls.addWidget(self.export_button)
-        controls.addWidget(self.detail_export_button)
         controls.addWidget(self.cancel_button)
         controls.addWidget(self.status)
         controls.addWidget(self.progress_container, 1)
 
         layout.addLayout(controls)
-        self.detail_panel = QWidget()
-        detail_layout = QHBoxLayout(self.detail_panel)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
-        self.detail_status = _label("")
-        self.detail_progress = QProgressBar()
-        self.detail_progress.setRange(0, 0)
-        self.detail_progress.setTextVisible(False)
-        self.detail_progress.setMaximumWidth(180)
-        self.detail_cancel = QPushButton("Отменить экспорт")
-        self.detail_force = QPushButton("Завершить принудительно…")
-        self.detail_force.hide()
-        self.detail_cancel.clicked.connect(self.cancel_details)
-        self.detail_force.clicked.connect(self.force_details)
-        detail_layout.addWidget(self.detail_status, 1)
-        detail_layout.addWidget(self.detail_progress)
-        detail_layout.addWidget(self.detail_cancel)
-        detail_layout.addWidget(self.detail_force)
-        self.detail_panel.hide()
-        layout.addWidget(self.detail_panel)
+        # Compatibility references point to the existing upper controls.
+        self.detail_status=self.status
+        self.detail_progress=self.progress
+        self.detail_cancel=self.cancel_button
+        self._detail_force_available=False
+        self.last_export_diagnostic=None
         self.sections = QTabWidget()
         layout.addWidget(self.sections, 1)
         self._pages()
@@ -522,139 +569,140 @@ class DatasetStatisticsTab(QWidget):
         detail_busy = self.detail_process is not None or self._detail_dialog_open
         self.export_button.setEnabled(self.process is None and self.displayed_result is not None
                                       and self._export_task is None and not detail_busy)
-        self.detail_export_button.setEnabled(self.process is None and self._export_task is None and not detail_busy)
-        self.refresh.setEnabled(self.process is None and not detail_busy)
+        self.refresh.setEnabled(self.process is None and self._export_task is None and not detail_busy)
+
+    def _reset_export_progress(self):
+        self.progress.setRange(0,100)
+        self.progress.setValue(0)
+        self.progress_text.setText("Прогресс расчета")
+        self.cancel_button.setText(" Отменить")
+        self.cancel_button.setEnabled(False)
+        self._detail_force_available=False
 
     def export(self):
         if (self.process is not None or self.displayed_result is None or self._export_task is not None
                 or self.detail_process is not None or self._detail_dialog_open):
             return
-        directory = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
-        path, _ = QFileDialog.getSaveFileName(self, "Экспорт статистики",
-                                            str(Path(directory) / suggested_filename(self.displayed_result)), "ZIP (*.zip)")
-        if (not path or self.process is not None or self._export_task is not None
-                or self.detail_process is not None or self._detail_dialog_open):
+        captured=deepcopy(self.displayed_result)
+        try:
+            captured=validate_result(captured)
+        except Exception:
+            self.status.setText(DETAIL_ERRORS["REPORT_CONTEXT_MISMATCH"])
             return
-        if not path.lower().endswith(".zip"):
-            path += ".zip"
-        # Capture this snapshot; later render() replaces it rather than mutating it.
-        self._export_task = _ExportTask(self.displayed_result, path)
-        self._export_task.signals.finished.connect(self._export_finished)
+        self._detail_dialog_open=True
         self._update_export_button()
-        QThreadPool.globalInstance().start(self._export_task)
-
-    def _export_finished(self, success):
-        self._export_task = None
-        self._update_export_button()
-        if success:
-            set_status_ok(self.window, "Статистика экспортирована в ZIP: Excel + HTML")
-        else:
-            set_status_error(self.window, "Не удалось экспортировать статистику")
-        schedule_status_reset(self.window, 5)
-        self._keep_processing_status()
+        try:
+            value,_=QFileDialog.getSaveFileName(self,"Экспорт отчета",
+                str(PROJECT_ROOT.parent/suggested_report_filename(captured)),"ZIP-архив (*.zip)")
+        finally:
+            self._detail_dialog_open=False
+            self._update_export_button()
+        if not value:
+            return
+        target=Path(value if value.lower().endswith(".zip") else value+".zip")
+        if target.exists() and target!=Path(value):
+            answer=QMessageBox.question(self,"Заменить ZIP?",
+                "Заменить существующий ZIP только после успешного экспорта?",
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+            if answer!=QMessageBox.StandardButton.Yes:
+                return
+        try:
+            target=validate_report_destination(target)
+        except Exception as error:
+            code=getattr(error,"code","INVALID_EXPORT_PATH")
+            self.status.setText(DETAIL_ERRORS.get(code,DETAIL_ERRORS["INVALID_EXPORT_PATH"]))
+            return
+        self._export_snapshot=captured
+        self.status.setToolTip("")
+        self._start_details(dict(destination=target),snapshot=captured)
 
     def export_details(self):
-        if (self.process is not None or self._export_task is not None or self.detail_process is not None
-                or self._detail_dialog_open):
-            return
-        try:
-            source = inspect_sources(DEFAULT_RAW_ROOT)
-        except Exception:
-            self.detail_panel.show()
-            self.detail_progress.hide()
-            self.detail_cancel.hide()
-            self.detail_force.hide()
-            self.detail_status.setText(DETAIL_ERRORS['SOURCE_NOT_READY'])
-            return
-        self._detail_dialog_open = True
-        self._update_export_button()
-        try:
-            dialog = DetailExportDialog(self, source, self.configured_filter, DEFAULT_RAW_ROOT)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            options = dialog.options
-        finally:
-            self._detail_dialog_open = False
-            self._update_export_button()
-        self._start_details(options)
+        """Compatibility entry point for the single report operation."""
+        self.export()
 
-    def _start_details(self, options):
+    def _start_details(self,options,*,snapshot=None):
         if self.detail_process is not None or self.process is not None or self._export_task is not None:
             return
-        self._detail_closing = self._detail_quitting = False
-        self._detail_options = dict(options)
-        self.detail_process = DetailExportProcess(self)
+        self._detail_closing=self._detail_quitting=False
+        self._detail_force_available=False
+        self._detail_options=dict(options)
+        self.detail_process=DetailExportProcess(self)
         self.detail_process.progress.connect(self._detail_progress)
         self.detail_process.completed.connect(self._detail_finished)
         self.detail_process.stalled.connect(self._detail_stalled)
-        self.detail_status.setText("Проверка источников…")
-        self.detail_panel.show()
-        self.detail_progress.show()
-        self.detail_cancel.show()
-        self.detail_cancel.setEnabled(True)
-        self.detail_force.hide()
+        self.status.setText("Подготовка отчета…")
+        self.progress.setRange(0,0)
+        self.progress_text.setText("Подготовка отчета")
+        self.cancel_button.setEnabled(True)
         self._update_export_button()
         self.calculation_running_changed.emit(True)
         self._keep_processing_status()
-        self.detail_process.start(options)
+        self.detail_process.start(options,report_result=snapshot if snapshot is not None else deepcopy(self.displayed_result))
 
-    def _detail_progress(self, message):
+    def _detail_progress(self,message):
         if self.detail_process is not None and not self.detail_process.cancel_requested:
-            self.detail_status.setText(DETAIL_STAGES[message['stage']]+f" · обработано: {message['processed']:,}".replace(',', ' '))
+            stage=DETAIL_STAGES[message["stage"]]
+            self.progress_text.setText(stage)
+            self.status.setText(stage+(f" · обработано: {message['processed']:,}".replace(","," ") if message["processed"] else ""))
 
     def cancel_details(self):
-        if self.detail_process is not None:
-            self.detail_cancel.setEnabled(False)
-            self.detail_status.setText("Отмена экспорта… Ожидается закрытие и очистка временных файлов.")
+        self.cancel_button.setEnabled(False)
+        if self._export_task is not None:
+            self._export_task.cancel()
+            self.status.setText("Отмена проверки источников…")
+        elif self.detail_process is not None:
+            self.status.setText("Отмена экспорта… Ожидается закрытие и очистка временных файлов.")
             self.detail_process.cancel()
 
     def _detail_stalled(self):
         if self.detail_process is not None:
-            self.detail_force.show()
-            self.detail_status.setText("Worker ещё завершает отмену. Можно продолжить ожидание или завершить аварийно; "
-                                      "при аварийном завершении очистка не гарантируется.")
+            self._detail_force_available=True
+            self.cancel_button.setText(" Завершить принудительно…")
+            self.cancel_button.setEnabled(True)
+            self.status.setText("Worker еще завершает отмену. Можно ждать или завершить принудительно; очистка не гарантируется.")
 
     def force_details(self):
         if self.detail_process is not None:
-            answer = QMessageBox.warning(self, "Принудительное завершение", "Временные файлы с персональными данными "
-                "могут остаться. Готовый ZIP мог быть сохранён непосредственно перед остановкой. Завершить процесс?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-            if answer == QMessageBox.StandardButton.Yes:
+            answer=QMessageBox.warning(self,"Принудительное завершение",
+                "Временные файлы могут остаться. Готовый ZIP мог быть сохранен непосредственно перед остановкой. Завершить процесс?",
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+            if answer==QMessageBox.StandardButton.Yes:
+                self.cancel_button.setEnabled(False)
                 self.detail_process.force_stop()
 
-    def _detail_finished(self, message):
-        worker, self.detail_process = self.detail_process, None
+    def _detail_finished(self,message):
+        worker,self.detail_process=self.detail_process,None
         if worker is None:
             return
+        self.last_export_diagnostic=deepcopy(getattr(worker,"diagnostic",{}))
         worker.deleteLater()
-        self.detail_progress.hide()
-        self.detail_cancel.hide()
-        self.detail_force.hide()
-        if message['event'] == 'finished':
-            rows = message['rows']
-            self.detail_status.setText("Детальная выгрузка покупателей сохранена. "
-                f"Клиентов: {rows['clients']}; заказов: {rows['orders']}; позиций: {rows['order_lines']}. "
-                +str(self._detail_options['destination'])
+        self._reset_export_progress()
+        if message["event"]=="finished":
+            self.status.setText("Экспорт завершен. Отчет сохранен. "
+                +str(self._detail_options["destination"])
                 +(" Запрос отмены поступил после завершения публикации." if worker.cancel_requested else ""))
-        elif message['event'] == 'cancelled':
-            self.detail_status.setText("Экспорт отменён. Временное состояние очищено; прежний ZIP сохранён.")
+        elif message["event"]=="cancelled":
+            self.status.setText("Экспорт отменен. Временное состояние очищено; прежний ZIP сохранен.")
         else:
-            code = message['code']
-            text = DETAIL_ERRORS[code]+" Код: "+code
-            if 'technical_path' in message:
-                text += " Путь для проверки: "+message['technical_path']
-            if code in ('FORCED_STOP', 'WORKER_CRASHED', 'WORKER_PROTOCOL_ERROR') or code.startswith('SENSITIVE_'):
-                text += (" Проверьте временный каталог: "+str(self._detail_options['temporary_root'])
-                         +" и файлы .statistics-detail-*.partial в "+str(Path(self._detail_options['destination']).parent)
-                         +". Автоматическое удаление неизвестных файлов не выполняется.")
-            self.detail_status.setText(text)
+            code=message["code"]
+            text=DETAIL_ERRORS[code]+" Код: "+code
+            if "technical_path" in message:
+                text+=" Путь для проверки: "+message["technical_path"]
+            if code in ("FORCED_STOP","WORKER_CRASHED","WORKER_PROTOCOL_ERROR") or code.startswith("SENSITIVE_"):
+                text+=(" Проверьте файлы .statistics-report-* в "+str(Path(self._detail_options["destination"]).parent)
+                       +". Автоматическое удаление неизвестных файлов не выполняется.")
+            self.status.setText(text)
+        self.status.setToolTip(json.dumps(self.last_export_diagnostic,ensure_ascii=False,indent=2)
+            if self.last_export_diagnostic else "")
+        self._export_snapshot=None
         self.calculation_running_changed.emit(False)
         self._update_export_button()
-        schedule_status_reset(self.window, 0)
+        schedule_status_reset(self.window,0)
         if self._detail_quitting:
-            QTimer.singleShot(0, QApplication.instance().quit)
+            QTimer.singleShot(0,QApplication.instance().quit)
         elif self._detail_closing:
-            QTimer.singleShot(0, self.window.close)
+            QTimer.singleShot(0,self.window.close)
+
 
     def set_analysis_filter(self, selection):
         self.configured_filter = selection
@@ -663,32 +711,50 @@ class DatasetStatisticsTab(QWidget):
     def _update_description(self):
         text = SOURCE_DESCRIPTION.replace("Отбор не установлен", self.configured_filter.summary())
         if self.displayed_result is not None:
-            text += " Дата и время расчета: " + _date_time(self.displayed_result["calculated_at"])
+            text += " Дата расчета: " + _date(self.displayed_result["calculated_at"])
             if AnalysisFilter.from_dict(self.displayed_result["analysis_filter"]) != self.configured_filter:
                 text += ". Отбор изменен → требуется пересчитать статистику."
         self.description.setText(text)
 
     def _pages(self):
+        outer_index = max(0, self.sections.currentIndex())
+        previous = getattr(self, "customer_sections", None)
+        active_group = (previous.currentWidget().property("statisticsGroup")
+                        if previous is not None and previous.currentWidget() is not None else "overview")
         while self.sections.count():
             page = self.sections.widget(0)
             self.sections.removeTab(0)
             page.deleteLater()
         layouts = []
-        for name in ("Действия", "Заказы", "Товары", "Клиенты", "Техническая информация"):
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            content = QWidget()
-            layout = QVBoxLayout(content)
-            layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
-            layout.setSpacing(SECTION_SPACING)
-            layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-            scroll.setWidget(content)
-            self.sections.addTab(scroll, name)
-            layouts.append(layout)
+        for index, name in enumerate(report.PAGE_LABELS):
+            if index == 3:
+                self.customer_sections = QTabWidget()
+                self.customer_sections.setObjectName("statisticsCustomerTabs")
+                self.customer_sections.setDocumentMode(True)
+                self.customer_sections.tabBar().setDrawBase(False)
+                self.customer_sections.setStyleSheet(
+                    "QTabWidget#statisticsCustomerTabs::pane { border: 0; }"
+                    "QTabWidget#statisticsCustomerTabs > QTabBar::tab { height: 30px; padding: 0px 14px; }")
+                customer_layouts = {}
+                for group, label in zip(CUSTOMER_GROUP_ORDER, CUSTOMER_TAB_LABELS):
+                    scroll, layout = _scroll_page()
+                    scroll.setProperty("statisticsGroup", group)
+                    scroll.setObjectName("statisticsCustomer_" + group)
+                    self.customer_sections.addTab(scroll, label)
+                    customer_layouts[group] = layout
+                self.customer_sections.setCurrentIndex(
+                    CUSTOMER_GROUP_ORDER.index(active_group) if active_group in CUSTOMER_GROUP_ORDER else 0)
+                self.sections.addTab(self.customer_sections, name)
+                layouts.append(customer_layouts)
+            else:
+                scroll, layout = _scroll_page()
+                self.sections.addTab(scroll, name)
+                layouts.append(layout)
+        self.sections.setCurrentIndex(outer_index)
         return layouts
 
     def start(self):
-        if self.process is not None or self.detail_process is not None or self._detail_dialog_open:
+        if self.process is not None or self.detail_process is not None or self._export_task is not None or self._detail_dialog_open:
             return
         self.buffer.clear()
         self.pending = self.failure = None
@@ -718,8 +784,8 @@ class DatasetStatisticsTab(QWidget):
     def _keep_processing_status(self):
         if self.process is not None:
             set_status_processing(self.window, PROCESSING_STATUS)
-        elif self.detail_process is not None:
-            set_status_processing(self.window, "Экспорт данных покупателей…")
+        elif self.detail_process is not None or self._export_task is not None:
+            set_status_processing(self.window, "Экспорт отчета…")
 
     def _read(self):
         if self.process is None:
@@ -787,7 +853,12 @@ class DatasetStatisticsTab(QWidget):
             QTimer.singleShot(0, self.window.close)
 
     def cancel(self):
-        if self.process is not None:
+        if self.detail_process is not None or self._export_task is not None:
+            if self._detail_force_available:
+                self.force_details()
+            else:
+                self.cancel_details()
+        elif self.process is not None:
             self.cancelled = True
             self.cancel_button.setEnabled(False)
             self.status.setText("Отмена расчета…")
@@ -799,6 +870,8 @@ class DatasetStatisticsTab(QWidget):
             self.process.kill()
 
     def _shutdown(self):
+        if self._export_task is not None:
+            self._export_task.cancel()
         if self.detail_process is not None:
             self.detail_process.shutdown()
         if self.process is not None:
@@ -822,92 +895,20 @@ class DatasetStatisticsTab(QWidget):
         return super().eventFilter(watched, event)
 
     def render(self, result):
-        for label, name in zip(self.card_labels, ("total_interactions", "orders", "order_lines", "customers")):
-            label.setText(_number(result[name]))
+        self.report = report.report_presentation(result)
+        for label, (_, value) in zip(self.card_labels, self.report.global_cards):
+            label.setText(_number(value))
         self.displayed_result = result
         self._update_export_button()
         self._update_description()
-        self.status.setText("\n".join([_calculation_message(result),
-                            *(WARNING_LABELS.get(warning, warning) for warning in result["warnings"]
-                              if warning not in {"Позиции заказов с нецелым количеством исключены из статистики.",
-                                                 "Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку."})]))
-        actions, orders, products, customers, technical = self._pages()
-        coverage = []
-        for source in result["coverage"]:
-            period = "; ".join(f"{_date(a)} — {_date(b)}" for a, b in source["intervals"])
-            if not period and source["updated"]:
-                period = "Снимок данных от " + _date_time(source["updated"])
-            coverage.append((SOURCE_LABELS[source["source"]], period or "—",
-                             "/".join(SOURCE_KIND_LABELS.get(kind, kind) for kind in source["source_kinds"]) or "—"))
-        _table(technical, ["Источник", "Период / состояние", "Источник данных"], coverage)
-        filtered = AnalysisFilter.from_dict(result["analysis_filter"]).active
-        base = [("Количество взаимодействий", result["total_interactions"]), ("Заказы", result["orders"]),
-                ("Позиции заказов", result["order_lines"]), ("Профили клиентов", result["customers"]),
-                ("Просмотры", result["view_interactions"]),
-                ("Добавления в избранное", result["favorite_interactions"]),
-                ("Покупки", result["purchase_interactions"]),
-                ("Клиенты с взаимодействиями", result["interaction_users"]),
-                ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
-                ("Уникальные распознанные товары", result["unique_resolved_items"]),
-                ("Распознанные взаимодействия", result["resolved_interactions"]),
-                ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-                ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")]
-        _table(technical, ["Показатель", "Значение"], base)
-        #_section_heading(technical, SOURCE_ACTIONS_HEADING)
-        _table(technical, ["Системное название", "Количество", "Доля, %"], source_action_rows(result))
-        #_section_heading(technical, ACTION_QUALITY_HEADING)
-        _table(technical, ["Классификация событий", "Количество"], source_action_quality_rows(result))
-        _actions_page(actions, result)
-        _orders_page(orders, result)
-        _products_page(products, result)
-        _cards(customers, [(PROFILE_SLICE_LABEL, result["customers"]),
-                          (ITEM_CLIENTS_LABEL, result["interaction_users"]),
-                          ("Покупатели", result["purchase_users"]), ("Повторные покупатели (от 2 покупок)", result["repeat_buyers"])])
-        for title, rows in customer_scope_sections(result):
-            customer_section = _section_heading(customers, title)
-            scope_table = _table(customer_section, ['Показатель', 'Значение'], rows)
-            scope_table.resizeRowsToContents()
-            scope_table.fit_height()
-        customer_section.addWidget(_label(customer_scope_context(result)))
-        customer_section.addWidget(_label('\n'.join(f'{name}: {text}' for name, text in CUSTOMER_SCOPE_NOTES)))
-        customer_section = _section_heading(customers, "Портрет клиента")
-        if result["customers"] is None:
-            customer_section.addWidget(_label("Данные профилей клиентов отсутствуют. Пол и возраст недоступны."))
-        customer_section = _section_heading(customers, "Возрастная структура клиентов")
-        _cards(customer_section, [("Средний возраст", result["mean_age"]), ("Медианный возраст", result["median_age"])])
-        customer_section.addWidget(charts.create_age_chart(result))
-        _table(customer_section, ["Возрастная группа", "Количество клиентов", "Доля, %"], result["age_distribution"])
-        customer_section = _section_heading(customers, "Распределение по полу")
-        customer_section.addWidget(charts.create_gender_chart(result))
-        _table(customer_section, ["Пол", "Количество клиентов", "Доля, %"], result["gender_distribution"])
-        customer_section = _section_heading(customers, "Активность клиентов")
-        _table(customer_section, ["Показатель", "Значение"], [
-            ("Клиенты с просмотрами", result["view_users"]),
-            ("Клиенты с добавлениями в избранное", result["favorite_users"]),
-            ("Клиенты с покупками", result["purchase_users"]),
-            ("Клиенты с просмотрами и покупками", result["view_purchase_users"]),
-            ("Клиенты с избранным и покупками", result["favorite_purchase_users"]),
-            ("Клиенты со всеми типами взаимодействий", result["all_interaction_type_users"]),
-            ("Среднее число взаимодействий на активного клиента", result["mean_interactions"]),
-            ("Медиана числа взаимодействий на активного клиента", result["median_interactions"]),
-            ("Доля активных клиентов, совершивших покупку, %", result["active_buyer_rate"])])
-        customer_section = _section_heading(customers, charts.interaction_frequency_data(result).title)
-        customer_section.addWidget(charts.create_interaction_frequency_chart(result))
-        _table(customer_section, ["Количество взаимодействий", "Клиентов", "Доля, %"], result["interaction_activity_distribution"])
-        customer_section = _section_heading(customers, "Покупательская активность")
-        _table(customer_section, ["Количество заказов", "Покупателей", "Доля покупателей, %"], result["purchase_order_distribution"])
-        _table(customer_section, ["Показатель", "Значение"], [
-            ("Среднее число заказов на покупателя", result["mean_orders_per_buyer"]),
-            ("Медиана числа заказов на покупателя", result["median_orders_per_buyer"]),
-            ("Доля повторных покупателей, %", result["repeat_buyer_rate"])])
-        _buyer_page(customers, result)
-        _table(technical, ["Диагностика", "Количество"],
-               [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
-               + [("Заказы выбранного среза" if filtered else "Исходные заказы", result["orders"]),
-                  ("Позиции заказов выбранного среза" if filtered else "Исходные позиции заказов", result["order_lines"]),
-                  ("Распознанные взаимодействия", result["resolved_interactions"]),
-                  ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-                  ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")])
+        self.status.setText(self.report.status)
+        layouts = self._pages()
+        for page, layout in zip(self.report.pages, layouts):
+            if page.key == "customers":
+                for group in page.groups:
+                    _render_report_blocks(layout[group.key], group.blocks)
+            else:
+                _render_report_blocks(layout, page.groups[0].blocks)
 
 
 def create_dataset_statistics_tab(window):

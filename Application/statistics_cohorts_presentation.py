@@ -4,22 +4,23 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
 from Application.statistics_cohorts_core import HORIZONS, POLICIES
+from Application.statistics_presentation import interval_bounds
 
 
 COHORT_LEGACY_TEXT = 'Нет данных в сохранённом результате'
 COHORT_TITLE = 'Когортный анализ покупателей'
 MATRIX_HEADERS = ('Когорта', 'M0: покупателей', *(f'M{i}, %' for i in range(1,13)))
-HORIZON_HEADERS = ('Горизонт, дней', 'Eligible', 'Repeated', 'Повторная доля, %', 'Цензурированы',
+HORIZON_HEADERS = ('Горизонт, дней', 'Покупатели с полным наблюдением', 'Повторные покупки', 'Повторная доля, %', 'Цензурированы',
                    'Неполное покрытие', 'Пересечение групп', 'Наблюдаемые повторы', 'Повторы вне базы')
 COHORT_NOTES = (
     ('Определение', 'Когорта определяется по первой наблюдаемой покупке в доступной истории, '
      'а не обязательно по первой покупке клиента за всё время.'),
-    ('Политики', 'STRICT: F + sold — основная; EXTENDED: F + sold + CP — сравнение. '
+    ('Политики',  'Подтверждённые покупки: F + sold — основная; расширенный учёт покупок: F + sold + CP — сравнение. '
      'Дата первой покупки и принадлежность к когорте могут различаться. Политики не суммируются.'),
-    ('Область', 'Вся доступная история Orders до отсечения; все товары, без пересечения с Actions. '
+    ('Область', 'Вся доступная история заказов до отсечения; все товары, без пересечения с действиями. '
      'Выбранный период ограничивает отображаемые месяцы когорт, а не поиск более ранней покупки.'),
     ('Доли', 'Каждый горизонт имеет собственную базу полностью наблюдаемых покупателей. '
-     'При Eligible = 0 доля недоступна. Наблюдаемые повторы вне базы не входят в основную долю.'),
+     'При отсутствии покупателей с полным наблюдением доля недоступна. Наблюдаемые повторы вне базы не входят в основную долю.'),
     ('Неполнота', 'Цензурирование — горизонт ещё не завершён. Неполное покрытие — пробелы в прошедшей части. '
      'Группы могут пересекаться; пересечение показано отдельно. Они не означают «не вернулись».'),
     ('Матрица', 'M0 — размер когорты; M1–M12 — активность именно в календарном месяце. '
@@ -72,45 +73,48 @@ def _retention_tables(policy):
                             _show(cell['retention_rate']), cell['censored'], cell['coverage_incomplete'],
                             cell['censored_and_incomplete'], cell['observed_active_ineligible']))
     return [(list(MATRIX_HEADERS),matrix),
-            (['Когорта', 'Смещение', 'Календарный месяц', 'Активны в базе', 'Eligible', 'Удержание, %',
+            (['Когорта', 'Смещение', 'Календарный месяц', 'Активны в базе', 'Покупатели с полным наблюдением', 'Удержание, %',
               'Цензурированы', 'Неполное покрытие', 'Пересечение групп', 'Активны вне базы'],details)]
 
 
-def cohort_sections(result, *, include_extended=False):
+def cohort_sections(result, *, include_extended=False, compact=False):
     saved = result['cohort_statistics'] if 'cohort_statistics' in result else None
     if saved is None:
-        message = ('Нет достоверной даты отсечения Orders' if 'cohort_statistics' in result else COHORT_LEGACY_TEXT)
+        message = ('Нет достоверной даты отсечения заказов' if 'cohort_statistics' in result else COHORT_LEGACY_TEXT)
         return [(COHORT_TITLE, [], [(['Показатель когорт','Значение'], [('Когорты',message)])], [])]
     strict = saved['policies'][POLICIES[0]]
     summary = strict['summary']
     coverage = saved['effective_coverage']
     bounds = saved['cohort_bounds']
     sections = [(COHORT_TITLE, [
-        ('Дата отсечения когорт, UTC',date.fromisoformat(saved['as_of_date'])),
-        ('Наблюдаемые когорты STRICT',summary['cohort_count']),
-        ('Покупатели отображаемых когорт STRICT',summary['cohort_size']),
-        ('С наблюдаемой второй покупкой STRICT',summary['observed_repeat_buyers'])], [
+        ('Дата отсечения когорт',date.fromisoformat(saved['as_of_date'])),
+        ('Наблюдаемые когорты',summary['cohort_count']),
+        ('Покупатели отображаемых когорт',summary['cohort_size']),
+        ('С наблюдаемой второй покупкой',summary['observed_repeat_buyers'])], [
         (['Параметр когорт','Значение'],[
-            ('Начало доступной истории Orders, UTC',coverage[0][0] if coverage else 'Нет данных'),
-            ('Конец наблюдения Orders, UTC исключительно',coverage[-1][1] if coverage else 'Нет данных'),
+            ('Начало доступной истории заказов',interval_bounds(*coverage[0])[0] if coverage else 'Нет данных'),
+            ('Конец наблюдения заказов',interval_bounds(*coverage[-1])[1] if coverage else 'Нет данных'),
             ('Отображаемые когорты с',bounds['start'] or 'Все наблюдаемые'),
             ('Отображаемые когорты по',bounds['end'] or 'Все наблюдаемые'),
-            ('Покупатели STRICT вне отображаемых когорт',strict['hidden_buyers'])]),
-        (['Покрытие Orders с UTC включительно','По UTC исключительно'],coverage)], list(COHORT_NOTES))]
-    sections.append(('Когорты — повторные покупки STRICT', [], [
+            ('Покупатели вне отображаемых когорт',strict['hidden_buyers'])]),
+        (['Покрытие заказов с','По'], [interval_bounds(a, b) for a, b in coverage])], list(COHORT_NOTES))]
+    if compact:
+        title, cards, _, _ = sections[0]
+        sections[0] = (title, cards, [], [])
+    sections.append(('Когорты — повторные подтверждённые покупки', [], [
         (list(HORIZON_HEADERS),[_horizon_row(h,summary['horizons'][str(h)]) for h in HORIZONS])], []))
-    sections.append(('Когорты — месяцы первой наблюдаемой покупки STRICT', [], _cohort_tables(strict), []))
-    sections.append(('Когорты — матрица удержания M0–M12 STRICT', [], _retention_tables(strict), []))
+    sections.append(('Когорты — месяцы первой наблюдаемой подтверждённой покупки', [], _cohort_tables(strict), []))
+    sections.append(('Когорты — матрица удержания M0–M12: подтверждённые покупки', [], _retention_tables(strict), []))
     comparison = []
     for policy in POLICIES:
-        label = 'STRICT' if policy == POLICIES[0] else 'EXTENDED'
+        label = 'Подтверждённые покупки' if policy == POLICIES[0] else 'Расширенный учёт покупок'
         p = saved['policies'][policy]['summary']
         for h in HORIZONS:
             comparison.append((label,p['cohort_size'],*_horizon_row(h,p['horizons'][str(h)])))
-    sections.append(('Когорты — сравнение STRICT и EXTENDED', [], [
+    sections.append(('Когорты — сравнение политик учёта покупок', [], [
         (['Политика','Покупателей в когортах',*HORIZON_HEADERS],comparison)], []))
     if include_extended:
         extended = saved['policies'][POLICIES[1]]
-        sections.append(('Когорты — месяцы первой наблюдаемой покупки EXTENDED', [], _cohort_tables(extended), []))
-        sections.append(('Когорты — матрица удержания M0–M12 EXTENDED', [], _retention_tables(extended), []))
+        sections.append(('Когорты — месяцы первой наблюдаемой покупки — расширенный учёт', [], _cohort_tables(extended), []))
+        sections.append(('Когорты — матрица удержания M0–M12: расширенный учёт покупок', [], _retention_tables(extended), []))
     return sections

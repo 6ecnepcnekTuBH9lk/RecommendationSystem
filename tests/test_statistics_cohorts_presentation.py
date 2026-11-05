@@ -72,8 +72,8 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
         xlsx.export_statistics(result,target)
         rendered = html.build_statistics_html(result)
     assert result == before and path.read_bytes() == saved
-    sections = cohort_sections(result)
-    page = tab.sections.widget(3)
+    sections = cohort_sections(result, compact=True)
+    page = tab.customer_sections.widget(4)
     labels = [label.text() for label in page.findChildren(QLabel)]
     assert all(title.upper() in labels for title,_,_,_ in sections)
     expected = [(headers,rows) for _,_,blocks,_ in sections for headers,rows in blocks]
@@ -82,7 +82,8 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
     for table,(headers,rows) in zip(tables,expected):
         assert [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())] == list(headers)
         assert [[table.item(r,c).text() for c in range(table.columnCount())] for r in range(table.rowCount())] == [
-            [ui._number(ui._buyer_display(v)) for v in row] for row in rows]
+            [ui._cell_text(v, display=ui.cohort_display, percentage="%" in headers[c] or (c > 0 and "%" in str(row[0])))
+             for c,v in enumerate(row)] for row in rows]
         assert all(table.rowHeight(r) >= table.sizeHintForRow(r) for r in range(table.rowCount()))
         if headers == list(MATRIX_HEADERS) and rows:
             # The legacy test window can expand enough to fit every column.
@@ -94,10 +95,10 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
     book = load_workbook(target)
     try:
         assert book.sheetnames == list(xlsx.SHEET_NAMES)
-        rows = list(book['Когортный анализ'].values)
-        html_blocks = html.presentation(result)[4].blocks
+        rows = list(book['Клиенты'].values)
+        html_blocks = html.presentation(result)[3].blocks
         all_html_rows = [r for block in html_blocks if block['kind']=='table' for r in block['rows']]
-        for title,cards,blocks,notes in cohort_sections(result,include_extended=True):
+        for title,cards,blocks,notes in cohort_sections(result,compact=True):
             assert any(r[0]==title for r in rows)
             assert html.display_text(title) in rendered
             for label,value in cards:
@@ -108,7 +109,7 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
             for headers,values in blocks:
                 assert any(tuple(r[:len(headers)])==tuple(headers) for r in rows)
                 for value_row in values:
-                    assert any([c['text'] for c in r]==[html._cell(v)['text'] for v in value_row] for r in all_html_rows)
+                    assert any([c['text'] for c in r]==[ui._cell_text(v,display=ui.cohort_display,percentage=ui.report.percentage_cell(headers,value_row,c)) for c,v in enumerate(value_row)] for r in all_html_rows)
                     assert any(all(actual==pytest.approx(v) if isinstance(v,float) else actual==v
                                    for actual,v in zip(candidate,value_row)) for candidate in rows)
             assert all(html._cell(text)['text'] in rendered for _,text in notes)
@@ -116,7 +117,7 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
             assert COHORT_LEGACY_TEXT in rendered
         if scenario=='full':
             # M1 is a numeric percentage; future M12 remains text, not zero.
-            sheet = book['Когортный анализ']
+            sheet = book['Клиенты']
             header_row = next(i for i,r in enumerate(rows,1) if tuple(r[:14])==MATRIX_HEADERS)
             assert sheet.cell(header_row+1,3).data_type=='n'
             assert '%' in sheet.cell(header_row+1,3).number_format
@@ -143,7 +144,7 @@ def test_legacy_cache_opens_on_startup_without_automatic_recalculation(dataset,w
         assert tab.displayed_result is not None and 'cohort_statistics' not in tab.displayed_result
         assert path.read_bytes()==before
         assert any(label.text()==COHORT_TITLE.upper() for label in tab.findChildren(QLabel))
-        tables = tab.sections.widget(3).findChildren(QTableWidget)
+        tables = tab.customer_sections.widget(4).findChildren(QTableWidget)
         assert tables[-1].item(0,1).text()==COHORT_LEGACY_TEXT
     finally:
         tab._shutdown()
@@ -162,14 +163,12 @@ def test_extended_matrices_remain_in_exports_without_duplicating_gui_matrix(data
 
 def test_gui_cohort_rounding_matches_html_without_rounding_stored_values(app,monkeypatch):
     number = 2.675  # Binary float formatting with .2f alone would produce 2.67.
-    monkeypatch.setattr(ui,'buyer_sections',lambda result:[])
-    monkeypatch.setattr(ui,'rfm_sections',lambda result:[])
-    monkeypatch.setattr(ui,'cohort_sections',lambda result:[(COHORT_TITLE,[],[(['M1, %'],[(number,)])],[])])
+    monkeypatch.setattr(ui.report,'cohort_sections',lambda result, **kwargs:[(COHORT_TITLE,[],[(['M1, %'],[(number,)])],[])])
     widget = QWidget()
     try:
-        ui._buyer_page(QVBoxLayout(widget),{})
+        ui._customer_cohorts_page(QVBoxLayout(widget),{})
         table = widget.findChild(QTableWidget)
-        assert table.item(0,0).text() == html._cell(number)['text'].replace(',','.') == '2.68'
+        assert table.item(0,0).text() == '2,68 %'
         assert number == 2.675  # Presentation did not change the saved value.
     finally:
         widget.close()

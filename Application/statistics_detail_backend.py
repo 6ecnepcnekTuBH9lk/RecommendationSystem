@@ -24,7 +24,7 @@ from Application.mindbox.identity import CustomerIdResolver
 from Application.mindbox.order_dedup import OrderSnapshots, OrderSnapshotConflict
 from Application.mindbox.selection import MindboxSelectionConfig
 from Application.statistics_purchase_facts import PurchaseOrderFact, PurchasePolicyResult, MonetaryIssue, build_purchase_order_fact
-from Application.statistics_rfm_core import RfmCustomerState
+from Application.statistics_rfm_core import RfmCustomerState, rfm_windows
 from Application.statistics_detail_contract import (
     DetailMetadata, DetailPeriod, OrderMode, OrderHeader, BuyerPolicyMetrics, CoverageStatus,
     CLIENT_COLUMNS, ORDER_COLUMNS, ORDER_LINE_COLUMNS, FORMAT_VERSION, CSV_ENCODING, CSV_DELIMITER,
@@ -55,7 +55,10 @@ def _versions():
     names=('statistics_detail_backend.py','statistics_detail_contract.py','statistics_detail_projection.py',
            'statistics_detail_rfm.py','statistics_detail_storage.py','statistics_rfm_core.py',
            'statistics_purchase_facts.py','statistics_purchase_policy.py','mindbox/identity.py',
-           'mindbox/order_dedup.py','mindbox/adapters/orders.py','mindbox/adapters/customers.py')
+            'mindbox/order_dedup.py','mindbox/adapters/orders.py','mindbox/adapters/customers.py',
+           'statistics_detail_xlsx.py','statistics_unified_context.py','statistics_report_presentation.py',
+           'statistics_export.py','statistics_html_export.py','statistics_chart_data.py',
+           'statistics_html_assets/report.js','statistics_html_assets/report.css')
     return {name:hashlib.sha256((package/name).read_bytes()).hexdigest() for name in names}
 
 
@@ -132,7 +135,7 @@ class _DiskSnapshots:
         return row[0] if row is not None else None
 
     def __setitem__(self,key,value):
-        self.db.execute('INSERT INTO seen VALUES(?,?)',(key,value))
+        self.db.execute('INSERT INTO seen(order_id,digest) VALUES(?,?)',(key,value))
 
 
 def _pack_fact(fact):
@@ -179,7 +182,7 @@ def _unpack_metrics(payload):
 
 def _schema(db):
     db.executescript("""
-        CREATE TABLE seen(order_id TEXT PRIMARY KEY,digest BLOB NOT NULL) WITHOUT ROWID;
+        CREATE TABLE seen(order_id TEXT PRIMARY KEY,digest BLOB NOT NULL,scope TEXT) WITHOUT ROWID;
         CREATE TABLE facts(customer TEXT,ordinal INTEGER,payload TEXT NOT NULL,PRIMARY KEY(customer,ordinal)) WITHOUT ROWID;
         CREATE TABLE owners(customer TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE TABLE event_orders(ordinal INTEGER PRIMARY KEY,order_id TEXT UNIQUE,customer TEXT REFERENCES owners(customer),payload TEXT NOT NULL);
@@ -193,6 +196,10 @@ def _ingest(root,entries,resolver,selection,db,metadata,control):
     selector=OrderSnapshots()
     selector.fingerprints=_DiskSnapshots(db)
     count=selected=lines_count=0
+    rfm_start,rfm_end=rfm_windows(metadata.as_of_date)["LAST_48M"]
+    def snapshot_summary():
+        return dict(rule="FIRST_ELIGIBLE_CANONICAL",scope="ORDERS_HISTORY_BEFORE_CUTOFF",
+                    raw=selector.raw,accepted=count,identical=selector.identical,conflicting=selector.conflicting)
     for entry in entries:
         directory=checked_directory(root,entry['directory'],'orders')
         with closing(_checked_records('orders',directory,control.check)) as records:
@@ -200,8 +207,18 @@ def _ingest(root,entries,resolver,selection,db,metadata,control):
                 occurred=timestamp(raw,'firstAction.dateTimeUtc')
                 if occurred >= metadata.cutoff_exclusive or not any(a <= occurred < b for a,b in metadata.effective_coverage):
                     continue
-                if not selector.accept(raw):  # 01A strict conflict policy; identical repeats only.
+                order_id=identifier(raw,'ids.mindboxId')
+                scope=_json([metadata.includes_event(occurred),rfm_start <= occurred < rfm_end])
+                conflicts=selector.conflicting
+                if not selector.accept(raw,diagnose=True):
+                    if selector.conflicting!=conflicts:
+                        first_scope=db.execute('SELECT scope FROM seen WHERE order_id=?',(order_id,)).fetchone()[0]
+                        if scope!=first_scope:
+                            error=DetailExportError('ORDER_SNAPSHOT_SCOPE_MISMATCH')
+                            error.snapshot_diagnostics=snapshot_summary()
+                            raise error
                     continue
+                db.execute('UPDATE seen SET scope=? WHERE order_id=?',(scope,order_id))
                 source=identifier(raw,'customer.ids.mindboxId')
                 customer=resolver.resolve(source)
                 order_id=identifier(raw,'ids.mindboxId')
@@ -232,7 +249,8 @@ def _ingest(root,entries,resolver,selection,db,metadata,control):
                     db.commit()
                     control.stage('history',count)
     db.commit()
-    return dict(history_orders=count,orders=selected,order_lines=lines_count,identical_snapshots=selector.identical)
+    return dict(history_orders=count,orders=selected,order_lines=lines_count,identical_snapshots=selector.identical,
+                conflicting_snapshots=selector.conflicting,raw_snapshots=selector.raw,snapshot_diagnostics=snapshot_summary())
 
 
 def _prepare_customers(db,profile_db,resolver,metadata,control):
@@ -360,11 +378,11 @@ def _stored_rows(db,table):
         cursor.close()
 
 
-def _verify_zip(path,control):
+def _verify_zip(path,control,expected=FILES):
     with zipfile.ZipFile(path) as archive:
-        if tuple(archive.namelist())!=FILES:
+        if tuple(archive.namelist())!=tuple(expected):
             raise DetailExportError('ARCHIVE_MEMBERS_MISMATCH')
-        for name in FILES:
+        for name in expected:
             with archive.open(name) as stream:
                 while stream.read(64*1024):control.check()
 
@@ -378,14 +396,17 @@ def _target_version(path):
 def export_detail_statistics(*, raw_root, destination, temporary_root, as_of_date,
                              event_period=DetailPeriod(), order_mode=OrderMode.ALL_SELECTED,
                              progress=None, cancelled=None, reserve_bytes=128*1024**2,
-                             max_temporary_bytes=8*1024**3):
-    """Write four linked entries atomically. No Qt, INDEXED, network or implicit as_of.
+                             max_temporary_bytes=8*1024**3, report_result=None, max_rows_per_file=1_000_000, diagnostic=None):
+    """Write linked CSV or a unified safe XLSX report atomically. No Qt or INDEXED.
 
     temporary_root must be an existing admitted private directory on D: outside
     all repositories. Only synthetic sources should be used in automated tests.
     """
     workspace=None
     try:
+        if report_result is not None:
+            from Application.statistics_unified_context import validate_context
+            validate_context(report_result,as_of_date,event_period,order_mode)
         root=reject_reparse(raw_root).resolve()
         destination=reject_reparse(destination).absolute()
         temporary_root=reject_reparse(temporary_root).absolute()
@@ -405,54 +426,74 @@ def export_detail_statistics(*, raw_root, destination, temporary_root, as_of_dat
             selection=MindboxSelectionConfig(**data['selection'])
             coverage=tuple((entry['since'],entry['until']) for entry in entries)
             metadata=DetailMetadata(as_of_date,event_period,'REFERENCE:detail:'+token,coverage,order_mode)
+            if report_result is not None:
+                from Application.statistics_unified_context import validate_coverage
+                validate_coverage(report_result,metadata)
             control.stage('history')
             totals=_ingest(root,entries,resolver,selection,db,metadata,control)
+            snapshots=totals["snapshot_diagnostics"]
+            if diagnostic is not None:
+                try:
+                    diagnostic(snapshots)
+                except Exception:
+                    raise DetailExportError("PROGRESS_CALLBACK_FAILED") from None
             control.stage('personal_metrics')
             rfm=_prepare_customers(db,profiles,resolver,metadata,control)
             expected_clients=db.execute('SELECT COUNT(*) FROM owners').fetchone()[0]
             if db.execute('PRAGMA foreign_key_check').fetchone() is not None:
                 raise DetailExportError('BROKEN_DETAIL_RELATIONS')
             quality={}
-            with workspace.archive_stream() as stream:
-                with zipfile.ZipFile(stream,'w',compression=zipfile.ZIP_DEFLATED,allowZip64=True) as archive:
-                    control.stage('clients')
-                    clients=_csv_entry(archive,FILES[0],CLIENT_COLUMNS,_clients(db,profiles,resolver,metadata,rfm,control,quality),control)
-                    control.stage('orders')
-                    orders=_csv_entry(archive,FILES[1],ORDER_COLUMNS,_stored_rows(db,'event_orders'),control)
-                    control.stage('order_lines')
-                    lines=_csv_entry(archive,FILES[2],ORDER_LINE_COLUMNS,_stored_rows(db,'event_lines'),control)
-                    if (clients,orders,lines)!=(expected_clients,totals['orders'],totals['order_lines']):
-                        raise DetailExportError('ROW_COUNT_MISMATCH')
-                    manifest=dict(format_version=FORMAT_VERSION,generated_at=datetime.now(timezone.utc).isoformat(),
-                        as_of_date=as_of_date.isoformat(),event_period=dict(start_date=event_period.start_date.isoformat() if event_period.start_date else None,
-                            end_date=event_period.end_date.isoformat() if event_period.end_date else None),
-                        source_coverage=[[a.isoformat(),b.isoformat()] for a,b in metadata.orders_coverage],
-                        effective_coverage=[[a.isoformat(),b.isoformat()] for a,b in metadata.effective_coverage],
-                        coverage_status=metadata.coverage_status.value,order_mode=order_mode.value,
-                        identity_coverage=[data['customer_merges']['since'],data['customer_merges']['until']] if data['customer_merges'] else [],
-                        identity_complete_for_orders=all(data['customer_merges'] is not None and
-                            datetime.fromisoformat(data['customer_merges']['since']) <= a and b <= datetime.fromisoformat(data['customer_merges']['until'])
-                            for a,b in metadata.effective_coverage),
-                        profile_semantics='CURRENT_SNAPSHOT_NOT_HISTORICAL',profiles_available=profiles is not None,
-                        policies=dict(STRICT_COMPLETED=['F','sold'],EXTENDED_COMPLETED=['F','sold','CP']),
-                        files=list(FILES),rows=dict(clients=clients,orders=orders,order_lines=lines),
-                        history=totals,quality=quality,source_token=token,rfm_population_token=rfm.token,
-                        algorithms=versions,columns={'clients.csv':list(CLIENT_COLUMNS),'orders.csv':list(ORDER_COLUMNS),'order_lines.csv':list(ORDER_LINE_COLUMNS)},
-                        csv=dict(encoding=CSV_ENCODING,delimiter=CSV_DELIMITER,newline='CRLF',null=NULL_TOKEN,text_prefix=CSV_TEXT_PREFIX,
-                                 decimal='fixed-point exact',datetime='ISO 8601 UTC',boolean='1/0'),
-                        notes=['Contains personal data. Do not commit or log CSV rows.',
-                               'IDs are original strings; remove exactly one text prefix according to schema.',
-                               'RUB and KZT are separate. Known subtotals are not net revenue or LTV.',
-                               'First observed purchase is not proven lifetime first purchase.',
-                               'Customers are current snapshot; communication permissions are UNKNOWN.',
-                               'Incomplete monetary remains NULL in RFM; full-history known subtotals are separate columns.'])
-                    control.stage('zip_verification')
-                    payload=_json(manifest).encode('utf-8')
-                    control.consume(len(payload))
-                    info=zipfile.ZipInfo(FILES[3],date_time=(1980,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED
-                    archive.writestr(info,payload)
-                os.fsync(stream.fileno())
-            _verify_zip(workspace.partial,control)
+            if report_result is not None:
+                from Application.statistics_unified_context import validate_purchase_counts
+                validate_purchase_counts(report_result,db,control)
+                manifest=_write_unified_archive(workspace,report_result,
+                    _clients(db,profiles,resolver,metadata,rfm,control,quality),
+                    _stored_rows(db,'event_orders'),_stored_rows(db,'event_lines'),
+                    expected_counts=dict(clients=expected_clients,orders=totals['orders'],order_lines=totals['order_lines']),
+                    snapshot_diagnostics=snapshots,
+                    max_rows=max_rows_per_file)
+            else:
+                with workspace.archive_stream() as stream:
+                    with zipfile.ZipFile(stream,'w',compression=zipfile.ZIP_DEFLATED,allowZip64=True) as archive:
+                        control.stage('clients')
+                        clients=_csv_entry(archive,FILES[0],CLIENT_COLUMNS,_clients(db,profiles,resolver,metadata,rfm,control,quality),control)
+                        control.stage('orders')
+                        orders=_csv_entry(archive,FILES[1],ORDER_COLUMNS,_stored_rows(db,'event_orders'),control)
+                        control.stage('order_lines')
+                        lines=_csv_entry(archive,FILES[2],ORDER_LINE_COLUMNS,_stored_rows(db,'event_lines'),control)
+                        if (clients,orders,lines)!=(expected_clients,totals['orders'],totals['order_lines']):
+                            raise DetailExportError('ROW_COUNT_MISMATCH')
+                        manifest=dict(format_version=FORMAT_VERSION,generated_at=datetime.now(timezone.utc).isoformat(),
+                            as_of_date=as_of_date.isoformat(),event_period=dict(start_date=event_period.start_date.isoformat() if event_period.start_date else None,
+                                end_date=event_period.end_date.isoformat() if event_period.end_date else None),
+                            source_coverage=[[a.isoformat(),b.isoformat()] for a,b in metadata.orders_coverage],
+                            effective_coverage=[[a.isoformat(),b.isoformat()] for a,b in metadata.effective_coverage],
+                            coverage_status=metadata.coverage_status.value,order_mode=order_mode.value,
+                            identity_coverage=[data['customer_merges']['since'],data['customer_merges']['until']] if data['customer_merges'] else [],
+                            identity_complete_for_orders=all(data['customer_merges'] is not None and
+                                datetime.fromisoformat(data['customer_merges']['since']) <= a and b <= datetime.fromisoformat(data['customer_merges']['until'])
+                                for a,b in metadata.effective_coverage),
+                            profile_semantics='CURRENT_SNAPSHOT_NOT_HISTORICAL',profiles_available=profiles is not None,
+                            policies=dict(STRICT_COMPLETED=['F','sold'],EXTENDED_COMPLETED=['F','sold','CP']),
+                            files=list(FILES),rows=dict(clients=clients,orders=orders,order_lines=lines),
+                            history=totals,quality=quality,source_token=token,rfm_population_token=rfm.token,
+                            algorithms=versions,columns={'clients.csv':list(CLIENT_COLUMNS),'orders.csv':list(ORDER_COLUMNS),'order_lines.csv':list(ORDER_LINE_COLUMNS)},
+                            csv=dict(encoding=CSV_ENCODING,delimiter=CSV_DELIMITER,newline='CRLF',null=NULL_TOKEN,text_prefix=CSV_TEXT_PREFIX,
+                                     decimal='fixed-point exact',datetime='ISO 8601 UTC',boolean='1/0'),
+                            notes=['Contains personal data. Do not commit or log CSV rows.',
+                                   'IDs are original strings; remove exactly one text prefix according to schema.',
+                                   'RUB and KZT are separate. Known subtotals are not net revenue or LTV.',
+                                   'First observed purchase is not proven lifetime first purchase.',
+                                   'Customers are current snapshot; communication permissions are UNKNOWN.',
+                                   'Incomplete monetary remains NULL in RFM; full-history known subtotals are separate columns.'])
+                        control.stage('zip_verification')
+                        payload=_json(manifest).encode('utf-8')
+                        control.consume(len(payload))
+                        info=zipfile.ZipInfo(FILES[3],date_time=(1980,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED
+                        archive.writestr(info,payload)
+                    os.fsync(stream.fileno())
+            control.stage("zip_verification")
+            _verify_zip(workspace.partial,control,manifest["files"] if report_result is not None else FILES)
             if _versions()!=versions:raise DetailExportError('ALGORITHM_CHANGED')
         workspace.cleanup_state()  # Cleanup failure must not replace an existing destination.
         control.stage('atomic_save')
@@ -475,15 +516,51 @@ def export_detail_statistics(*, raw_root, destination, temporary_root, as_of_dat
     except Exception as error:
         if workspace is not None and workspace.control.stopped:
             raise InterruptedError('Detail export cancelled') from None
+        from Application.statistics_detail_job import ERRORS
+        known=getattr(error,'code',None) or str(error)
+        code=known if known in ERRORS else 'DETAIL_EXPORT_FAILED'
         if isinstance(error, PermissionError):
-            raise DetailExportError('ACCESS_DENIED') from None
-        if isinstance(error, OSError):
+            code='ACCESS_DENIED'
+        elif isinstance(error, OSError):
             import errno
-            raise DetailExportError('INSUFFICIENT_SPACE' if error.errno == errno.ENOSPC else 'IO_ERROR') from None
-        raise DetailExportError() from None
+            code='INSUFFICIENT_SPACE' if error.errno == errno.ENOSPC else 'IO_ERROR'
+        from Application.statistics_detail_job import exception_diagnostic
+        failure=DetailExportError(code)
+        failure.diagnostic=exception_diagnostic(error)
+        raise failure from None
     finally:
         if workspace is not None:
             try:
                 workspace.cleanup_state()
             finally:
                 workspace.cleanup_partial()
+
+def _write_unified_archive(workspace, result, clients, orders, lines, *, expected_counts, max_rows, snapshot_diagnostics):
+    from Application.statistics_detail_xlsx import CheckedStream, SafeProjection, write_detail_members
+    from Application.statistics_export import write_statistics_xlsx
+    from Application.statistics_html_export import build_statistics_html
+    control=workspace.control
+    names=["Статистика.xlsx","Статистика.html"]
+    with workspace.archive_stream() as stream:
+        with zipfile.ZipFile(stream,"w",compression=zipfile.ZIP_DEFLATED,allowZip64=True) as archive:
+            control.stage("statistics_xlsx")
+            with archive.open(names[0],"w",force_zip64=True) as target:
+                write_statistics_xlsx(result,CheckedStream(target,control),check=control.check,workspace=workspace,snapshot_diagnostics=snapshot_diagnostics)
+            control.stage("statistics_html")
+            html=build_statistics_html(result,snapshot_diagnostics=snapshot_diagnostics).encode("utf-8")
+            with archive.open(names[1],"w",force_zip64=True) as target:
+                for offset in range(0,len(html),64*1024):
+                    control.consume(min(64*1024,len(html)-offset))
+                    target.write(html[offset:offset+64*1024])
+            del html
+            projection=SafeProjection()
+            counts={}
+            for kind,rows in (("clients",clients),("orders",orders),("order_lines",lines)):
+                control.stage(kind)
+                count,files=write_detail_members(archive,kind,rows,workspace,projection,max_rows=max_rows)
+                counts[kind]=count
+                names.extend(files)
+            if counts!=expected_counts:
+                raise DetailExportError("ROW_COUNT_MISMATCH")
+        os.fsync(stream.fileno())
+    return dict(format_version="unified-safe-xlsx-1",rows=counts,files=names,snapshot_diagnostics=snapshot_diagnostics)

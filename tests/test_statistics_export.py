@@ -57,7 +57,7 @@ def test_category_path_beyond_excel_limit_fails_atomically_without_silent_trunca
     with pytest.raises(ValueError, match='32767'):
         export.export_statistics(result, path)
     assert path.read_bytes() == b'previous report'
-    assert any('R' * 32768 in cell['text'] for block in presentation(result)[3].blocks
+    assert any('R' * 32768 in cell['text'] for block in presentation(result)[2].blocks
                if block['kind'] == 'table' for row in block['rows'] for cell in row)
 
 
@@ -76,11 +76,11 @@ def test_workbook_snapshot_metadata_types_and_sections(sample_result, tmp_path):
     assert result == original
     book = load_workbook(path)
     assert_minimal_tables(book)
-    summary = book['Сводка']
-    assert find(summary, 'Дата и время расчета')[1].value == datetime.fromisoformat(result['calculated_at']).astimezone().strftime('%d.%m.%Y %H:%M:%S')
-    assert find(summary, 'Вид номенклатуры')[1].value == 'Рубашки; Не указано'
+    summary = book['Действия']
+    assert find(summary, 'Дата расчёта')[1].value == datetime.fromisoformat(result['calculated_at']).strftime('%d.%m.%Y')
+    assert [r[1] for r in summary.values if r[0]=='Вид номенклатуры'] == ['Рубашки','Не указано']
     assert find(summary, 'Сезон')[1].value == 'Все значения'
-    assert find(book['Техническая информация'], 'Дата начала')[1].value == datetime(2025, 1, 2)
+    assert find(summary, 'Начало периода')[1].value == datetime(2025, 1, 2)
     assert kpi(summary, 'Количество взаимодействий').value == 3
     assert all(cell.value != 'Проверка предупреждения' for row in summary for cell in row)
     orders = book['Заказы']
@@ -93,9 +93,10 @@ def test_workbook_snapshot_metadata_types_and_sections(sample_result, tmp_path):
     assert find(orders, 'Магазины и каналы — RUB') and find(orders, 'Магазины и каналы — KZT')
     assert find(book['Товары'], 'Зима 2025')
     assert find(book['Товары'], '000001')[0].data_type == 's'
-    assert find(book['Клиенты'], 'Средний возраст')[1].value is None
+    assert find(book['Клиенты'], 'Средний возраст')[1].value == '—'
     assert find(book['Клиенты'], 'Доля активных клиентов, совершивших покупку, %')[1].value == 50
-    assert find(book['Техническая информация'], 'Источник')[2].value == 'Источник данных'
+    assert any(tuple(row[:3])==("Источник","Период / состояние","Источник данных")
+               for row in book["Техническая информация"].values)
     assert find(book['Техническая информация'], 'Заказы вне периода статистики')[1].data_type == 'n'
     assert all(cell.value != 'Проверка предупреждения' for row in book['Техническая информация'] for cell in row)
     book.close()
@@ -121,7 +122,7 @@ def test_atomic_failure_keeps_destination_and_cleans_temp(sample_result, tmp_pat
     if phase == 'table':
         monkeypatch.setattr(export._Sheet, 'table', fail)
     elif phase == 'save':
-        monkeypatch.setattr(export.Workbook, 'save', fail)
+        monkeypatch.setattr(export, '_save_report_book', fail)
     elif phase == 'fsync':
         monkeypatch.setattr(export.os, 'fsync', fail)
     else:
@@ -152,11 +153,11 @@ def test_raw_actions_in_technical_and_filter_independent(sample_result, tmp_path
         path = tmp_path / f'raw-{filtered}.xlsx'
         export.export_statistics(sample_result, path)
         book = load_workbook(path)
-        assert kpi(book['Сводка'], 'Количество взаимодействий').value == sample_result['total_interactions']
+        assert kpi(book['Действия'], 'Количество взаимодействий').value == sample_result['total_interactions']
         business = {cell.value for row in book['Действия'] for cell in row}
         assert 'Системное название' not in business and 'Классификация событий' not in business
         technical = book['Техническая информация']
-        assert find(technical, 'Исходные Actions')[1].value == 100
+        assert find(technical, 'Исходные действия')[1].value == 100
         raw = [find(technical, name) for name, _ in sample_result['action_types']]
         assert all(cell.data_type == 'n' for row in raw for cell in row[1:3])
         values = [(row[1].value, row[2].value) for row in raw]
@@ -206,7 +207,7 @@ def assert_minimal_tables(book):
                                for area in sheet.merged_cells.ranges)
             checked += 1
         assert all(cell.hyperlink is None and cell.data_type != 'f' for row in sheet for cell in row)
-        assert all(cell.value not in ('Обзор', 'Таблицы', 'Аналитический обзор', 'Подпись диаграммы')
+        assert all(cell.value not in ('Таблицы', 'Аналитический обзор', 'Подпись диаграммы')
                    for row in sheet for cell in row)
         assert all((row.height or export.ROW_HEIGHT) <= export.MAX_ROW_HEIGHT
                    for row in sheet.row_dimensions.values())
@@ -269,13 +270,11 @@ def test_plain_tables_preserve_currencies_ranking_and_summary(sample_result, tmp
     book = load_workbook(path)
     try:
         assert assert_minimal_tables(book)
-        summary = book['Сводка']
+        summary = book['Действия']
         for label, field in [('Количество взаимодействий', 'total_interactions'), ('Количество заказов', 'orders'),
-                             ('Количество позиций в заказах', 'order_lines'), ('Профили текущего среза', 'customers'),
-                             ('Клиенты с товарными взаимодействиями', 'interaction_users'), ('Покупатели', 'purchase_users'),
-                             ('Повторные покупатели', 'repeat_buyers'), ('Доля повторных покупателей', 'repeat_buyer_rate')]:
+                             ('Количество позиций в заказах', 'order_lines'), ('Профили текущего среза', 'customers')]:
             assert kpi(summary, label).value == result[field]
-        assert kpi(summary, 'Доля повторных покупателей').number_format == export.PERCENT_FORMAT
+        assert kpi(book['Клиенты'], 'Доля повторных покупателей, %').number_format == export.PERCENT_FORMAT
         assert len([row for row in book['Товары'].values if row[0] == '000019']) == 2
         for month, _, rub, _, kzt in result['order_monthly_dynamics']:
             row = find(book['Заказы'], month[5:] + '.' + month[:4])
@@ -320,8 +319,8 @@ def test_percentages_and_quantity_formats_do_not_change_values(sample_result, tm
     try:
         cell = find(book['Клиенты'], 'Доля активных клиентов, совершивших покупку, %')[1]
         assert cell.value == 43.48 and cell.number_format == export.PERCENT_FORMAT
-        assert find(book['Товары'], 'offline1C')[4].number_format == export.PERCENT_FORMAT
-        assert kpi(book['Сводка'], 'Доля повторных покупателей').value == 12.34
+        assert find(book['Товары'], 'offline1C')[4].number_format == '#,##0.0000" %"'
+        assert kpi(book['Клиенты'], 'Доля повторных покупателей, %').value == 12.34
     finally:
         book.close()
 
@@ -339,10 +338,10 @@ def test_long_ranges_names_and_filter_context_remain_complete(sample_result, tmp
     book = load_workbook(path)
     try:
         assert assert_minimal_tables(book)
-        assert find(book['Сводка'], 'Сезон')[1].value.startswith('Выбрано значений: 90.')
-        metadata = [row[1] for row in book['Техническая информация'].values if row[0] == 'Сезон']
+        assert len([r for r in book['Действия'].values if r[0]=='Сезон']) == 90
+        metadata = [row[1] for row in book['Действия'].values if row[0] == 'Сезон']
         assert tuple(metadata) == AnalysisFilter.from_dict(sample_result['analysis_filter']).collections
-        assert kpi(book['Сводка'], 'Количество взаимодействий').row <= 20
+        assert kpi(book['Действия'], 'Количество взаимодействий').row > len(metadata)
         assert len([row for row in book['Заказы'].values if isinstance(row[0], str) and row[0].startswith(name)]) == 240
         for month, views, *_ in sample_result['action_monthly_dynamics']:
             assert find(book['Действия'], month[5:] + '.' + month[:4])[1].value == views
@@ -352,7 +351,9 @@ def test_long_ranges_names_and_filter_context_remain_complete(sample_result, tmp
 
 def test_all_snapshot_fields_consumed_no_mutation(sample_result, tmp_path):
     class Observed(dict):
-        used = set()
+        def __init__(self,*args):
+            super().__init__(*args)
+            self.used=set()
 
         def __getitem__(self, name):
             self.used.add(name)
@@ -360,8 +361,10 @@ def test_all_snapshot_fields_consumed_no_mutation(sample_result, tmp_path):
     original = deepcopy(sample_result)
     observed = Observed(sample_result)
     export.export_statistics(observed, tmp_path / 'all.xlsx')
-    assert set(sample_result) - {'warnings'} <= observed.used
-    assert 'warnings' not in observed.used
+    from Application.statistics_report_presentation import report_presentation
+    gui_observed=Observed(sample_result)
+    report_presentation(gui_observed)
+    assert observed.used==gui_observed.used
     assert observed == original
 
 
@@ -386,9 +389,9 @@ def test_empty_valid_snapshot_has_only_real_tables(sample_result, tmp_path, miss
     book = load_workbook(path)
     try:
         assert all(not sheet._charts for sheet in book)
-        assert kpi(book['Сводка'], 'Профили текущего среза').value == ('Нет данных' if missing_profiles else 0)
-        assert kpi(book['Сводка'], 'Количество взаимодействий').value == 0
-        assert find(book['Клиенты'], 'Средний возраст')[1].value is None
+        assert kpi(book['Действия'], 'Профили текущего среза').value == ('—' if missing_profiles else 0)
+        assert kpi(book['Действия'], 'Количество взаимодействий').value == 0
+        assert find(book['Клиенты'], 'Средний возраст')[1].value == '—'
         assert assert_minimal_tables(book)
         assert all('нет данных для диаграмм' not in str(cell.value).lower() for sheet in book for row in sheet for cell in row)
     finally:
@@ -406,7 +409,7 @@ def test_valid_full_and_cache_json_roundtrip_use_same_snapshot(sample_result, tm
         book = load_workbook(path)
         try:
             assert assert_minimal_tables(book)
-            assert kpi(book['Сводка'], 'Количество взаимодействий').value == 5
+            assert kpi(book['Действия'], 'Количество взаимодействий').value == 5
             assert find(book['Заказы'], 'RUB')[4].value == 40
             assert find(book['Заказы'], 'KZT')[4].value == 50
         finally:

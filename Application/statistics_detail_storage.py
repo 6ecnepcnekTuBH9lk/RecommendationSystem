@@ -28,11 +28,12 @@ def outside_repository(path):
 
 
 def admit_destination(parent):
+    """Use the accepted single-user parent policy; private objects stay strict."""
     reject_reparse(parent)
     local_volume(parent)
     if os.name=='nt':
         for fact in inspect_acls((parent,*parent.parents)):
-            check_acl_facts(fact,private=False)
+            check_acl_facts(fact,private=False,local_parent=True)
     else:
         for p in (parent,*parent.parents):
             info=p.stat()
@@ -132,6 +133,7 @@ class DetailWorkspace:
         self.root_id=self.folder_id=self.file_id=None
         self.parent_id=None
         self._fd=None
+        self.owned_files={}
 
     def prepare(self):
         reject_reparse(self.root)
@@ -163,6 +165,28 @@ class DetailWorkspace:
         self.control.partial=self.partial
         return self.db
 
+    def create_state_file(self, *, prefix, suffix):
+        check_owned_staging(self.root,self.folder,self.root_id,self.folder_id)
+        if any(c in prefix+suffix for c in ("/","\\",":")):
+            raise DetailExportError('INVALID_EXPORT_OPTIONS')
+        fd,name=tempfile.mkstemp(prefix=prefix,suffix=suffix,dir=self.folder)
+        os.close(fd)
+        path=Path(name)
+        self.owned_files[path.name]=path_identity(path)
+        protect_file(path)
+        if path.parent!=self.folder or path_identity(path)!=self.owned_files[path.name]:
+            raise DetailExportError('SENSITIVE_STATE_CLEANUP_FAILED',technical_path=self.folder)
+        self.control.check()
+        return path
+
+    def release_state_file(self, path):
+        path=Path(path)
+        check_owned_staging(self.root,self.folder,self.root_id,self.folder_id)
+        if path.parent!=self.folder or self.owned_files.get(path.name)!=path_identity(path):
+            raise DetailExportError('SENSITIVE_STATE_CLEANUP_FAILED',technical_path=self.folder)
+        path.unlink()
+        del self.owned_files[path.name]
+
     def archive_stream(self):
         fd,self._fd=self._fd,None
         return os.fdopen(fd,'wb',buffering=0)
@@ -183,7 +207,11 @@ class DetailWorkspace:
         if self.folder is not None:
             try:
                 check_owned_staging(self.root,self.folder,self.root_id,self.folder_id)
-                allowed={'state.sqlite','state.sqlite-journal','state.sqlite-wal','state.sqlite-shm'}
+                allowed={'state.sqlite','state.sqlite-journal','state.sqlite-wal','state.sqlite-shm'} | set(self.owned_files)
+                for name,identity in self.owned_files.items():
+                    path=self.folder/name
+                    if not path.exists() or path_identity(path)!=identity:
+                        raise ValueError('Owned file changed')
                 if any(p.name not in allowed for p in self.folder.iterdir()):
                     raise ValueError('Unexpected job file')
                 for p in self.folder.iterdir():

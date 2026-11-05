@@ -35,9 +35,10 @@ def _date_edit(value):
 
 
 class DetailExportDialog(QDialog):
-    def __init__(self, parent, source, selection, raw_root):
+    def __init__(self, parent, source, selection, raw_root, *, report_result=None):
         super().__init__(parent)
-        self.setWindowTitle('Экспорт данных покупателей')
+        self.setWindowTitle('Экспорт отчёта' if report_result is not None else 'Экспорт данных покупателей')
+        self.report_result = report_result
         self.setMinimumWidth(590)
         self.raw_root = raw_root
         self.options = None
@@ -79,12 +80,14 @@ class DetailExportDialog(QDialog):
             row.addWidget(button)
             form.addRow(title, row)
         layout.addLayout(form)
-        layout.addWidget(_note('Дата оценки предложена по окончанию выбранного периода; без периода — по последней '
+        layout.addWidget(_note("Период и дата отсечения взяты из показанной статистики." if report_result is not None else
+                              'Дата оценки предложена по окончанию выбранного периода; без периода — по последней '
                               'доступной дате покрытия Orders, не позднее текущей UTC-даты. Дату можно изменить.'))
         layout.addWidget(_note('Все заказы включает возвраты и отмены. Режим покупок оставляет заказы, '
                               'признанные хотя бы одной из двух политик. Фильтр товаров статистики не применяется.'))
         layout.addWidget(_note(PERIOD_NOTE))
-        layout.addWidget(_note(PII_NOTE))
+        layout.addWidget(_note("В архив войдут статистика Excel/HTML и связанные обезличенные XLSX покупателей, заказов и позиций."
+                              if report_result is not None else PII_NOTE))
         layout.addWidget(self.error)
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -97,6 +100,12 @@ class DetailExportDialog(QDialog):
         self.dismiss.clicked.connect(self.reject)
         self.all_history.toggled.connect(self._toggle_period)
         self._toggle_period(self.all_history.isChecked())
+        if report_result is not None:
+            from Application.statistics_unified_context import context_for_result
+            context = context_for_result(report_result)
+            self.as_of.setDate(QDate(context.as_of.year, context.as_of.month, context.as_of.day))
+            for control in (self.all_history,self.start_date,self.end_date,self.as_of,self.mode):
+                control.setEnabled(False)
 
     def _toggle_period(self, checked):
         self.start_date.setEnabled(not checked)
@@ -105,7 +114,10 @@ class DetailExportDialog(QDialog):
     def choose_destination(self):
         directory = PROJECT_ROOT.parent
         filename = 'Данные_покупателей_'+datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')+'.zip'
-        value, _ = QFileDialog.getSaveFileName(self, 'Экспорт данных покупателей', str(directory/filename), 'ZIP (*.zip)')
+        if self.report_result is not None:
+            from Application.statistics_bundle_export import suggested_filename
+            filename = Path(suggested_filename(self.report_result)).stem+'.zip'
+        value, _ = QFileDialog.getSaveFileName(self, self.windowTitle(), str(directory/filename), 'ZIP (*.zip)')
         if value:
             target = Path(value if value.lower().endswith('.zip') else value+'.zip')
             # Native dialog confirmed the exact existing path, when no suffix was added.
@@ -123,6 +135,9 @@ class DetailExportDialog(QDialog):
                       DetailPeriod(self.start_date.date().toPyDate(), self.end_date.date().toPyDate()))
             as_of, mode = self.as_of.date().toPyDate(), self.mode.currentData()
             validate_period(as_of, period, mode)
+            if self.report_result is not None:
+                from Application.statistics_unified_context import validate_context
+                validate_context(self.report_result,as_of,period,mode)
             if not self.destination.text().strip() or not self.temporary_root.text().strip():
                 raise DetailExportError('INVALID_EXPORT_PATH')
             root, target, temporary = validate_paths(self.raw_root, self.destination.text().strip(),

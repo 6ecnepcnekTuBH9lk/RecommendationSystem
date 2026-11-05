@@ -19,3 +19,19 @@ input{min-width:0;flex:1;max-width:480px;padding:9px 12px;border:1px solid #c3d3
 @media(max-width:900px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.charts{grid-template-columns:1fr}nav{justify-content:flex-start}header,main{padding-inline:18px}}
 @media(max-width:500px){dl{grid-template-columns:1fr}h1{font-size:25px}.kpi strong{font-size:23px}.kpi{padding:13px}.chart-card{padding:10px}.search{flex-wrap:wrap}.chart,.chart.donut{height:360px}}
 @media print{nav,.search,.modebar{display:none!important}section[hidden]{display:block}.table-scroll{max-height:none;overflow:visible}.charts{grid-template-columns:1fr}.chart-card{break-inside:avoid}body{background:white}}
+
+/* The shared five-page report and nested Client groups. */
+.subnav{position:static;border:0;justify-content:flex-start;padding:0 0 16px;background:transparent}
+.section-title{text-transform:uppercase;text-align:center}
+.kpis[data-count="2"]{grid-template-columns:repeat(2,minmax(0,1fr))}
+.kpis[data-count="3"],.kpis[data-count="6"]{grid-template-columns:repeat(3,minmax(0,1fr))}
+.chart{height:340px}.heatmap{max-height:420px}.heatmap td{min-width:150px}
+header dl{max-height:260px;overflow:auto;margin-bottom:20px}
+.rfm-controls{display:flex;gap:18px;align-items:center;margin-bottom:12px}
+.rfm-controls select{font:inherit;padding:6px 12px}
+nav button[aria-selected=true]{color:#8541ca;background:#f0e5fc}
+.kpi strong{color:#555}
+@media(max-width:900px){.kpis[data-count]{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:500px){.kpis[data-count]{grid-template-columns:minmax(0,1fr)}}
+
+.subnav{position:sticky;top:var(--main-nav-height,57px);z-index:4;background:#f3f5f8;padding:8px 0}

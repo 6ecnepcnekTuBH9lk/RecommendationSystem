@@ -12,16 +12,18 @@ from Application.statistics_detail_job import SourceInfo, MAX_MESSAGE
 from Application.tabs.statistics_detail_dialog import DetailExportDialog
 from Application import statistics_detail_process as process_module
 from Application.tabs import dataset_statistics_tab as ui
-from tests.tabs.test_dataset_statistics_tab import app as app_fixture, window as window_fixture, wait_until
+from tests.tabs.test_dataset_statistics_tab import app as app_fixture, window as window_fixture, sample_result, wait_until
 
 app = app_fixture
 window = window_fixture
+__all__=['sample_result']
 
 pytestmark = pytest.mark.usefixtures('window_settings')
 
 
 @pytest.fixture
-def parameters(tmp_path):
+def parameters(tmp_path,window,sample_result):
+    window[1].render(sample_result)
     private = tmp_path/'private'
     private.mkdir()
     return dict(raw_root=tmp_path/'source', destination=tmp_path/'detail.zip',temporary_root=private,
@@ -39,13 +41,8 @@ def synthetic(monkeypatch, script):
 
 
 def wire_dialog(monkeypatch, parameters, *, accepted=True):
-    monkeypatch.setattr(ui,'inspect_sources',lambda *a:SourceInfo(date(2020,1,1),date(2026,8,31)))
-    class Dialog:
-        def __init__(self,*args):
-            self.options=parameters
-        def exec(self):
-            return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
-    monkeypatch.setattr(ui,'DetailExportDialog',Dialog)
+    monkeypatch.setattr(ui.QFileDialog,'getSaveFileName',lambda *a:(
+        str(parameters["destination"]) if accepted else "", "ZIP-архив (*.zip)"))
 
 
 def progress_script(terminal):
@@ -53,11 +50,13 @@ def progress_script(terminal):
             "time.sleep(.1); print("+repr(json.dumps(terminal))+",flush=True)")
 
 
-def test_button_exists_without_displayed_result_and_old_export_stays(window):
+def test_one_export_button_requires_displayed_result(window):
+    from PyQt6.QtWidgets import QPushButton
     _,tab=window
-    assert tab.displayed_result is None and tab.detail_export_button.isEnabled()
-    assert tab.detail_export_button.text().strip()=='Экспорт данных покупателей'
-    assert tab.export_button.text().strip()=='Экспорт статистики' and not tab.export_button.isEnabled()
+    assert tab.displayed_result is None and not tab.export_button.isEnabled()
+    labels=[b.text().strip() for b in tab.findChildren(QPushButton)]
+    assert labels.count("Экспорт отчета")==1
+    assert "Экспорт статистики" not in labels and "Экспорт данных покупателей" not in labels
 
 
 def test_dialog_cancel_and_missing_sources_never_launch_worker(window,monkeypatch,parameters):
@@ -65,11 +64,8 @@ def test_dialog_cancel_and_missing_sources_never_launch_worker(window,monkeypatc
     wire_dialog(monkeypatch,parameters,accepted=False)
     monkeypatch.setattr(ui,'DetailExportProcess',lambda *a:pytest.fail('Unexpected worker'))
     tab.export_details()
-    assert tab.detail_process is None and tab.refresh.isEnabled() and tab.detail_export_button.isEnabled()
-    def unavailable(*a):raise ValueError('SYNTH_PRIVATE@example.invalid')
-    monkeypatch.setattr(ui,'inspect_sources',unavailable)
-    tab.export_details()
-    assert 'canonical' in tab.detail_status.text() and 'SYNTH_PRIVATE' not in tab.detail_status.text()
+    wait_until(lambda:tab._export_task is None and not tab._detail_dialog_open)
+    assert tab.detail_process is None and tab.refresh.isEnabled() and tab.export_button.isEnabled()
 
 
 def test_dialog_defaults_from_coverage_and_filter_are_independent(window,parameters):
@@ -123,12 +119,12 @@ def test_file_chooser_and_manual_overwrite_do_not_create_zip(window,parameters,m
 
 def test_success_real_qprocess_current_python_workdir_and_isolated_state(window,parameters,monkeypatch):
     _,tab=window
-    before={'sentinel':'aggregate'}
+    before=tab.displayed_result
     tab.displayed_result=before
     tab.cache_path.write_bytes(b'unchanged aggregate cache')
     wire_dialog(monkeypatch,parameters)
-    calls=synthetic(monkeypatch,progress_script(dict(event='finished',rows=dict(clients=1,orders=2,order_lines=3))))
-    tab.export_details()
+    calls=synthetic(monkeypatch,progress_script(dict(event='finished',files=2)))
+    tab._start_details(dict(destination=parameters['destination']))
     worker=tab.detail_process
     assert tab.process is None and worker is not None and not tab.refresh.isEnabled()
     tab.start()
@@ -139,9 +135,9 @@ def test_success_real_qprocess_current_python_workdir_and_isolated_state(window,
     assert calls[0][0]==sys.executable and calls[0][1][:2]==['-u','-B']
     assert calls[0][2]==str(ui.PROJECT_ROOT)
     assert 'scripts' in calls[0][1][2] and 'statistics_detail_export.py' in calls[0][1][2]
-    assert 'сохранена' in tab.detail_status.text() and 'Клиентов: 1' in tab.detail_status.text()
+    assert 'сохранен' in tab.detail_status.text() and 'Клиентов:' not in tab.detail_status.text()
     assert tab.displayed_result is before and tab.cache_path.read_bytes()==b'unchanged aggregate cache'
-    assert tab.refresh.isEnabled() and tab.export_button.isEnabled() and tab.detail_export_button.isEnabled()
+    assert tab.refresh.isEnabled() and tab.export_button.isEnabled() and tab.export_button.isEnabled()
 
 
 @pytest.mark.parametrize('close',[False,True])
@@ -149,9 +145,9 @@ def test_cooperative_cancel_and_close_wait_for_worker_cleanup(window,parameters,
     root,tab=window
     parameters['destination'].write_bytes(b'previous')
     wire_dialog(monkeypatch,parameters)
-    synthetic(monkeypatch,"import sys,time; sys.stdin.readline(); time.sleep(.15); "
+    synthetic(monkeypatch,"import sys,time; sys.stdin.readline(); sys.stdin.readline(); time.sleep(.15); "
               "print('{\"event\":\"cancelled\"}',flush=True); raise SystemExit(2)")
-    tab.export_details()
+    tab._start_details(dict(destination=parameters['destination']))
     process=tab.detail_process.process
     wait_until(lambda:process.state()==QProcess.ProcessState.Running)
     ticks=[]
@@ -167,9 +163,9 @@ def test_cooperative_cancel_and_close_wait_for_worker_cleanup(window,parameters,
     assert tab.detail_process is not None and not tab.detail_cancel.isEnabled()
     wait_until(lambda:tab.detail_process is None)
     timer.stop()
-    assert ticks and 'отменён' in tab.detail_status.text()
+    assert ticks and 'отменен' in tab.detail_status.text()
     assert parameters['destination'].read_bytes()==b'previous'
-    assert tab.detail_export_button.isEnabled() and tab.refresh.isEnabled()
+    assert tab.export_button.isEnabled() and tab.refresh.isEnabled()
     if close:wait_until(lambda:not root.isVisible())
 
 
@@ -182,7 +178,7 @@ def test_invalid_or_crashed_worker_is_never_success_and_never_echoes_pii(window,
         'extra_field':json.dumps(dict(event='progress',stage='orders',processed=1,email='SYNTH_PRIVATE')),
     }
     if kind in bad:
-        script="import sys; print("+repr(bad[kind])+",flush=True); sys.stdin.readline(); raise SystemExit(2)"
+        script="import sys; print("+repr(bad[kind])+",flush=True); sys.stdin.readline(); sys.stdin.readline(); raise SystemExit(2)"
     elif kind=='partial':
         script="import sys; sys.stdout.write('SYNTH_PRIVATE'); sys.stdout.flush()"
     elif kind=='false_success':
@@ -190,16 +186,16 @@ def test_invalid_or_crashed_worker_is_never_success_and_never_echoes_pii(window,
     else:
         script="raise SystemExit(7)"
     synthetic(monkeypatch,script)
-    tab._start_details(parameters)
+    tab._start_details(dict(destination=parameters['destination']))
     wait_until(lambda:tab.detail_process is None)
-    assert 'сохранена' not in tab.detail_status.text() and 'SYNTH_PRIVATE' not in tab.detail_status.text()
-    assert tab.refresh.isEnabled() and tab.detail_export_button.isEnabled()
+    assert 'сохранен' not in tab.detail_status.text() and 'SYNTH_PRIVATE' not in tab.detail_status.text()
+    assert tab.refresh.isEnabled() and tab.export_button.isEnabled()
 
 
 def test_failed_start_and_backend_error_restore_controls(window,parameters,monkeypatch):
     _,tab=window
     monkeypatch.setattr(process_module.sys,'executable','missing-detail-python-executable')
-    tab._start_details(parameters)
+    tab._start_details(dict(destination=parameters['destination']))
     wait_until(lambda:tab.detail_process is None)
     assert 'FAILED_TO_START' in tab.detail_status.text() and tab.refresh.isEnabled()
 
@@ -207,7 +203,7 @@ def test_failed_start_and_backend_error_restore_controls(window,parameters,monke
 def test_known_backend_error_is_explained(window,parameters,monkeypatch):
     _,tab=window
     synthetic(monkeypatch,"print('{\"event\":\"error\",\"code\":\"INSUFFICIENT_SPACE\"}',flush=True); raise SystemExit(1)")
-    tab._start_details(parameters)
+    tab._start_details(dict(destination=parameters['destination']))
     wait_until(lambda:tab.detail_process is None)
     assert 'Недостаточно' in tab.detail_status.text() and 'INSUFFICIENT_SPACE' in tab.detail_status.text()
 
@@ -215,11 +211,11 @@ def test_known_backend_error_is_explained(window,parameters,monkeypatch):
 def test_force_is_explicit_and_warns_about_leftovers(window,parameters,monkeypatch):
     _,tab=window
     synthetic(monkeypatch,"import time; time.sleep(15)")
-    tab._start_details(parameters)
+    tab._start_details(dict(destination=parameters['destination']))
     wait_until(lambda:tab.detail_process.process.state()==QProcess.ProcessState.Running)
     tab.cancel_details()
     tab._detail_stalled()
-    assert tab.detail_force.isVisible()
+    assert tab._detail_force_available and 'принудительно' in tab.cancel_button.text()
     monkeypatch.setattr(ui.QMessageBox,'warning',lambda *a:QMessageBox.StandardButton.Yes)
     tab.force_details()
     wait_until(lambda:tab.detail_process is None)
@@ -232,7 +228,7 @@ def test_aggregate_calculation_blocks_detail_without_changing_legacy_process(win
     tab.process=sentinel
     tab._update_export_button()
     tab.export_details()
-    assert not tab.detail_export_button.isEnabled() and tab.detail_process is None and tab.process is sentinel
+    assert not tab.export_button.isEnabled() and tab.detail_process is None and tab.process is sentinel
     tab.process=None
     tab._update_export_button()
 
@@ -241,8 +237,8 @@ def test_quit_event_is_deferred_until_cooperative_worker_exit(window,parameters,
     from PyQt6.QtCore import QEvent
     from PyQt6.QtWidgets import QApplication
     _,tab=window
-    synthetic(monkeypatch,"import sys; sys.stdin.readline(); print('{\"event\":\"cancelled\"}',flush=True); raise SystemExit(2)")
-    tab._start_details(parameters)
+    synthetic(monkeypatch,"import sys; sys.stdin.readline(); sys.stdin.readline(); print('{\"event\":\"cancelled\"}',flush=True); raise SystemExit(2)")
+    tab._start_details(dict(destination=parameters['destination']))
     wait_until(lambda:tab.detail_process.process.state()==QProcess.ProcessState.Running)
     quits=[]
     monkeypatch.setattr(QApplication,'quit',lambda *args:quits.append(True))
@@ -254,10 +250,10 @@ def test_quit_event_is_deferred_until_cooperative_worker_exit(window,parameters,
 
 def test_progress_is_visible_and_ui_keeps_processing_events(window,parameters,monkeypatch):
     _,tab=window
-    synthetic(monkeypatch,"import sys; print('{\"event\":\"progress\",\"stage\":\"rfm\",\"processed\":27}',flush=True); "
-              "sys.stdin.readline(); print('{\"event\":\"cancelled\"}',flush=True); raise SystemExit(2)")
-    tab._start_details(parameters)
-    wait_until(lambda:'RFM' in tab.detail_status.text())
+    synthetic(monkeypatch,"import sys; print('{\"event\":\"progress\",\"stage\":\"statistics_xlsx\",\"processed\":27}',flush=True); "
+              "sys.stdin.readline(); sys.stdin.readline(); print('{\"event\":\"cancelled\"}',flush=True); raise SystemExit(2)")
+    tab._start_details(dict(destination=parameters['destination']))
+    wait_until(lambda:'Excel' in tab.detail_status.text())
     assert '27' in tab.detail_status.text() and tab.detail_progress.maximum()==0
     tab.cancel_details()
     wait_until(lambda:tab.detail_process is None)
@@ -268,7 +264,7 @@ def test_flooding_child_is_stopped_as_emergency_without_freezing_gui(window,para
     _,tab=window
     code=("import sys,time; s=sys."+channel+"; s.write('SYNTH_PRIVATE'*150000); s.flush(); time.sleep(10)")
     synthetic(monkeypatch,code)
-    tab._start_details(parameters)
+    tab._start_details(dict(destination=parameters['destination']))
     wait_until(lambda:tab.detail_process is None)
     assert 'WORKER_PROTOCOL_ERROR' in tab.detail_status.text() and 'SYNTH_PRIVATE' not in tab.detail_status.text()
 
@@ -287,8 +283,8 @@ def test_manual_existing_target_requires_confirmation_without_modification(windo
 
 def test_late_cancel_does_not_claim_an_already_published_zip_was_removed(window,parameters,monkeypatch):
     _,tab=window
-    synthetic(monkeypatch,progress_script(dict(event='finished',rows=dict(clients=1,orders=1,order_lines=1))))
-    tab._start_details(parameters)
+    synthetic(monkeypatch,progress_script(dict(event='finished',files=2)))
+    tab._start_details(dict(destination=parameters['destination']))
     tab.cancel_details()
     wait_until(lambda:tab.detail_process is None)
     assert 'после завершения публикации' in tab.detail_status.text()

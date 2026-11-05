@@ -15,7 +15,7 @@ import pytest
 from PyQt6.QtCore import QProcess, QTimer, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QTableWidget, QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QTableWidget, QTabWidget, QWidget, QVBoxLayout
 
 from Application.mindbox.selection import DEFAULT_SELECTION
 from Application.tabs import dataset_statistics_tab as ui
@@ -236,7 +236,7 @@ def test_success_theme_switch_and_error_preserves_previous_result(window, monkey
     result["resolution_rate"] = 99.99834283990839
     tab.render(result)
     table = tab.sections.widget(4).findChildren(QTableWidget)[1]
-    assert table.item(table.rowCount() - 1, 1).text() == "99.9983"
+    assert table.item(table.rowCount() - 1, 1).text() == "99,9983 %"
     for dark in (False, True):
         apply_app_theme(QApplication.instance(), dark)
         QApplication.processEvents()
@@ -313,10 +313,10 @@ def test_initial_page_has_no_internal_heading_or_cache(window):
     assert card_titles(tab)[:4] == ["Количество взаимодействий", "Количество заказов",
                                    "Количество позиций в заказах", "Профили текущего среза"]
     controls = tab.layout().itemAt(2).layout()
-    assert controls.count() == 6
-    assert [controls.itemAt(i).widget() for i in range(6)] == [
-        tab.refresh, tab.export_button, tab.detail_export_button, tab.cancel_button, tab.status, tab.progress_container]
-    assert controls.stretch(5) == 1
+    assert controls.count() == 5
+    assert [controls.itemAt(i).widget() for i in range(5)] == [
+        tab.refresh, tab.export_button, tab.cancel_button, tab.status, tab.progress_container]
+    assert controls.stretch(4) == 1
     assert not tab.export_button.isEnabled()
 
 
@@ -369,7 +369,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
             "Действия", "Заказы", "Объединения клиентов", "Клиенты"]
         assert summary.rowCount() == 13
         assert summary.item(0, 1).text() == "3"
-        assert summary.item(12, 1).text() == "100.0000"
+        assert summary.item(12, 1).text() == "100,0000 %"
         assert diagnostics.horizontalHeaderItem(0).text() == "Диагностика"
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
@@ -403,27 +403,28 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     original = deepcopy(sample_result)
     sample_result["warnings"] = tuple(ui.WARNING_LABELS)
     tab.render(sample_result)
-    expected = datetime.fromisoformat(sample_result["calculated_at"]).astimezone().strftime("%d.%m.%Y %H:%M:%S")
-    assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен. Дата и время расчета: " + expected
-    assert re.fullmatch(r"Исходные данные Mindbox\. Отбор не установлен\. Дата и время расчета: "
-                        r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}", tab.description.text())
-    assert tab.status.text().splitlines()[0] == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
+    expected = datetime.fromisoformat(sample_result["calculated_at"]).strftime("%d.%m.%Y")
+    assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен. Дата расчета: " + expected
+    assert re.fullmatch(r"Исходные данные Mindbox\. Отбор не установлен\. Дата расчета: "
+                        r"\d{2}\.\d{2}\.\d{4}", tab.description.text())
+    assert tab.status.text().splitlines()[0] == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
     coverage = tab.sections.widget(4).findChildren(QTableWidget)[0]
-    assert coverage.item(0, 1).text() == "01.01.2025 — 01.01.2026"
+    assert coverage.item(0, 1).text() == "01.01.2025 — 31.12.2025"
     assert coverage.item(3, 1).text().startswith("Снимок данных от ")
-    assert card_titles(tab.sections.widget(0)) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным",
-                                                "Доля VIEW/FAVORITE без товара, %"]
+    assert card_titles(tab.sections.widget(0)) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
     assert card_titles(tab.sections.widget(1))[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
     assert card_titles(tab.sections.widget(2)) == ["Товары с взаимодействиями", "Товары с просмотрами",
                                                 "Товары в избранном", "Купленные товары"]
-    for index in range(5):
+    for index in (0, 1, 2, 4):
         assert tab.sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
+    for index in range(5):
+        assert tab.customer_sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
     labels = [label.text() for label in tab.findChildren(QLabel)]
     cells = []
     for table in tab.findChildren(QTableWidget):
         labels.extend(table.horizontalHeaderItem(i).text() for i in range(table.columnCount()))
         cells.extend(table.item(r, c).text() for r in range(table.rowCount()) for c in range(table.columnCount()))
-    for value in ("ProsmotrProduktaVApiMethod", "offline1C", "CP"):
+    for value in ("ProsmotrProduktaVApiMethod", "offline1C", "Выполнен частично (CP)"):
         assert value in cells  # Technical source values are deliberately preserved.
     technical_values = {"ProsmotrProduktaVApiMethod", "offline1C", "CP"}
     presentation = "\n".join(labels + [value for value in cells if value not in technical_values])
@@ -443,7 +444,7 @@ def test_conflicting_order_warning_is_hidden_only_from_top_status(window, sample
     sample_result['diagnostics'] = (*sample_result['diagnostics'], ('orders_duplicate_conflicting', 7))
     original = deepcopy(sample_result)
     tab.render(sample_result)
-    assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
+    assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
     assert sample_result == original and tab.displayed_result['warnings'] == (warning,)
     tables = tab.sections.widget(4).findChildren(QTableWidget)
     assert any(table.item(row, 0).text() == ui.DIAGNOSTIC_LABELS['orders_duplicate_conflicting']
@@ -458,9 +459,9 @@ def test_saved_result_loads_automatically_without_process(app, sample_result, mo
     try:
         assert tab.process is None
         assert tab.card_labels[0].text() == "3"
-        expected = datetime.fromisoformat(sample_result["calculated_at"]).astimezone().strftime("%d.%m.%Y %H:%M:%S")
-        assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен. Дата и время расчета: " + expected
-        assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
+        expected = datetime.fromisoformat(sample_result["calculated_at"]).strftime("%d.%m.%Y")
+        assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен. Дата расчета: " + expected
+        assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
         assert_section_names(tab)
         assert len(tab.sections.widget(4).findChildren(QTableWidget)) == 5
     finally:
@@ -527,7 +528,7 @@ def test_new_success_atomically_replaces_cache_before_render(window, sample_resu
     assert tab.cache_path.read_bytes() != previous
     assert not list(tab.cache_path.parent.glob(".dataset-statistics-*.tmp"))
     assert [p.name for p in tab.cache_path.parent.glob("*statistics*.json")] == [tab.cache_path.name]
-    assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 - 01.01.2026.'
+    assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
     wait_until(lambda: tab.window.status_label.text() == "Готов к работе")
 
 
@@ -633,11 +634,11 @@ def test_progress_and_shared_status_resist_stale_reset(window, monkeypatch):
 
 @pytest.mark.parametrize("actions,orders,expected", [
     ([("2024-01-01", "2024-12-01")], [("2024-06-01", "2025-01-01")],
-     'Статистика рассчитана за период: 01.06.2024 - 01.12.2024.'),
+     'Статистика рассчитана за период: 01.06.2024 — 30.11.2024.'),
     ([("2024-01-01", "2024-02-01"), ("2024-03-01", "2024-04-01")], [("2024-01-01", "2024-04-01")],
-     'Статистика рассчитана за периоды: 01.01.2024 - 01.02.2024; 01.03.2024 - 01.04.2024.'),
+     'Статистика рассчитана за периоды: 01.01.2024 — 31.01.2024; 01.03.2024 — 31.03.2024.'),
     ([("2024-01-01", "2024-02-01")], [("2024-02-01", "2024-03-01")], "Статистика рассчитана."),
-    ([], [("2024-06-01", "2024-07-01")], 'Статистика рассчитана за период: 01.06.2024 - 01.07.2024.'),
+    ([], [("2024-06-01", "2024-07-01")], 'Статистика рассчитана за период: 01.06.2024 — 30.06.2024.'),
     ([], [], "Статистика рассчитана."),
 ])
 def test_period_uses_interaction_coverage_not_customer_snapshots(sample_result, actions, orders, expected):
@@ -655,7 +656,7 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         tab.render(sample_result)
         tab.sections.setCurrentIndex(3)
         QApplication.processEvents()
-        page = tab.sections.widget(3)
+        page = tab.customer_sections.widget(0)
         assert page.widgetResizable()
         assert page.widget().layout().spacing() == ui.SECTION_SPACING
         assert card_titles(page) == ["Профили текущего среза", "Клиенты с товарными взаимодействиями", "Покупатели", "Повторные покупатели (от 2 покупок)",
@@ -665,11 +666,13 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
         assert headings == ["ОХВАТ КЛИЕНТСКОЙ БАЗЫ", "ЦИФРОВАЯ АКТИВНОСТЬ КЛИЕНТОВ", "ПОКУПАТЕЛИ И КЛИЕНТЫ БЕЗ ПОКУПОК",
                             "ПОРТРЕТ КЛИЕНТА", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ",
-                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ",
-                            "ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА — STRICT / EXTENDED", "RFM-АНАЛИЗ ПОКУПАТЕЛЕЙ", "КОГОРТНЫЙ АНАЛИЗ ПОКУПАТЕЛЕЙ"]
+                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ"]
+        assert [label.text() for label in tab.customer_sections.widget(1).findChildren(QLabel)
+                if label.property("class") == "statisticsSection"] == ["ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ", "ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА"]
+        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 12
         tables = page.findChildren(QTableWidget)
-        assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7, 5, 3, 1, 1, 1]
-        assert tables[5].item(8, 1).text() == "50.00"
+        assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7]
+        assert tables[5].item(8, 1).text() == "50,00 %"
         for table in tables:
             assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
         assert page.verticalScrollBar().maximum() > 0
@@ -694,10 +697,10 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         tab.render(result)
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         QApplication.processEvents()
-        page = tab.sections.widget(3)
+        page = tab.customer_sections.widget(0)
         layout = page.widget().layout()
         items = _visual_items(layout)
-        assert items[0].layout().count() == 4
+        assert items[0].widget().layout().count() == 4
         assert items[1].widget().text() == 'ОХВАТ КЛИЕНТСКОЙ БАЗЫ'
         profile_index = next(i for i, item in enumerate(items)
                              if isinstance(item.widget(), QLabel) and item.widget().text() == 'ПОРТРЕТ КЛИЕНТА')
@@ -706,7 +709,7 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
             assert items[index].widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
             index += 1
         assert items[index].widget().text() == 'ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ'
-        cards = items[index + 1].layout()
+        cards = items[index + 1].widget().layout()
         assert cards.count() == 2
         assert [cards.itemAt(i).widget().findChildren(QLabel)[0].text() for i in range(2)] == ['Средний возраст', 'Медианный возраст']
         age = items[index + 2].widget()
@@ -719,7 +722,8 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
         assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
-        assert len(page.findChildren(QTableWidget)) == 12
+        assert len(page.findChildren(QTableWidget)) == 7
+        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 12
         assert len(page.findChildren(StatisticsChart)) == 3
         assert len(tab.findChildren(StatisticsChart)) == 17
         assert card_titles(page) == ['Профили текущего среза', 'Клиенты с товарными взаимодействиями', 'Покупатели',
@@ -796,7 +800,6 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
     _, tab = window
     original = deepcopy(sample_result)
     headers = [
-        ["Показатель", "Значение"],
         ["Тип действия", "Количество взаимодействий", "Количество клиентов", "Среднее на клиента", "Медиана на клиента"],
         ["Количество просмотров", "Количество клиентов", "Доля, %"],
         ["Количество избранного", "Количество клиентов", "Доля, %"],
@@ -804,6 +807,7 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
         ["Месяц", "Просмотры", "Клиенты с просмотрами", "Избранное", "Клиенты с избранным"],
         ["Доступность", "Просмотров", "Доля, %"],
         ["Валюта", "Просмотров с ценой", "Средняя цена", "Медианная цена"],
+        ["Показатель", "Значение"],
     ]
     for dark in (False, True):
         apply_app_theme(QApplication.instance(), dark)
@@ -813,21 +817,19 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             tab.sections.setCurrentIndex(0)
             QApplication.processEvents()
             page = tab.sections.widget(0)
-            assert card_titles(page) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным",
-                                         "Доля VIEW/FAVORITE без товара, %"]
-            assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["2", "0", "1", "0", "Нет данных"]
+            assert card_titles(page) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
+            assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == ["2", "0", "1", "0"]
             assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"] == [
-                "КАЧЕСТВО ИСХОДНЫХ СОБЫТИЙ",
                 "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ПРОСМОТРОВ",
                 "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ИЗБРАННОГО", "КАНАЛЫ",
-                "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ"]
+                "ДИНАМИКА ДЕЙСТВИЙ", "ПАРАМЕТРЫ ПРОСМОТРОВ", "КАЧЕСТВО ИСХОДНЫХ СОБЫТИЙ"]
             assert page.widgetResizable() and page.widget().layout().spacing() == ui.SECTION_SPACING
             tables = page.findChildren(QTableWidget)
             assert [[table.horizontalHeaderItem(i).text() for i in range(table.columnCount())] for table in tables] == headers
-            assert tables[5].item(0, 0).text() == "01.2025"
-            assert tables[7].rowCount() == 2
-            assert [tables[7].item(i, 0).text() for i in range(2)] == ["RUB", "KZT"]
-            assert tables[7].item(0, 2).text() == "100.25"
+            assert tables[4].item(0, 0).text() == "01.2025"
+            assert tables[6].rowCount() == 2
+            assert [tables[6].item(i, 0).text() for i in range(2)] == ["RUB", "KZT"]
+            assert tables[6].item(0, 2).text() == "100.25"
             for table in tables:
                 assert all(table.item(r, c).toolTip() == "" for r in range(table.rowCount()) for c in range(table.columnCount()))
             wait_until(lambda: page.verticalScrollBar().maximum() > 0)
@@ -941,7 +943,7 @@ def test_table_content_height_and_scroll_after_resize_and_theme_change(app, coun
                     table.scrollToBottom()
                     QTest.qWait(20)
                     assert 0 <= table.visualItemRect(table.item(count - 1, 0)).bottom() < table.viewport().height()
-                assert (table.horizontalScrollBar().maximum() > 0) == (width == 260)
+                assert (table.horizontalScrollBar().maximum() > 0) == (sum(table._minimum_widths) > table.viewport().width())
     finally:
         window.close()
         window.deleteLater()
@@ -969,7 +971,7 @@ def test_orders_cards_rates_full_stores_and_shared_scrollbars(window, sample_res
                                     "Среднее число позиций на заказ", "Медиана числа позиций на заказ",
                                     "Доля заказов с 1 позицией", "Доля заказов с 3+ позициями"]
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
-            "1", "2", "1", "1", "1.00", "1.00", "25.00%", "60.00%"]
+            "1", "2", "1", "1", "1.00", "1.00", "25,00 %", "60,00 %"]
         tables = page.findChildren(QTableWidget)
         for table in tables[3:5]:
             assert table.rowCount() == 25 and table.height() == 450
@@ -1015,7 +1017,7 @@ def test_orders_cards_rates_full_stores_and_shared_scrollbars(window, sample_res
     sample_result["purchase_basket_distribution"] = tuple((label, 0, 0.) for label, _, _ in original["purchase_basket_distribution"])
     tab.render(sample_result)
     numbers = [label.text() for label in tab.sections.widget(1).findChildren(QLabel) if label.property("class") == "statisticsNumber"]
-    assert numbers[-2:] == ["0.00%", "0.00%"]
+    assert numbers[-2:] == ["0,00 %", "0,00 %"]
 
 
 def test_category_code_name_legacy_path_and_final_headers(window, sample_result):
@@ -1041,92 +1043,10 @@ def test_category_code_name_legacy_path_and_final_headers(window, sample_result)
         assert not any('ПО РОССИИ' in value or 'ПО КАЗАХСТАНУ' in value for value in orders)
 
 
-def test_export_cache_result_and_dialog_cancel(window, sample_result, monkeypatch):
-    parent, tab = window
-    cache.save_result(tab.cache_path, sample_result)
-    restored = ui.DatasetStatisticsTab(parent)
-    assert restored.displayed_result is not None and restored.export_button.isEnabled()
-    restored.deleteLater()
-    tab.render(sample_result)
-    status, page_status = parent.status_label.text(), tab.status.text()
-    calls = []
-    def dialog(*args):
-        assert args[1] == 'Экспорт статистики' and args[3] == 'ZIP (*.zip)'
-        assert args[2].endswith('Статистика_2026-09-24_09-47-28.zip')
-        return '', ''
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', dialog)
-    monkeypatch.setattr(ui, 'export_statistics_bundle', lambda *args: calls.append(args))
-    tab.export_button.click()
-    assert not calls and tab._export_task is None
-    assert parent.status_label.text() == status and tab.status.text() == page_status
-    assert tab.export_button.isEnabled()
 
 
-@pytest.mark.parametrize('suffix', ['', '.zip', '.ZIP'])
-def test_export_uses_displayed_snapshot_despite_new_filter(window, sample_result, monkeypatch, tmp_path, suffix):
-    from Application.analysis_filter import AnalysisFilter
-    from Application.statistics_bundle_export import export_statistics_bundle
-    from openpyxl import load_workbook
-    parent, tab = window
-    tab.render(sample_result)
-    cache.save_result(tab.cache_path, sample_result)
-    before = tab.cache_path.read_bytes()
-    tab.set_analysis_filter(AnalysisFilter(nomenclature_types=('Новый фильтр',)))
-    tab.pending = {**sample_result, 'total_interactions': 999}
-    status = tab.status.text()
-    destination = tmp_path / ('export' + suffix)
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(destination), 'ZIP (*.zip)'))
-    calls = []
-    def save(result, path):
-        assert result is tab.displayed_result is sample_result
-        calls.append(path)
-        export_statistics_bundle(result, path)
-    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
-    tab.export_button.click()
-    wait_until(lambda: tab._export_task is None)
-    assert len(calls) == 1 and calls[0] == str(destination) + ('' if suffix else '.zip')
-    assert parent.status_label.text() == 'Статистика экспортирована в ZIP: Excel + HTML'
-    assert parent._status_reset_timer.interval() == 5000
-    assert tab.status.text() == status and tab.cache_path.read_bytes() == before
-    assert tab.export_button.isEnabled()
-    from io import BytesIO
-    from zipfile import ZipFile
-    with ZipFile(calls[0]) as archive:
-        assert archive.testzip() is None and len(archive.namelist()) == 2
-        html = archive.read(next(name for name in archive.namelist() if name.endswith('.html'))).decode('utf-8')
-        assert 'Новый фильтр' not in html
-        book = load_workbook(BytesIO(archive.read(next(name for name in archive.namelist() if name.endswith('.xlsx')))))
-    metadata = {row[0]: row[1] for row in book['Сводка'].values if row[0]}
-    assert metadata['Вид номенклатуры'] == 'Все значения'
-    # Ordinary KPI and monthly tables belong to the displayed snapshot too.
-    from test_statistics_export import kpi, find, assert_minimal_tables
-    from decimal import Decimal
-    assert kpi(book['Сводка'], 'Количество взаимодействий').value == sample_result['total_interactions']
-    assert assert_minimal_tables(book)
-    for month, _, rub, _, kzt in sample_result['order_monthly_dynamics']:
-        row = find(book['Заказы'], month[5:] + '.' + month[:4])
-        assert Decimal(str(row[2].value)) == Decimal(rub)
-        assert Decimal(str(row[4].value)) == Decimal(kzt)
-    book.close()
 
 
-@pytest.mark.parametrize('error', [PermissionError, RuntimeError])
-def test_export_error_preserves_snapshot_cache_and_page_status(window, sample_result, monkeypatch, tmp_path, error):
-    parent, tab = window
-    tab.render(sample_result)
-    cache.save_result(tab.cache_path, sample_result)
-    previous = tab.cache_path.read_bytes(), tab.status.text(), deepcopy(sample_result)
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
-    def failed(*args):
-        raise error('synthetic')
-    monkeypatch.setattr(ui, 'export_statistics_bundle', failed)
-    tab.export_button.click()
-    wait_until(lambda: tab._export_task is None)
-    assert parent.status_label.text() == 'Не удалось экспортировать статистику'
-    assert parent._status_reset_timer.interval() == 5000
-    assert tab.displayed_result is sample_result
-    assert (tab.cache_path.read_bytes(), tab.status.text(), sample_result) == previous
-    assert tab.export_button.isEnabled()
 
 
 def test_export_contains_every_visible_table_and_card(window, sample_result, tmp_path):
@@ -1137,12 +1057,11 @@ def test_export_contains_every_visible_table_and_card(window, sample_result, tmp
     path = tmp_path / 'complete.xlsx'
     export_statistics(sample_result, path)
     book = load_workbook(path)
-    for index, name in enumerate(SHEET_NAMES[1:6]):
+    for index, name in enumerate(SHEET_NAMES):
         sheet = book[name]
         rows = list(sheet.values)
         if name == 'Клиенты':
-            rows.extend(book['RFM-анализ'].values)  # GUI subsections have their own XLSX sheets.
-            rows.extend(book['Когортный анализ'].values)
+            assert 'RFM-анализ' not in book.sheetnames and 'Когортный анализ' not in book.sheetnames
         page = tab.sections.widget(index)
         for table in page.findChildren(QTableWidget):
             headers = tuple(table.horizontalHeaderItem(i).text() for i in range(table.columnCount()))
@@ -1152,58 +1071,8 @@ def test_export_contains_every_visible_table_and_card(window, sample_result, tmp
     book.close()
 
 
-def test_export_runs_in_background_and_holds_original_snapshot(window, sample_result, monkeypatch, tmp_path):
-    from threading import Event, get_ident
-    _, tab = window
-    tab.render(sample_result)
-    entered, release = Event(), Event()
-    gui_thread = get_ident()
-    calls = []
-    def save(result, path):
-        assert get_ident() != gui_thread
-        calls.append(result)
-        entered.set()
-        assert release.wait(10)
-    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.xlsx'), ''))
-    try:
-        tab.export_button.click()
-        wait_until(entered.is_set)
-        assert not tab.export_button.isEnabled()
-        tab.export()
-        tab.render(deepcopy(sample_result))
-        assert calls == [sample_result] and calls[0] is not tab.displayed_result
-    finally:
-        release.set()
-    wait_until(lambda: tab._export_task is None)
-    assert tab.export_button.isEnabled()
 
 
-def test_export_worker_can_finish_after_tab_destruction(window, sample_result, monkeypatch, tmp_path):
-    from threading import Event
-    from PyQt6 import sip
-    from PyQt6.QtCore import QCoreApplication, QEvent, QThreadPool
-
-    _, tab = window
-    tab.render(sample_result)
-    entered, release, finished = Event(), Event(), Event()
-
-    def save(result, path):
-        entered.set()
-        assert release.wait(10)
-        finished.set()
-    monkeypatch.setattr(ui, 'export_statistics_bundle', save)
-    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *args: (str(tmp_path / 'export.zip'), ''))
-    try:
-        tab.export()
-        wait_until(entered.is_set)
-        tab.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        assert sip.isdeleted(tab)
-    finally:
-        release.set()
-    wait_until(finished.is_set)
-    assert QThreadPool.globalInstance().waitForDone(5000)
 
 @pytest.mark.parametrize('filtered', [False, True])
 def test_system_action_types_stay_technical_and_total_card_is_unchanged(window, sample_result, filtered):
@@ -1224,7 +1093,7 @@ def test_system_action_types_stay_technical_and_total_card_is_unchanged(window, 
                    for t in actions.findChildren(QTableWidget))
     technical = tab.sections.widget(4)
     table = next(t for t in technical.findChildren(QTableWidget) if t.horizontalHeaderItem(0).text() == 'Системное название')
-    assert [float(table.item(i, 2).text()) for i in range(2)] == [90., 10.]
+    assert [table.item(i, 2).text() for i in range(2)] == ["90,00 %", "10,00 %"]
     quality = next(t for t in technical.findChildren(QTableWidget) if t.horizontalHeaderItem(0).text() == 'Классификация событий')
     rows = {quality.item(i, 0).text(): quality.item(i, 1).text() for i in range(quality.rowCount())}
     assert rows[ui.DIAGNOSTIC_LABELS['mapped_without_product']] == '88'
@@ -1300,19 +1169,18 @@ def test_saved_quality_and_categories_gui_xlsx_html_parity_without_source_reads(
     QApplication.processEvents()
     rows = source_event_quality_rows(cached)
     page = tab.sections.widget(0)
-    assert any(label.text() == SOURCE_EVENT_QUALITY_HEADING.upper() for label in page.findChildren(QLabel))
-    quality = next(table for table in page.findChildren(QTableWidget)
-                   if table.horizontalHeaderItem(0).text() == 'Показатель')
+    quality = page.findChildren(QTableWidget)[-1]
     assert [(quality.item(i, 0).text(), quality.item(i, 1).text()) for i in range(quality.rowCount())] == [
-        (label, 'Нет данных' if value is None else ui._number(value)) for label, value in rows[:6] + rows[7:]]
+        (label, ui._number(value)) for label, value in ui.source_event_quality_display_rows(cached)]
     rate = rows[6][1]
     expected_text = 'Нет данных' if rate is None else f'{rate:.2f}'.replace('.', ',') + ' %'
-    assert [label.text() for label in page.findChildren(QLabel)
-            if label.property('class') == 'statisticsNumber'][-1] == expected_text
-    assert all(text in '\n'.join(label.text() for label in page.findChildren(QLabel))
+    assert quality.item(6, 1).text() == expected_text
+    assert len([label for label in page.findChildren(QLabel)
+                if label.property('class') == 'statisticsNumber']) == 4
+    assert all(text not in '\n'.join(label.text() for label in page.findChildren(QLabel))
                for _, text in SOURCE_EVENT_QUALITY_NOTES)
     products = tab.sections.widget(2)
-    assert ' '.join(text for _, text in RESOLUTION_NOTES) in [label.text() for label in products.findChildren(QLabel)]
+    assert ' '.join(text for _, text in RESOLUTION_NOTES) not in [label.text() for label in products.findChildren(QLabel)]
     category_rows = ui.product_category_rows(cached)
     category_table = products.findChildren(QTableWidget)[3]
     assert [category_table.horizontalHeaderItem(i).text() for i in range(8)] == list(ui.CATEGORY_HEADERS)
@@ -1321,14 +1189,15 @@ def test_saved_quality_and_categories_gui_xlsx_html_parity_without_source_reads(
         (*row[:3], *(ui._number(v) for v in row[3:7]), ui._decimal_display(row[7], money=False)) for row in category_rows]
     assert ui.DIRECT_CATEGORY_NOTE in [label.text() for label in products.findChildren(QLabel)]
     scope_sections = ui.customer_scope_sections(cached)
-    client_tables = tab.sections.widget(3).findChildren(QTableWidget)
+    client_tables = tab.customer_sections.widget(0).findChildren(QTableWidget)
     for table, (_, values) in zip(client_tables[:3], scope_sections):
         assert [(table.item(r, 0).text(), table.item(r, 1).text()) for r in range(table.rowCount())] == [
-            (label, ui._number(value)) for label, value in values]
+            (label, ui._cell_text(value, percentage="%" in label)) for label, value in values]
         assert all(table.rowHeight(row) >= table.sizeHintForRow(row) for row in range(table.rowCount()))
     client_text = '\n'.join(label.text() for label in tab.sections.widget(3).findChildren(QLabel))
-    assert ui.customer_scope_context(cached) in client_text
-    assert all(text in client_text for _, text in ui.CUSTOMER_SCOPE_NOTES)
+    from Application.statistics_presentation import customer_scope_context, CUSTOMER_SCOPE_NOTES
+    assert customer_scope_context(cached) not in client_text
+    assert all(text not in client_text for _, text in CUSTOMER_SCOPE_NOTES)
     if scenario == 'categories_new':
         assert category_table.columnWidth(2) >= category_table.fontMetrics().horizontalAdvance(category_rows[0][2])
         assert category_rows[0][0] == '000123' and category_rows[1][0] == '000124'
@@ -1348,8 +1217,8 @@ def test_saved_quality_and_categories_gui_xlsx_html_parity_without_source_reads(
         rate_cell = next(row[1] for row in book['Действия'].iter_rows() if row[0].value == rows[6][0])
         assert rate_cell.data_type == ('s' if rate is None else 'n')
         assert rate_cell.number_format == ('@' if rate is None else PERCENT_FORMAT)
-        assert all(any(row[:2] == pair for row in sheet_rows) for pair in SOURCE_EVENT_QUALITY_NOTES)
-        assert all(any(row[:2] == pair for row in book['Товары'].values) for pair in RESOLUTION_NOTES)
+        assert not any(row[:2] == pair for row in sheet_rows for pair in SOURCE_EVENT_QUALITY_NOTES)
+        assert not any(row[:2] == pair for row in book['Товары'].values for pair in RESOLUTION_NOTES)
         for row in category_rows:
             cells = next(cells for cells in book['Товары'].iter_rows()
                          if tuple(cell.value for cell in cells[:3]) == row[:3])
@@ -1365,7 +1234,7 @@ def test_saved_quality_and_categories_gui_xlsx_html_parity_without_source_reads(
         book.close()
 
     sections = html.presentation(cached)
-    scope_html_rows = [row for block in sections[4].blocks if block['kind'] == 'table' for row in block['rows']]
+    scope_html_rows = [row for block in sections[3].blocks if block['kind'] == 'table' for row in block['rows']]
     for _, values in scope_sections:
         for label, value in values:
             cells = next(row for row in scope_html_rows if row[0]['text'] == html.display_text(label))
@@ -1373,22 +1242,21 @@ def test_saved_quality_and_categories_gui_xlsx_html_parity_without_source_reads(
                 assert Decimal(cells[1]['sort']) == Decimal(str(value))
             else:
                 assert cells[1]['text'] == html.display_text(value)
-    category_block = next(block for block in sections[3].blocks if block.get('headers') == list(ui.CATEGORY_HEADERS))
+    category_block = next(block for block in sections[2].blocks if block.get('headers') == list(ui.CATEGORY_HEADERS))
     for cells, row in zip(category_block['rows'], category_rows):
         assert cells[0]['text'] == row[0]  # Codes bypass display typography translation.
         assert cells[1]['text'] == html.display_text(row[1])
         assert cells[2]['text'] == html.display_text(row[2])
         assert tuple(Decimal(cell['sort']) for cell in cells[3:]) == tuple(Decimal(str(v)) for v in row[3:])
-    html_rows = [row for block in sections[1].blocks if block['kind'] == 'table' for row in block['rows']]
+    html_rows = [row for block in sections[0].blocks if block['kind'] == 'table' for row in block['rows']]
     for label, value in rows:
         cells = next(row for row in html_rows if row[0]['text'] == html.display_text(label))
-        assert cells[1]['text'] == ('Нет данных' if value is None else html.exact_number(value)
-                                   + (' %' if label == rows[6][0] else ''))
+        assert cells[1]['text'] == ('Нет данных' if value is None else ui._cell_text(value, percentage=label == rows[6][0]))
         if value is not None:
             assert Decimal(cells[1]['sort']) == Decimal(str(value))
     document = html.build_statistics_html(cached)
     assert html.display_text(SOURCE_EVENT_QUALITY_HEADING) in document
-    assert all(html.display_text(text) in document for _, text in SOURCE_EVENT_QUALITY_NOTES + RESOLUTION_NOTES)
+    assert all(html.display_text(text) not in document for _, text in SOURCE_EVENT_QUALITY_NOTES + RESOLUTION_NOTES)
     assert html.display_text(ui.DIRECT_CATEGORY_NOTE) in document
     if scenario == 'categories_hostile':
         assert '<img src=x onerror=alert(1)>' not in document
@@ -1430,7 +1298,7 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         assert next(i for i, item in enumerate(actions) if item.widget() is favorite) == next(i for i, item in enumerate(actions) if item.widget() is view) + 3
         assert not any(label.text() == 'ДИНАМИКА КЛИЕНТОВ С ПРОСМОТРАМИ' for label in tab.findChildren(QLabel))
         assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 17
-        clients = _visual_items(tab.sections.widget(3).widget().layout())
+        clients = _visual_items(tab.customer_sections.widget(0).widget().layout())
         frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
         index = next(i for i, item in enumerate(clients) if item.widget() is frequency)
         following = clients[index + 1].widget()
@@ -1440,4 +1308,324 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
             'ДИНАМИКА ИЗБРАННОГО', 'ДИНАМИКА ПРОСМОТРОВ']
         for chart in chart_widgets:
             page = next(tab.sections.widget(i) for i in range(4) if chart in tab.sections.widget(i).findChildren(StatisticsChart))
+            if isinstance(page, QTabWidget):
+                page = tab.customer_sections.widget(0)
             assert page.horizontalScrollBar().maximum() == 0
+
+
+@pytest.mark.parametrize("dark", [False, True])
+def test_polished_gui_quality_last_status_fallback_notes_hidden_and_snapshot_unchanged(
+        window, sample_result, dark):
+    from statistics_export_samples import quality_snapshot
+    from Application.statistics_presentation import (
+        SOURCE_EVENT_QUALITY_NOTES, RESOLUTION_NOTES, CUSTOMER_SCOPE_NOTES,
+        source_event_quality_rows, status_label)
+    _, tab = window
+    result = quality_snapshot(sample_result)
+    result["line_statuses"] = (("F", 1, True), ("sold", 1, True), ("unknown-status-99", 1, False))
+    result["order_lines"] = 3
+    original = deepcopy(result)
+    apply_app_theme(QApplication.instance(), dark)
+    tab.render(result)
+    QApplication.processEvents()
+    actions = tab.sections.widget(0)
+    labels = [label.text() for label in actions.findChildren(QLabel)]
+    headings = [label.text() for label in actions.findChildren(QLabel)
+                if label.property("class") == "statisticsSection"]
+    assert headings[-1] == "КАЧЕСТВО ИСХОДНЫХ СОБЫТИЙ"
+    assert len(card_titles(actions)) == 4
+    quality = actions.findChildren(QTableWidget)[-1]
+    raw_quality = source_event_quality_rows(result)
+    assert quality.rowCount() == len(raw_quality) == 8
+    assert quality.item(6, 1).text() == f"{raw_quality[6][1]:.2f}".replace(".", ",") + " %"
+    for i, (_, value) in enumerate(raw_quality):
+        if i != 6:
+            assert quality.item(i, 1).text() == ui._number(value)
+    assert all(text not in "\n".join(labels) for _, text in SOURCE_EVENT_QUALITY_NOTES)
+    products = tab.sections.widget(2)
+    assert ui.DIRECT_CATEGORY_NOTE in [label.text() for label in products.findChildren(QLabel)]
+    assert all(text not in "\n".join(label.text() for label in products.findChildren(QLabel))
+               for _, text in RESOLUTION_NOTES)
+    quality_tables = products.findChildren(QTableWidget)[-2:]
+    assert [table.horizontalHeaderItem(0).text() for table in quality_tables] == [
+        "Показатель", "Система идентификаторов"]
+    clients = tab.sections.widget(3)
+    client_labels = "\n".join(label.text() for label in clients.findChildren(QLabel))
+    assert all(text not in client_labels for _, text in CUSTOMER_SCOPE_NOTES)
+    assert "КАЧЕСТВО И ОГРАНИЧЕНИЯ ПОКУПАТЕЛЬСКОЙ АНАЛИТИКИ" not in client_labels
+    status = tab.sections.widget(1).findChildren(QTableWidget)[-1]
+    assert status.rowCount() == 3  # Never merge distinct codes or infer unknowns.
+    for row, (code, count, purchase) in enumerate(result["line_statuses"]):
+        assert status.item(row, 0).text() == status_label(code)
+        assert status.item(row, 1).text() == ui._number(count)
+        assert status.item(row, 2).text() == ui._cell_text(100 * count / 3, percentage=True)
+        assert status.item(row, 3).text() == ("Да" if purchase else "Нет")
+    visible = [label.text() for label in tab.findChildren(QLabel)]
+    for table in tab.findChildren(QTableWidget):
+        visible.extend(table.horizontalHeaderItem(i).text() for i in range(table.columnCount()))
+        visible.extend(table.item(r, c).text() for r in range(table.rowCount()) for c in range(table.columnCount()))
+    assert not re.search(r"\b(VIEW|FAVORITE|Actions|Orders|Customers|STRICT|EXTENDED|Monetary|UNSCORABLE|Eligible|Repeated|UTC)\b",
+                         "\n".join(visible))
+    assert all("T00:00:00" not in value and "+00:00" not in value for value in visible)
+    assert result == original and tab.displayed_result is result
+
+
+@pytest.fixture
+def rich_customer_result(tmp_path, monkeypatch):
+    from tests.test_statistics_rfm_integration import dataset, calculate
+    data = dataset.__wrapped__(tmp_path / "customer-navigation-source", monkeypatch)
+    return calculate(data)
+
+
+@pytest.mark.parametrize("dark", [False, True])
+@pytest.mark.parametrize("scenario", ["rich", "legacy", "empty"])
+def test_customer_nested_navigation_exact_sections_values_charts_and_no_duplicates(
+        window, sample_result, rich_customer_result, dark, scenario):
+    from Application.statistics_charts import StatisticsChart
+    from Application.statistics_presentation import grouped_buyer_sections, CUSTOMER_GROUP_ORDER
+    from statistics_export_samples import empty_snapshot
+    _, tab = window
+    result = rich_customer_result if scenario == "rich" else (
+        empty_snapshot(sample_result) if scenario == "empty" else sample_result)
+    before = deepcopy(result)
+    apply_app_theme(QApplication.instance(), dark)
+    tab.render(result)
+    tab.sections.setCurrentIndex(3)
+    QApplication.processEvents()
+    nested = tab.sections.widget(3)
+    assert nested is tab.customer_sections and isinstance(nested, QTabWidget)
+    assert tab.sections.count() == 5
+    assert [tab.sections.tabText(i) for i in range(5)] == [
+        "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация"]
+    assert nested.count() == 5 and nested.currentIndex() == 0
+    assert [nested.tabText(i) for i in range(5)] == [
+        "Обзор", "Покупки", "Денежные показатели", "RFM-анализ", "Когорты"]
+    assert [nested.widget(i).property("statisticsGroup") for i in range(5)] == list(CUSTOMER_GROUP_ORDER)
+    assert len(nested.findChildren(QScrollArea)) == 5
+    for i in range(5):
+        page = nested.widget(i)
+        assert isinstance(page, QScrollArea) and page.widgetResizable()
+        assert not page.findChildren(QScrollArea)  # One outer vertical scroll per group.
+        assert page.widget().layout().spacing() == ui.SECTION_SPACING
+
+    groups = {key: [] for key in CUSTOMER_GROUP_ORDER}
+    for group, section in grouped_buyer_sections(result, compact=True):
+        groups[group].append(section)
+    groups["rfm"] = ui.rfm_sections(result, compact=True)
+    groups["cohorts"] = ui.cohort_sections(result, compact=True)
+    base_counts = {"overview": 7, "purchases": 2, "money": 0, "rfm": 0, "cohorts": 0}
+    expected_card_count = 6  # Four overview KPIs + mean/median age.
+    expected_table_count = 9  # Seven overview + two purchase activity tables.
+    for i, group in enumerate(CUSTOMER_GROUP_ORDER):
+        page = nested.widget(i)
+        headers = [label.text() for label in page.findChildren(QLabel)
+                   if label.property("class") == "statisticsSection"]
+        sections = groups[group]
+        assert all(title.upper() in headers for title, _, _, _ in sections)
+        expected_tables = [(h, rows) for _, _, tables, _ in sections for h, rows in tables]
+        tables = page.findChildren(QTableWidget)[base_counts[group]:]
+        assert len(tables) == len(expected_tables)
+        display = ui.cohort_display if group == "cohorts" else ui._buyer_display
+        for table, (head, rows) in zip(tables, expected_tables):
+            assert [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())] == list(head)
+            assert [[table.item(r,c).text() for c in range(table.columnCount())]
+                    for r in range(table.rowCount())] == [
+                        [ui._cell_text(value, display=display, percentage=ui.report.percentage_cell(head,row,c))
+                         for c, value in enumerate(row)] for row in rows]
+        expected_card_count += sum(len(cards) for _, cards, _, _ in sections)
+        expected_table_count += len(expected_tables)
+        if group != "rfm":
+            assert "RFM-АНАЛИЗ ПОКУПАТЕЛЕЙ" not in headers
+        if group != "cohorts":
+            assert "КОГОРТНЫЙ АНАЛИЗ ПОКУПАТЕЛЕЙ" not in headers
+        if group != "overview":
+            assert not [chart for chart in page.findChildren(StatisticsChart)
+                        if not chart.property("buyerAnalyticsChart")]  # Existing charts stay in overview.
+    assert len(card_titles(nested)) == expected_card_count
+    assert len(nested.findChildren(QTableWidget)) == expected_table_count
+    assert any(label.text() == "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ"
+               for label in nested.widget(0).findChildren(QLabel))
+    if scenario == "rich":
+        money_headers = [label.text() for label in nested.widget(2).findChildren(QLabel)]
+        assert any(title.endswith("RUB") for title in money_headers)
+        assert any(title.endswith("KZT") for title in money_headers)
+        assert any("ИНТЕРВАЛЫ" in label.text() for label in nested.widget(1).findChildren(QLabel))
+        assert all("СРАВНЕНИЕ ПОЛИТИК УЧЁТА ПОКУПОК" != label.text()
+                   for label in nested.widget(2).findChildren(QLabel))
+        assert "ПОРТРЕТ ПОКУПАТЕЛЕЙ — ПОДТВЕРЖДЁННЫЕ ПОКУПКИ" in [
+            label.text() for label in nested.widget(0).findChildren(QLabel)]
+    assert tab.displayed_result is result and result == before
+
+
+def test_customer_switches_keep_widgets_scrolls_and_never_compute(window, rich_customer_result, monkeypatch):
+    import sqlite3
+    from Application import dataset_statistics, statistics_slices
+    _, tab = window
+    before = deepcopy(rich_customer_result)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Client navigation must never start a process or query data")
+    monkeypatch.setattr(dataset_statistics, "calculate_statistics", forbidden)
+    monkeypatch.setattr(dataset_statistics, "iter_export", forbidden)
+    monkeypatch.setattr(statistics_slices, "calculate_cached_statistics", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(ui, "QProcess", forbidden)
+    tab.render(rich_customer_result)
+    tab.sections.setCurrentIndex(3)
+    QApplication.processEvents()
+    pages = [tab.customer_sections.widget(i) for i in range(5)]
+    tables = [[id(t) for t in page.findChildren(QTableWidget)] for page in pages]
+    positions = {}
+    for i, page in enumerate(pages):
+        tab.customer_sections.setCurrentIndex(i)
+        QApplication.processEvents()
+        bar = page.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(bar.maximum() // 2)
+        positions[i] = bar.value()
+    for i in (3, 0, 4, 1, 2, 0):
+        tab.customer_sections.setCurrentIndex(i)
+        QApplication.processEvents()
+        assert tab.sections.currentIndex() == 3
+        assert tab.customer_sections.widget(i) is pages[i]
+        assert pages[i].verticalScrollBar().value() == positions[i]
+        assert [[id(t) for t in page.findChildren(QTableWidget)] for page in pages] == tables
+    assert rich_customer_result == before and tab.displayed_result is rich_customer_result
+
+
+def test_customer_repeated_render_preserves_selection_and_deletes_old_pages(window, rich_customer_result):
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    _, tab = window
+    tab.render(rich_customer_result)
+    for selected in (4, 3, 2, 1):
+        tab.sections.setCurrentIndex(3)
+        tab.customer_sections.setCurrentIndex(selected)
+        old_main_pages = [tab.sections.widget(i) for i in range(5)]
+        old_inner_pages = [tab.customer_sections.widget(i) for i in range(5)]
+        tab.render(rich_customer_result)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+        assert tab.sections.currentIndex() == 3
+        assert tab.customer_sections.currentIndex() == selected
+        assert tab.sections.count() == tab.customer_sections.count() == 5
+        assert len(tab.findChildren(QTabWidget)) == 2
+        assert len(tab.findChildren(QScrollArea)) == 9  # Four main + five inner.
+        assert all(sip.isdeleted(widget) for widget in old_main_pages + old_inner_pages)
+
+
+def test_customer_routing_uses_stable_group_not_visible_title(window, sample_result, monkeypatch):
+    _, tab = window
+    monkeypatch.setattr(ui.report, "grouped_buyer_sections", lambda result, **kwargs: [
+        ("money", ("Независимый от локализации заголовок", [("Сохранённое значение", 123)],
+                   [(["Без ключевых слов"], [(456,)])], []))])
+    tab.render(sample_result)
+    money = tab.customer_sections.widget(2)
+    assert "Независимый от локализации заголовок".upper() in [
+        label.text() for label in money.findChildren(QLabel)]
+    assert money.findChild(QTableWidget).item(0, 0).text() == "456"
+    assert card_titles(money) == ["Сохранённое значение"]
+    assert all("Независимый от локализации заголовок".upper() not in [
+        label.text() for label in tab.customer_sections.widget(i).findChildren(QLabel)] for i in (0, 1, 3, 4))
+
+
+@pytest.mark.parametrize("dark", [False, True])
+def test_analytics_charts_are_immediately_before_original_tables(window, rich_customer_result, dark):
+    from Application.statistics_charts import StatisticsChart
+    from Application.statistics_analytics_charts import RfmSegmentsWidget, CohortRetentionHeatmap
+    _, tab = window
+    before = deepcopy(rich_customer_result)
+    apply_app_theme(QApplication.instance(), dark)
+    tab.render(rich_customer_result)
+    assert tab.sections.count() == tab.customer_sections.count() == 5
+    def preceding(group, predicate):
+        page = tab.customer_sections.widget(group)
+        table = next(t for t in page.findChildren(QTableWidget) if predicate(
+            [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())]))
+        items = _visual_items(page.widget().layout())
+        index = next(i for i, item in enumerate(items) if item.widget() is table)
+        return items[index-1].widget()
+    frequency = preceding(1, lambda h:h[0]=="Заказов на покупателя")
+    comparison = preceding(1, lambda h:h==["Показатель","Подтверждённые покупки","Расширенный учёт покупок"])
+    assert isinstance(frequency, StatisticsChart) and frequency.data.labels[0]=="1 заказ"
+    assert isinstance(comparison, StatisticsChart) and len(comparison.chart().series()[0].barSets())==2
+    for currency in ("RUB", "KZT"):
+        chart = preceding(2, lambda h:h[0]=="Полный оборот от, "+currency)
+        assert isinstance(chart, StatisticsChart) and chart.data.money
+        assert chart.data.series[0][0]==currency
+    assert isinstance(preceding(3,lambda h:len(h)>2 and h[2]=="Сегмент"),RfmSegmentsWidget)
+    assert isinstance(preceding(4,lambda h:h[0]=="Горизонт, дней"),StatisticsChart)
+    heatmap = preceding(4,lambda h:len(h)>1 and h[1]=="M0: покупателей")
+    assert isinstance(heatmap,CohortRetentionHeatmap) and heatmap.model().columnCount()==14
+    # All 39 original numeric tables survive; heatmap is a separate chart view.
+    assert len(tab.customer_sections.findChildren(QTableWidget))==39
+    assert rich_customer_result==before and tab.displayed_result is rich_customer_result
+
+
+def test_rfm_graph_controls_keep_navigation_scroll_and_all_original_tables(
+        window, rich_customer_result, monkeypatch):
+    import sqlite3
+    from Application import dataset_statistics, statistics_slices
+    from Application.statistics_analytics_charts import RfmSegmentsWidget
+    _, tab = window
+    before = deepcopy(rich_customer_result)
+    def forbidden(*a,**kw):pytest.fail("RFM switching must not calculate or start a process")
+    monkeypatch.setattr(dataset_statistics,"calculate_statistics",forbidden)
+    monkeypatch.setattr(statistics_slices,"calculate_cached_statistics",forbidden)
+    monkeypatch.setattr(sqlite3,"connect",forbidden)
+    monkeypatch.setattr(ui,"QProcess",forbidden)
+    tab.render(rich_customer_result);tab.sections.setCurrentIndex(3);tab.customer_sections.setCurrentIndex(3)
+    QApplication.processEvents()
+    page=tab.customer_sections.widget(3)
+    controls=page.findChild(RfmSegmentsWidget)
+    tables=page.findChildren(QTableWidget)
+    table_ids=[id(t) for t in tables]
+    cells=[[[t.item(r,c).text() for c in range(t.columnCount())] for r in range(t.rowCount())] for t in tables]
+    scroll=page.verticalScrollBar();scroll.setValue(scroll.maximum()//2);position=scroll.value()
+    for window_index in range(3):
+        for currency_index in range(2):
+            controls.window_selector.setCurrentIndex(window_index)
+            controls.currency_selector.setCurrentIndex(currency_index)
+            QApplication.processEvents()
+            assert tab.sections.currentIndex()==tab.customer_sections.currentIndex()==3
+            assert tab.customer_sections.widget(3) is page and page.verticalScrollBar().value()==position
+            assert [id(t) for t in page.findChildren(QTableWidget)]==table_ids
+            assert [[[t.item(r,c).text() for c in range(t.columnCount())] for r in range(t.rowCount())]
+                    for t in tables]==cells
+    assert rich_customer_result==before
+
+
+@pytest.mark.parametrize("dark", [False, True])
+def test_customer_navigation_base_line_removed_pixels_and_both_underlines_preserved(
+        window, sample_result, dark):
+    import os
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtGui import QColor
+    _, tab = window
+    apply_app_theme(QApplication.instance(),dark)
+    tab.render(sample_result);tab.sections.setCurrentIndex(3);tab.customer_sections.setCurrentIndex(4)
+    QApplication.processEvents();QTest.qWait(20)
+    inner=tab.customer_sections.tabBar();outer=tab.sections.tabBar()
+    assert not inner.drawBase()
+    outer_base=outer.drawBase()
+    for selected in (1,3,1,3):
+        tab.sections.setCurrentIndex(selected);QApplication.processEvents()
+        if selected!=3:continue
+        assert tab.customer_sections.currentIndex()==4 and not inner.drawBase()
+        assert outer.drawBase()==outer_base
+        image=window[0].grab().toImage()
+        scale=image.devicePixelRatio()
+        def color(x,y):return image.pixelColor(round(x*scale),round(y*scale))
+        y=inner.mapTo(window[0],QPoint(0,0)).y()
+        x=window[0].width()-50
+        assert all(color(x,row)==color(x,y-3) for row in range(y-2,y+2))
+        accent=QColor(os.environ["QTMATERIAL_PRIMARYCOLOR"])
+        for bar in (outer,inner):
+            rect=bar.tabRect(bar.currentIndex())
+            center=bar.mapTo(window[0],QPoint(rect.center().x(),rect.bottom()))
+            assert any(color(center.x(),center.y()+delta)==accent for delta in (-3,-2,-1,0,1))
+    # The change is local, not a global QTabWidget stylesheet reset.
+    unrelated=QTabWidget()
+    try:
+        assert unrelated.styleSheet()=="" and unrelated.objectName()==""
+    finally:
+        unrelated.deleteLater()

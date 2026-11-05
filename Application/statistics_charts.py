@@ -1,7 +1,5 @@
 """Native Qt Charts presentation of an immutable, already calculated snapshot."""
 
-from dataclasses import dataclass
-from decimal import Decimal
 import math
 import os
 
@@ -9,6 +7,24 @@ from PyQt6.QtCore import QEvent, QMargins, QPoint, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QScrollArea, QGraphicsSimpleTextItem, QGraphicsTextItem, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from PyQt6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QCategoryAxis, QChart, QChartView, QHorizontalBarSeries, QLineSeries, QPieSeries
+
+
+from Application.statistics_chart_data import ChartData as ChartData, exact_number as exact_number
+from Application.statistics_chart_data import (
+    activity_distribution_data as activity_distribution_data,
+    distribution_data as distribution_data,
+    gender_chart_data as gender_chart_data,
+    interaction_frequency_data as interaction_frequency_data,
+    month_label as month_label,
+    monthly_data as monthly_data,
+    payment_chart_data as payment_chart_data,
+    product_ranking_data as product_ranking_data,
+    purchase_count_data as purchase_count_data,
+    purchased_products_data as purchased_products_data,
+    revenue_chart_data as revenue_chart_data,
+    season_chart_data as season_chart_data
+)
+
 
 
 MONTHS = ('янв.', 'февр.', 'март', 'апр.', 'май', 'июнь', 'июль', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.')
@@ -58,19 +74,11 @@ def style_chart(chart, secondary=False, section_title=False):
                 piece.setBrush(fill)
                 piece.setPen(QPen(background, 1))
         else:
-            for bars in series.barSets():
-                bars.setColor(color)
-                bars.setBorderColor(color)
+            for index, bars in enumerate(series.barSets()):
+                fill = color if index == 0 else QColor(SECONDARY[dark])
+                bars.setColor(fill)
+                bars.setBorderColor(fill)
     return background, foreground, accent
-
-
-def exact_number(value):
-    number = Decimal(str(value))
-    text = format(number, 'f')
-    whole, _, fraction = text.partition('.')
-    grouped = f'{int(whole):,}'.replace(',', ' ')
-    fraction = fraction.rstrip('0')
-    return grouped + (',' + fraction if fraction else '')
 
 
 def compact_number(value):
@@ -79,130 +87,28 @@ def compact_number(value):
     return exact_number(round(value / scale, 1) if scale > 1 else value) + suffix
 
 
-def month_label(month, full=False):
-    year, number = month.split('-')
-    return f'{(MONTHS_FULL if full else MONTHS)[int(number) - 1]} {year}'
 
 
-@dataclass(frozen=True)
-class ChartData:
-    title: str
-    kind: str
-    labels: tuple[str, ...]
-    series: tuple[tuple[str, tuple[int | Decimal, ...]], ...]
-    tooltips: tuple[tuple[str, ...], ...]
-
-    inner_title: bool = False
-    ranked: bool = False
-    money: bool = False
-    secondary: bool = False
-
-    @property
-    def empty(self):
-        return not self.labels or not any(value for _, values in self.series for value in values)
 
 
-def monthly_data(result, kind):
-    fields = {'views': ('Динамика просмотров', 'action_monthly_dynamics', (('Просмотры', 1),)),
-              'favorites': ('Динамика избранного', 'action_monthly_dynamics', (('Избранное', 3),))}
-    title, field, columns = fields[kind]
-    rows = result.get(field) or ()
-    return ChartData(title, 'line', tuple(month_label(row[0]) for row in rows),
-                     tuple((name, tuple(row[index] for row in rows)) for name, index in columns),
-                     tuple(tuple(f'{month_label(row[0], full=True)}\n{name}: {exact_number(row[index])}'
-                                 for row in rows) for name, index in columns), inner_title=True, secondary=kind == 'favorites')
 
 
-def purchase_count_data(result, currency):
-    index = {'RUB': 1, 'KZT': 3}[currency]
-    rows = result.get('order_monthly_dynamics') or ()
-    return ChartData(f'Динамика количества покупок — {currency}', 'line', tuple(month_label(row[0]) for row in rows),
-                     ((currency, tuple(row[index] for row in rows)),),
-                     (tuple(f'{month_label(row[0], full=True)}\nПокупок: {exact_number(row[index])}\nВалюта: {currency}'
-                            for row in rows),), secondary=currency == 'KZT')
 
 
-def interaction_frequency_data(result):
-    rows = result.get('interaction_activity_distribution') or ()
-    return ChartData('Распределение клиентов по количеству взаимодействий', 'bar', tuple(row[0] for row in rows),
-                     (('Клиентов', tuple(row[1] for row in rows)),),
-                     (tuple(f'Количество взаимодействий: {label}\nКлиентов: {exact_number(count)}\n'
-                            f'Доля: {format(rate, ".2f").replace(".", ",")} %' for label, count, rate in rows),))
 
 
-def distribution_data(result, kind):
-    title, field, unit = {'basket': ('Состав корзины', 'purchase_basket_distribution', 'Заказов'),
-                         'age': ('Возрастная структура клиентов', 'age_distribution', 'Клиентов')}[kind]
-    rows = result.get(field) or ()
-    return ChartData(title, 'bar', tuple(row[0] for row in rows), ((unit, tuple(row[1] for row in rows)),),
-                     (tuple(f'{label}\n{unit}: {exact_number(count)}\nДоля: {rate:.2f} %'.replace('.', ',')
-                            for label, count, rate in rows),))
 
 
-def purchased_products_data(result):
-    rows = (result.get('top_purchased_products') or ())[:10]
-    return ChartData('Популярные товары по покупкам — Top-10', 'horizontal', tuple(row[1] for row in rows),
-                     (('Покупки', tuple(row[2] for row in rows)),),
-                     (tuple(f'Код: {code}\n{name}\nПокупки: {exact_number(count)}\nПокупатели: {exact_number(users)}\n'
-                            f'Продано единиц: {exact_number(quantity)}' for code, name, count, users, quantity, *_ in rows),), ranked=True)
 
 
-def activity_distribution_data(result, kind):
-    field, noun = {'views': ('view_user_activity_distribution', 'просмотров'),
-                   'favorites': ('favorite_user_activity_distribution', 'избранного')}[kind]
-    rows = result.get(field) or ()
-    return ChartData(f'Распределение клиентов по количеству {noun}', 'bar', tuple(row[0] for row in rows),
-                     (('Клиентов', tuple(row[1] for row in rows)),),
-                     (tuple(f'Количество {noun}: {label}\nКлиентов: {exact_number(count)}\n'
-                            f'Доля: {format(rate, ".2f").replace(".", ",")} %' for label, count, rate in rows),),
-                     secondary=kind == 'favorites')
 
 
-def revenue_chart_data(result, currency):
-    index = {'RUB': 2, 'KZT': 4}[currency]
-    rows = result.get('order_monthly_dynamics') or ()
-    values = tuple(Decimal(row[index]) for row in rows)
-    return ChartData(f'Динамика суммы покупок — {currency}', 'line', tuple(month_label(row[0]) for row in rows),
-                     ((currency, values),), (tuple(f'{month_label(row[0], full=True)}\nСумма покупок: '
-                     f'{exact_number(value)} {currency}' for row, value in zip(rows, values)),), money=True, secondary=currency == 'KZT')
 
 
-def payment_chart_data(result):
-    rows = result.get('payment_type_distribution') or ()
-    if len(rows) > 10:
-        rows = sorted(rows, key=lambda row: (-row[1], row[0]))[:10]
-    return ChartData('Оплата', 'horizontal', tuple(row[0] for row in rows), (('Заказов', tuple(row[1] for row in rows)),),
-                     (tuple(f'{name}\nЗаказов с этим способом: {exact_number(count)}\nДоля заказов: {format(rate, ".2f").replace(".", ",")} %' for name, count, rate in rows),))
 
 
-def product_ranking_data(result, kind):
-    field, title, unit, user_unit, extra = {
-        'views': ('top_viewed_products', 'Популярные товары по просмотрам', 'Просмотры', 'Клиенты с просмотрами', 'Добавления в избранное'),
-        'favorites': ('top_favorited_products', 'Популярные товары по избранному', 'Добавления в избранное', 'Клиенты с избранным', 'Просмотры'),
-    }[kind]
-    rows = (result.get(field) or ())[:10]
-    return ChartData(title, 'horizontal', tuple(row[1] for row in rows), ((unit, tuple(row[2] for row in rows)),),
-                     (tuple(f'Код: {code}\n{name}\n{unit}: {exact_number(count)}\n{user_unit}: {exact_number(users)}\n'
-                            f'{extra}: {exact_number(other)}\nПокупки: {exact_number(purchases)}'
-                            for code, name, count, users, other, purchases in rows),), ranked=True)
 
 
-def season_chart_data(result):
-    # This snapshot field is already aggregated by Коллекция, never СезонНоски.
-    rows = result.get('product_season_statistics') or ()
-    return ChartData('Спрос по сезону', 'bar' if len(rows) <= 6 else 'horizontal', tuple(row[0] for row in rows),
-                     (('Покупки', tuple(row[4] for row in rows)),),
-                     (tuple(f'{name}\nТоваров: {exact_number(items)}\nПросмотры: {exact_number(views)}\n'
-                            f'Добавления в избранное: {exact_number(favorites)}\nПокупки: {exact_number(purchases)}\n'
-                            f'Продано единиц: {exact_number(quantity)}' for name, items, views, favorites, purchases, quantity in rows),))
-
-
-def gender_chart_data(result):
-    rows = result.get('gender_distribution') or ()
-    return ChartData('Распределение по полу', 'donut', tuple(row[0] for row in rows),
-                     (('Клиентов', tuple(row[1] for row in rows)),),
-                     (tuple(f'{label}\nКлиентов: {exact_number(count)}\nДоля: {rate:.2f} %'.replace('.', ',')
-                            for label, count, rate in rows),))
 
 
 def _count_axis(maximum, money=False):
@@ -216,6 +122,17 @@ def _count_axis(maximum, money=False):
     for i in range(5):
         axis.append(compact_number(round(i * step, 10)), i * step)
     axis.setRange(0, 4 * step)
+    axis.setTickCount(5)
+    return axis
+
+
+def _percentage_axis():
+    axis = QCategoryAxis()
+    axis.setStartValue(-1)
+    axis.setLabelsPosition(QCategoryAxis.AxisLabelsPosition.AxisLabelsPositionOnValue)
+    for value in (0, 25, 50, 75, 100):
+        axis.append(str(value), value)
+    axis.setRange(0, 100)
     axis.setTickCount(5)
     return axis
 
@@ -251,6 +168,7 @@ class StatisticsChart(QChartView):
         self._product_labels = []
         self._bar_labels = []
         self._value_labels = []
+        self._point_labels = []
         self.count_axis = self.category_axis = None
         if data.kind == 'donut':
             series = QPieSeries()
@@ -261,8 +179,9 @@ class StatisticsChart(QChartView):
                 piece.hovered.connect(lambda state, i=index: self.show_tooltip(0, i, state))
             chart.addSeries(series)
         else:
-            maximum = float(max(value for _, values in data.series for value in values))
-            self.count_axis = _count_axis(maximum, data.money)
+            maximum = float(max((value for _, values in data.series for value in values if value is not None), default=0))
+            self.count_axis = _percentage_axis() if data.percentage else _count_axis(maximum, data.money)
+            self.count_axis.setTitleText(data.value_axis_title)
             self.category_axis = QCategoryAxis() if data.kind == 'line' else QBarCategoryAxis()
             horizontal = data.kind == 'horizontal'
             chart.addAxis(self.count_axis, Qt.AlignmentFlag.AlignBottom if horizontal else Qt.AlignmentFlag.AlignLeft)
@@ -302,15 +221,27 @@ class StatisticsChart(QChartView):
                     series.hovered.connect(lambda point, state, n=number: self.show_tooltip(n, round(point.x()), state))
             else:
                 series = QHorizontalBarSeries() if horizontal else QBarSeries()
-                bars = QBarSet(data.series[0][0])
-                bars.append(list(reversed(data.series[0][1])) if horizontal else list(data.series[0][1]))
-                series.append(bars)
+                for number, (name, values) in enumerate(data.series):
+                    bars = QBarSet(name)
+                    bars.setProperty("statisticsSeriesIndex", number)
+                    plotted = [float(value) if value is not None else 0. for value in values]
+                    bars.append(list(reversed(plotted)) if horizontal else plotted)
+                    series.append(bars)
+                if data.zero_is_data and not horizontal:
+                    # Missing points have no bar; explicit markers distinguish
+                    # unavailable observations from a trustworthy zero.
+                    for index, value in enumerate(data.series[0][1]):
+                        if value is None or value == 0:
+                            label = "—" if value is None else ("0 %" if data.percentage else "0")
+                            self._point_labels.append((index, QGraphicsSimpleTextItem(label, chart)))
+                    chart.plotAreaChanged.connect(self._position_point_labels)
                 series.setBarWidth(.65)
                 chart.addSeries(series)
                 series.attachAxis(self.category_axis)
                 series.attachAxis(self.count_axis)
                 series.hovered.connect(lambda state, index, bars: self.show_tooltip(
-                    0, len(data.labels) - 1 - index if horizontal else index, state))
+                    int(bars.property("statisticsSeriesIndex")),
+                    len(data.labels) - 1 - index if horizontal else index, state))
                 # Qt draws horizontal bars bottom-up; reverse only the visual projection.
         self._update_categories()
         self.apply_theme()
@@ -402,6 +333,13 @@ class StatisticsChart(QChartView):
                 margins.setBottom(bottom)
                 self.chart().setMargins(margins)
 
+    def _position_point_labels(self, *args):
+        area = self.chart().plotArea()
+        width = area.width() / max(1, len(self.data.labels))
+        for index, item in self._point_labels:
+            item.setPos(area.left() + (index + .5) * width - item.boundingRect().width() / 2,
+                        area.bottom() - item.boundingRect().height() - 3)
+
     def _position_product_labels(self, *args):
         if not self._product_labels:
             return
@@ -423,6 +361,9 @@ class StatisticsChart(QChartView):
             item.setBrush(foreground)
         for item in self._bar_labels:
             item.setDefaultTextColor(foreground)
+        for _, item in self._point_labels:
+            item.setBrush(foreground)
+        self._position_point_labels()
         self.tooltip.setStyleSheet(f'QLabel {{background: {background.name()}; color: {foreground.name()}; '
                                   f'border: 1px solid {accent.name()}; border-radius: 5px; padding: 7px;}}')
 

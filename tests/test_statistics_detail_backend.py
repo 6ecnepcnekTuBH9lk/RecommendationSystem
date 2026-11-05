@@ -228,7 +228,7 @@ def test_cancellation_preserves_existing_destination_and_cleans_owned_files(job,
     clean(job)
 
 
-@pytest.mark.parametrize('kind',['zip','replace','space','source_changed','bad_price','snapshot_conflict'])
+@pytest.mark.parametrize('kind',['zip','replace','space','source_changed','bad_price','snapshot_scope'])
 def test_failures_are_private_atomic_and_cleanup_is_complete(job,monkeypatch,kind):
     job.target.write_bytes(b'previous')
     if kind=='zip':
@@ -253,7 +253,7 @@ def test_failures_are_private_atomic_and_cleanup_is_complete(job,monkeypatch,kin
         raw=raw_order('bad','2026-01-01');raw['lines'][0]['priceOfLine']='SYNTH_SECRET'
         job.configure([raw])
     else:
-        job.configure([raw_order('same','2026-01-01',statuses=('Return',)),raw_order('same','2026-01-01')])
+        job.configure([raw_order('same','2025-12-31',statuses=('Return',)),raw_order('same','2026-01-01')])
     with pytest.raises(storage.DetailExportError) as error:
         run(job)
     assert all(secret not in str(error.value) for secret in (SYNTH_EMAIL,SYNTH_PHONE,'SYNTH_SECRET'))

@@ -77,26 +77,26 @@ def test_rfm_saved_snapshot_gui_xlsx_html_identical_values_no_raw_access(dataset
         xlsx.export_statistics(result,target)
         rendered = html.build_statistics_html(result)
     assert result==before and path.read_bytes()==saved
-    sections = rfm_sections(result)
-    page = tab.sections.widget(3)
+    sections = rfm_sections(result, compact=True)
+    page = tab.customer_sections.widget(3)
     labels = [label.text() for label in page.findChildren(QLabel)]
     assert all(title.upper() in labels for title,_,_,_ in sections)
     tables = page.findChildren(QTableWidget)
-    start = 9+sum(len(t) for _,_,t,_ in buyer_sections(result))
     expected = [(headers,rows) for _,_,blocks,_ in sections for headers,rows in blocks]
-    rfm_tables = tables[start:start+len(expected)]
+    rfm_tables = tables
     assert len(rfm_tables)==len(expected)
     for table,(headers,rows) in zip(rfm_tables,expected):
         assert [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]==list(headers)
         assert [[table.item(r,c).text() for c in range(table.columnCount())] for r in range(table.rowCount())]==[
-            [ui._number(ui._buyer_display(v)) for v in row] for row in rows]
+            [ui._cell_text(v, display=ui._buyer_display, percentage=ui.report.percentage_cell(headers,row,c))
+             for c,v in enumerate(row)] for row in rows]
         assert all(table.rowHeight(r)>=table.sizeHintForRow(r) for r in range(table.rowCount()))
     book = load_workbook(target)
     try:
-        assert 'RFM-анализ' in book.sheetnames
-        rows = list(book['RFM-анализ'].values)
-        html_rows = [row for block in html.presentation(result)[4].blocks if block['kind']=='table' for row in block['rows']]
-        for title,cards,blocks,notes in sections:
+        assert 'RFM-анализ' not in book.sheetnames
+        rows = list(book['Клиенты'].values)
+        html_rows = [row for block in html.presentation(result)[3].blocks if block['kind']=='table' for row in block['rows']]
+        for title,cards,blocks,notes in rfm_sections(result,compact=True):
             assert any(row[0]==title for row in rows)
             assert html.display_text(title) in rendered
             for label,value in cards:
@@ -104,7 +104,7 @@ def test_rfm_saved_snapshot_gui_xlsx_html_identical_values_no_raw_access(dataset
             for headers,values in blocks:
                 assert any(tuple(row[:len(headers)])==tuple(headers) for row in rows)
                 for row in values:
-                    shown = [html._cell(v)['text'] for v in row]
+                    shown = [ui.report.cell_presentation(ui.report._buyer_display(v),percentage=ui.report.percentage_cell(headers,row,c)).text for c,v in enumerate(row)]
                     assert any([cell['text'] for cell in candidate]==shown for candidate in html_rows)
                     assert any(all(Decimal(str(actual))==pytest.approx(v) if isinstance(v,Decimal) else
                                    actual==pytest.approx(v) if isinstance(v,float) else actual==v
@@ -132,6 +132,37 @@ def test_old_cache_opens_on_startup_and_exports_without_recalculation(dataset,wi
     assert tab.displayed_result is not None
     assert path.read_bytes()==before
     assert any(label.text()==RFM_LEGACY_TEXT for label in tab.findChildren(QLabel)) is False  # Table placeholder, no fake card.
-    tables = tab.sections.widget(3).findChildren(QTableWidget)
+    tables = tab.customer_sections.widget(3).findChildren(QTableWidget)
     assert tables[-1].item(0,1).text()==RFM_LEGACY_TEXT
     tab._shutdown()
+
+
+def test_compact_analytics_keep_kpis_and_tables_and_localize_only_display(dataset):
+    import re
+    from Application.statistics_cohorts_presentation import cohort_sections
+    result = calculate(dataset)
+    before = deepcopy(result)
+    providers = (buyer_sections, rfm_sections, cohort_sections)
+    for provider in providers:
+        detailed = provider(result)
+        compact = provider(result, compact=True)
+        if provider is buyer_sections:
+            assert compact == detailed[:-1]
+            assert detailed[-1][0] == "Качество и ограничения покупательской аналитики"
+        else:
+            assert compact[0][:2] == detailed[0][:2]  # Keep all initial KPI values.
+            assert compact[0][2:] == ([], [])
+            assert detailed[0][2] and detailed[0][3]  # Retained in detailed exports.
+            assert compact[1:] == detailed[1:]
+        texts = []
+        for title, cards, tables, notes in compact:
+            texts.append(title)
+            texts.extend(label for label, _ in cards)
+            assert not notes
+            for headers, rows in tables:
+                texts.extend(headers)
+                texts.extend(str(value) for row in rows for value in row)
+        assert not re.search(r"\b(STRICT|EXTENDED|Monetary|UNSCORABLE|Eligible|Repeated|Orders|UTC)\b",
+                             "\n".join(texts))
+        assert "T00:00:00" not in "\n".join(texts) and "+00:00" not in "\n".join(texts)
+    assert result == before
