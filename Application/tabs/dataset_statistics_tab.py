@@ -8,25 +8,30 @@ import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from threading import Event
 
-from PyQt6.QtCore import QEvent, QProcess, QSize, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, QEvent, QObject, QProcess, QRunnable, QSize, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication as QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog as QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication as QApplication, QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy, QStyle, QStyleOptionHeader, QFileDialog as QFileDialog, QMessageBox, QLineEdit, QTableView
 
 from Application.statistics_presentation import SOURCE_ACTIONS_HEADING as SOURCE_ACTIONS_HEADING, ACTION_QUALITY_HEADING as ACTION_QUALITY_HEADING, source_event_quality_display_rows as source_event_quality_display_rows, CATEGORY_HEADERS as CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE as DIRECT_CATEGORY_NOTE, product_category_rows as product_category_rows, customer_scope_sections as customer_scope_sections, PROFILE_SLICE_LABEL, CUSTOMER_GROUP_ORDER
 from Application import statistics_charts as charts
 from Application import statistics_report_presentation as report
 from Application.statistics_analytics_charts import analytics_chart, RfmSegmentsWidget, CohortRetentionHeatmap
+from Application.statistics_table_explanation_widget import StatisticsTableExplanation
+from Application.statistics_table_explanations import table_explanation
 from Application.statistics_rfm_presentation import rfm_sections as rfm_sections
 from Application.statistics_cohorts_presentation import cohort_sections as cohort_sections, cohort_display as cohort_display
 from Application.loading_errors import format_error
 from Application.paths import ICONS_DIR as ICONS_DIR, PROJECT_ROOT as PROJECT_ROOT
 from Application.analysis_filter import AnalysisFilter
+from Application.statistics_unified_dto import UnifiedResult, read_envelope
+from Application.statistics_unified_presentation import UNIFIED_ERRORS, unified_presentation
 from Application.analysis_filter_settings import load_filter
 from Application.settings.set_status import set_status_processing, schedule_status_reset
 from Application.statistics_detail_process import DetailExportProcess
 from Application.statistics_detail_job import ERRORS as DETAIL_ERRORS, STAGES as DETAIL_STAGES, validate_report_destination
-from Application.statistics_bundle_export import suggested_filename as suggested_report_filename
+from Application.statistics_bundle_export import suggested_filename as suggested_report_filename, validate_report_snapshot
 from Application.statistics_cache import CACHE_PATH as CACHE_PATH, load_result, save_result, validate_result
 from Application.statistics_presentation import WARNING_LABELS as WARNING_LABELS, DIAGNOSTIC_LABELS as DIAGNOSTIC_LABELS, _date, _calculation_message as _calculation_message
 from Application.theme.layout_metrics import COMPACT_SPACING, CONTROL_SPACING as CONTROL_SPACING, BLOCK_SPACING, SECTION_SPACING as SECTION_SPACING, PAGE_MARGIN
@@ -37,6 +42,62 @@ PROCESSING_STATUS = "Расчет статистики..."
 PROGRESS_LABELS = {"actions": "Действия", "orders": "Заказы", "customer_merges": "Объединения клиентов"}
 
 CUSTOMER_TAB_LABELS = report.CUSTOMER_TAB_LABELS
+_RESULT_LINE = re.compile(br'^\s*\{\s*"event"\s*:\s*"result"\s*,')
+
+
+class _PresentationSignals(QObject):
+    finished = pyqtSignal(object, object, str)
+
+
+class _UnifiedPresentationTask(QRunnable):
+    """Decode the aggregate payload and prepare its read-only report off the GUI thread."""
+
+    def __init__(self, line, request):
+        super().__init__()
+        self.line, self.request = line, request
+        self.cancelled = Event()
+        self.signals = _PresentationSignals()
+
+    def check(self):
+        if self.cancelled.is_set():
+            raise InterruptedError
+
+    def run(self):
+        try:
+            self.check()
+            payload = json.loads(self.line)["value"]
+            applied = AnalysisFilter.from_dict(payload["analysis_filter"]), payload["product_code"], payload["category_code"]
+            result = read_envelope(payload["report"], check=self.check)
+            if applied != self.request[2:] or not _matches_unified_request(result, self.request):
+                raise ValueError("Invalid report binding")
+            model = unified_presentation(result)
+            self.check()
+        except InterruptedError:
+            self.signals.finished.emit(None, None, "CANCELLED")
+        except Exception:
+            self.signals.finished.emit(None, None, "INVALID_UNIFIED_DTO")
+        else:
+            self.signals.finished.emit(result, model, "")
+
+
+def _matches_unified_request(result, request):
+    if not isinstance(result, UnifiedResult) or request[:2] != ("unified", result.source["reader"]):
+        return False
+    _, _, selection, product, category = request
+    period = [part.isoformat() for part in selection.interval] if selection.interval else None
+    params = result.metadata["parameters"]
+    return (all(params[key] == period for key in ("order_period", "buyer_period", "customer_period"))
+            and (params["selected_start"], params["selected_end"]) == (selection.start_date, selection.end_date)
+            and bool(params["product_filter_key"]) == bool(selection.product_restricted or product or category))
+
+
+def _filter_summary(selection, product, category):
+    parts = [selection.summary()]
+    if product:
+        parts.append("товар " + product)
+    if category:
+        parts.append("категория " + category)
+    return "; ".join(parts)
 
 
 
@@ -84,6 +145,8 @@ class _NumericText(str):
 
 
 def _numeric(value, *, percentage=False):
+    if isinstance(value, report.ReportMeasure):
+        return _numeric(value.value, percentage=percentage)
     if isinstance(value, (int, float, Decimal, _NumericText, report.ReportNumber)) and not isinstance(value, bool):
         return True
     # A known percent field may already be formatted by a saved presentation.
@@ -266,6 +329,8 @@ def _cards(layout, values):
         box.setSpacing(COMPACT_SPACING)
         box.addWidget(_label(title))
         number = _label(_cell_text(value, percentage="%" in title or (isinstance(value, str) and value.endswith("%"))))
+        if isinstance(value, report.ReportMeasure):
+            number.setToolTip(value.tooltip)
         number.setProperty("class", "statisticsNumber")
         box.addWidget(number)
         cards.append(card)
@@ -290,6 +355,8 @@ def _table(layout, headers, rows, *, display=None):
             item.setTextAlignment(alignment | Qt.AlignmentFlag.AlignVCenter)
             table.setItem(row, column, item)
             item.setData(Qt.ItemDataRole.UserRole, value)
+            if isinstance(value, report.ReportMeasure):
+                item.setToolTip(value.tooltip)
             if not _numeric(value, percentage=percentage) and value is not None:
                 text_columns.add(column)
     header = table.horizontalHeader()
@@ -357,6 +424,54 @@ def _analytics_sections(layout, sections, display=_buyer_display, before_tables=
 
 
 
+class _ReportTableModel(QAbstractTableModel):
+    def __init__(self, block, parent):
+        super().__init__(parent)
+        self.block = block
+
+    def rowCount(self, parent=None):
+        return len(self.block.rows)
+
+    def columnCount(self, parent=None):
+        return len(self.block.headers)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return self.block.headers[section]
+        return None
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self.block.rows[index.row()]
+        column = index.column()
+        value = row[column]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return report.cell_presentation(value, percentage=report.percentage_cell(self.block.headers, row, column)).text
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return value.tooltip if isinstance(value, report.ReportMeasure) else None
+        if role == Qt.ItemDataRole.UserRole:
+            return value
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return int((Qt.AlignmentFlag.AlignRight if _numeric(value) else Qt.AlignmentFlag.AlignLeft)
+                       | Qt.AlignmentFlag.AlignVCenter)
+        return None
+
+
+def _large_report_table(layout, block):
+    table = QTableView()
+    table.setModel(_ReportTableModel(block, table))
+    table.setProperty("statisticsTableId", block.table_id)
+    table.setProperty("statisticsContextId", block.options["context_id"])
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.verticalHeader().hide()
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    table.horizontalHeader().setDefaultSectionSize(185)
+    table.horizontalHeader().setStretchLastSection(True)
+    table.setMinimumHeight(340)
+    layout.addWidget(table)
+
+
 def _render_report_blocks(layout, blocks):
     section = layout
     for block in blocks:
@@ -365,7 +480,14 @@ def _render_report_blocks(layout, blocks):
         elif block.kind == "cards":
             _cards(section, block.values)
         elif block.kind == "table":
+            if block.table_id.startswith("unified.") and len(block.rows) > 250:
+                _large_report_table(section, block)
+                continue
             table = _table(section, block.headers, block.rows, display=_buyer_display)
+            if block.options.get("context_id"):
+                table.setProperty("statisticsContextId", block.options["context_id"])
+            if block.table_id:
+                table.setProperty("statisticsTableId", block.table_id)
             if block.options.get("nowrap"):
                 table.setWordWrap(False)
             for column in block.options.get("full_width_columns", ()):
@@ -374,8 +496,14 @@ def _render_report_blocks(layout, blocks):
                 table._base_widths[column] = table._minimum_widths[column]
                 table.fit_columns()
             table.size_rows()
+            if table_explanation(block.table_id) is not None:
+                section.addWidget(StatisticsTableExplanation(block.table_id))
         elif block.kind == "text":
-            section.addWidget(_label(block.title))
+            if not block.options.get("xlsx_only"):
+                label=_label(block.title)
+                if block.options.get("context"):
+                    label.setProperty("class","statisticsContext")
+                section.addWidget(label)
         elif block.kind == "chart":
             section.addWidget(analytics_chart(block.data) if block.analytics else charts.create_chart(block.data))
         elif block.kind == "rfm":
@@ -441,6 +569,14 @@ class DatasetStatisticsTab(QWidget):
         self.window = window
         self.cache_path = CACHE_PATH
         self.displayed_result = None
+        self.report = None
+        self._display_request = None
+        self._running_request = None
+        self._running_cache_only = False
+        self._presentation_task = None
+        self._scan_from = 0
+        self._close_target = None
+        self._quit_after_unified = False
         self._export_task = None
         self._export_snapshot = None
         self.detail_process = None
@@ -464,9 +600,31 @@ class DatasetStatisticsTab(QWidget):
         layout.setContentsMargins(PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN, PAGE_MARGIN)
         layout.setSpacing(BLOCK_SPACING)
         self.description = _information_label(SOURCE_DESCRIPTION)
+        self.description.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.description)
-        self.card_labels = _cards(layout, [(name, None) for name in (
-            "Количество взаимодействий", "Количество заказов", "Количество позиций в заказах", PROFILE_SLICE_LABEL)])
+        self._legacy_card_titles = (
+            "Количество взаимодействий", "Количество заказов", "Количество позиций в заказах", PROFILE_SLICE_LABEL)
+        self.card_labels = _cards(layout, [(name, None) for name in self._legacy_card_titles])
+        self.card_titles = [label.parentWidget().layout().itemAt(0).widget() for label in self.card_labels]
+        choices = QHBoxLayout()
+        self.product_code = QLineEdit()
+        self.product_code.setObjectName("statisticsProductCode")
+        self.product_code.setPlaceholderText("Код товара")
+        self.product_code.setToolTip("Точный код товара для товарного среза. Пустое поле включает все товары.")
+        self.category_code = QLineEdit()
+        self.category_code.setObjectName("statisticsCategoryCode")
+        self.category_code.setPlaceholderText("Код категории")
+        self.category_code.setToolTip("Точный код прямой категории. Пустое поле включает все категории.")
+        self.cache_button = QPushButton("Открыть кеш")
+        self.cache_button.setObjectName("statisticsOpenUnifiedCache")
+        for widget in (self.product_code, self.category_code, self.cache_button):
+            choices.addWidget(widget)
+        choices.addStretch()
+        for widget in (self.product_code, self.category_code, self.cache_button):
+            widget.setVisible(self._mode() == "unified")
+        self.product_code.textChanged.connect(self._update_description)
+        self.category_code.textChanged.connect(self._update_description)
+        self.cache_button.clicked.connect(lambda: self._start_calculation(cache_only=True))
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(CONTROL_SPACING)
@@ -542,6 +700,7 @@ class DatasetStatisticsTab(QWidget):
         controls.addWidget(self.progress_container, 1)
 
         layout.addLayout(controls)
+        layout.addLayout(choices)
         # Compatibility references point to the existing upper controls.
         self.detail_status=self.status
         self.detail_progress=self.progress
@@ -561,15 +720,51 @@ class DatasetStatisticsTab(QWidget):
             timer.timeout.connect(self._keep_processing_status)
         self._update_description()
         self._update_export_button()
-        saved = load_result(self.cache_path)
-        if saved is not None:
-            self.render(saved)
+        self._initial_unified_cache = False
+        if self._mode() == "legacy":
+            saved = load_result(self.cache_path)
+            if saved is not None:
+                self.render(saved)
+        else:
+            from Application.statistics_index import DEFAULT_INDEX_DIR
+            from Application.statistics_unified_cache import LATEST_RESULT_NAME
+            from Application.statistics_unified_index import POINTER_NAME
+
+            if not (DEFAULT_INDEX_DIR / POINTER_NAME).exists():
+                self.status.setText(UNIFIED_ERRORS["INDEX_MISSING"])
+            else:
+                cache = PROJECT_ROOT / "filtered_data" / "statistics_unified_cache" / LATEST_RESULT_NAME
+                self._initial_unified_cache = cache.is_file()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._initial_unified_cache:
+            self._initial_unified_cache = False
+            if self.displayed_result is None:
+                self._start_calculation(cache_only=True)
+
+    def _calculation_source(self):
+        return "unified", "INDEXED"
+
+    def _mode(self):
+        return self._calculation_source()[0]
+
+    def _request(self):
+        mode, source = self._calculation_source()
+        unified = mode == "unified"
+        return (mode, source, self.configured_filter,
+                self.product_code.text().strip() if unified else "", self.category_code.text().strip() if unified else "")
+
+    def _busy(self):
+        return self.process is not None or self._presentation_task is not None
 
     def _update_export_button(self):
         detail_busy = self.detail_process is not None or self._detail_dialog_open
-        self.export_button.setEnabled(self.process is None and self.displayed_result is not None
-                                      and self._export_task is None and not detail_busy)
-        self.refresh.setEnabled(self.process is None and self._export_task is None and not detail_busy)
+        unified = self._mode() == "unified"
+        idle = not self._busy() and self._export_task is None and not detail_busy
+        self.export_button.setEnabled(idle and self.displayed_result is not None)
+        self.refresh.setEnabled(idle)
+        self.cache_button.setEnabled(unified and idle)
 
     def _reset_export_progress(self):
         self.progress.setRange(0,100)
@@ -580,12 +775,12 @@ class DatasetStatisticsTab(QWidget):
         self._detail_force_available=False
 
     def export(self):
-        if (self.process is not None or self.displayed_result is None or self._export_task is not None
+        if (self._busy() or self.displayed_result is None or self._export_task is not None
                 or self.detail_process is not None or self._detail_dialog_open):
             return
         captured=deepcopy(self.displayed_result)
         try:
-            captured=validate_result(captured)
+            captured=validate_report_snapshot(captured)
         except Exception:
             self.status.setText(DETAIL_ERRORS["REPORT_CONTEXT_MISMATCH"])
             return
@@ -612,16 +807,40 @@ class DatasetStatisticsTab(QWidget):
             code=getattr(error,"code","INVALID_EXPORT_PATH")
             self.status.setText(DETAIL_ERRORS.get(code,DETAIL_ERRORS["INVALID_EXPORT_PATH"]))
             return
+        detail = None
+        if isinstance(captured, UnifiedResult) and captured.metadata["detail"]["available"]:
+            from Application.statistics_unified_detail import filter_snapshot
+
+            if self._display_request is None:
+                self.status.setText(DETAIL_ERRORS["REPORT_CONTEXT_MISMATCH"])
+                return
+            _, _, selection, product, category = self._display_request
+            self._detail_dialog_open = True
+            self._update_export_button()
+            try:
+                choice = QMessageBox.question(
+                    self, "Строки заказов и покупателей",
+                    "Включить детальные таблицы заказов, позиций и покупателей в ZIP?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.No,
+                )
+            finally:
+                self._detail_dialog_open = False
+                self._update_export_button()
+            if choice == QMessageBox.StandardButton.Cancel:
+                return
+            if choice == QMessageBox.StandardButton.Yes:
+                detail = filter_snapshot(selection, product, category)
         self._export_snapshot=captured
         self.status.setToolTip("")
-        self._start_details(dict(destination=target),snapshot=captured)
+        self._start_details(dict(destination=target), snapshot=captured, **({"detail": detail} if detail else {}))
 
     def export_details(self):
         """Compatibility entry point for the single report operation."""
         self.export()
 
-    def _start_details(self,options,*,snapshot=None):
-        if self.detail_process is not None or self.process is not None or self._export_task is not None:
+    def _start_details(self,options,*,snapshot=None,detail=None):
+        if self.detail_process is not None or self._busy() or self._export_task is not None:
             return
         self._detail_closing=self._detail_quitting=False
         self._detail_force_available=False
@@ -637,7 +856,8 @@ class DatasetStatisticsTab(QWidget):
         self._update_export_button()
         self.calculation_running_changed.emit(True)
         self._keep_processing_status()
-        self.detail_process.start(options,report_result=snapshot if snapshot is not None else deepcopy(self.displayed_result))
+        captured = snapshot if snapshot is not None else deepcopy(self.displayed_result)
+        self.detail_process.start(options, report_result=captured, **({"detail": detail} if detail else {}))
 
     def _detail_progress(self,message):
         if self.detail_process is not None and not self.detail_process.cancel_requested:
@@ -709,7 +929,16 @@ class DatasetStatisticsTab(QWidget):
         self._update_description()
 
     def _update_description(self):
+        request = self._request()
         text = SOURCE_DESCRIPTION.replace("Отбор не установлен", self.configured_filter.summary())
+        if request[0] == "unified":
+            text = "Статистика Mindbox. " + _filter_summary(*request[2:])
+            if isinstance(self.displayed_result, UnifiedResult):
+                text += ". Дата расчёта: " + _date(self.displayed_result.calculated_at)
+                if self._display_request != request:
+                    text += ". Показан отчёт с прежним отбором: " + _filter_summary(*self._display_request[2:])
+            self.description.setText(text)
+            return
         if self.displayed_result is not None:
             text += " Дата расчета: " + _date(self.displayed_result["calculated_at"])
             if AnalysisFilter.from_dict(self.displayed_result["analysis_filter"]) != self.configured_filter:
@@ -754,16 +983,26 @@ class DatasetStatisticsTab(QWidget):
         return layouts
 
     def start(self):
-        if self.process is not None or self.detail_process is not None or self._export_task is not None or self._detail_dialog_open:
+        self._start_calculation()
+
+    def _start_calculation(self, *, cache_only=False):
+        if self._busy() or self.detail_process is not None or self._export_task is not None or self._detail_dialog_open:
             return
+        request = self._request()
+        if cache_only and request[0] != "unified":
+            return
+        self._running_request = request
+        self._running_cache_only = cache_only
         self.buffer.clear()
+        self._scan_from = 0
         self.pending = self.failure = None
         self.cancelled = False
         self.refresh.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setRange(0, 0)
-        self.progress_text.setText("Идет расчет...")
-        self.status.setText("Расчет… Показанные ранее данные обновятся только после успешного завершения.")
+        self.progress_text.setText("Чтение кеша…" if cache_only else "Идет расчет...")
+        self.status.setText("Проверка сохранённого отчёта…" if cache_only else
+                            "Расчет… Показанные ранее данные обновятся только после успешного завершения.")
         process = QProcess(self)
         self.process = process
         self._update_export_button()
@@ -773,16 +1012,27 @@ class DatasetStatisticsTab(QWidget):
             timer.stop()
         self._keep_processing_status()
         process.setWorkingDirectory(str(PROJECT_ROOT))
-        process.readyReadStandardOutput.connect(self._read)
+        process.readyReadStandardOutput.connect(lambda: self._read() if self.process is process else None)
         process.readyReadStandardError.connect(lambda: process.readAllStandardError())
-        process.finished.connect(self._finished)
-        process.errorOccurred.connect(self._error)
-        self.running_filter = self.configured_filter
-        process.start(sys.executable, ["-u", str(PROJECT_ROOT / "scripts/dataset_statistics.py"),
-                                      "--analysis-filter", json.dumps(self.running_filter.to_dict(), ensure_ascii=True)])
+        process.finished.connect(lambda code, state: self._finished(code, state) if self.process is process else None)
+        process.errorOccurred.connect(lambda error: self._error(error) if self.process is process else None)
+        mode, backend, self.running_filter, product, category = request
+        args = ["-u", str(PROJECT_ROOT / "scripts/dataset_statistics.py"),
+                "--analysis-filter", json.dumps(self.running_filter.to_dict(), ensure_ascii=True)]
+        if backend != "AUTO":
+            args.extend(("--backend", backend))
+        if mode == "unified":
+            args.extend(("--mode", "unified"))
+            if cache_only:
+                args.append("--cache-only")
+            if product:
+                args.append("--product-code=" + product)
+            if category:
+                args.append("--category-code=" + category)
+        process.start(sys.executable, args)
 
     def _keep_processing_status(self):
-        if self.process is not None:
+        if self._busy():
             set_status_processing(self.window, PROCESSING_STATUS)
         elif self.detail_process is not None or self._export_task is not None:
             set_status_processing(self.window, "Экспорт отчета…")
@@ -791,16 +1041,33 @@ class DatasetStatisticsTab(QWidget):
         if self.process is None:
             return
         self.buffer.extend(bytes(self.process.readAllStandardOutput()))
-        while b"\n" in self.buffer:
-            line, _, rest = self.buffer.partition(b"\n")
-            self.buffer = bytearray(rest)
+        unified = self._running_request[0] == "unified"
+        while True:
+            newline = self.buffer.find(b"\n", self._scan_from)
+            if newline < 0:
+                self._scan_from = len(self.buffer)
+                break
+            line = bytes(self.buffer[:newline])
+            del self.buffer[:newline + 1]
+            self._scan_from = 0
             try:
+                if unified and _RESULT_LINE.match(line):
+                    if self.pending is not None:
+                        raise ValueError
+                    if not self.cancelled:
+                        self.pending = line
+                    continue
                 message = json.loads(line)
                 kind, value = message["event"], message["value"]
                 if kind == "progress" and not self.cancelled:
-                    source, separator, count = value.partition(":")
-                    self.status.setText("Расчет → " + PROGRESS_LABELS.get(source, source) + separator + count)
-                elif kind == "result":
+                    if unified:
+                        self.status.setText(value)
+                    else:
+                        source, separator, count = value.partition(":")
+                        self.status.setText("Расчет → " + PROGRESS_LABELS.get(source, source) + separator + count)
+                elif kind == "unified_error" and unified:
+                    self.failure = UNIFIED_ERRORS.get(value, UNIFIED_ERRORS["UNIFIED_FAILED"])
+                elif kind == "result" and not unified:
                     if self.pending is not None:
                         raise ValueError
                     self.pending = validate_result(value)
@@ -825,17 +1092,22 @@ class DatasetStatisticsTab(QWidget):
         if self.buffer.strip():
             self.failure = "Некорректный ответ процесса статистики."
         process, self.process = self.process, None
-        self.calculation_running_changed.emit(False)
         self.kill_timer.stop()
-        self.refresh.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress_text.setText("Прогресс расчета")
         process.deleteLater()
+        request = self._running_request
+        ok = not (self.cancelled or code or exit_status != QProcess.ExitStatus.NormalExit
+                  or self.failure or self.pending is None)
+        if ok and request[0] == "unified":
+            task = _UnifiedPresentationTask(self.pending, request)
+            self.pending = None
+            self._presentation_task = task
+            self.status.setText("Подготовка таблиц и графиков…")
+            task.signals.finished.connect(self._unified_presented, Qt.ConnectionType.QueuedConnection)
+            QThreadPool.globalInstance().start(task)
+            return
         if self.cancelled:
             self.status.setText("Расчет отменён. Показанные ранее данные не обновлены.")
-        elif code or exit_status != QProcess.ExitStatus.NormalExit or self.failure or self.pending is None:
+        elif not ok:
             self.status.setText((self.failure or "Процесс статистики завершился без результата.")
                                 + " Показанные ранее данные не обновлены.")
         else:
@@ -845,11 +1117,41 @@ class DatasetStatisticsTab(QWidget):
                 self.status.setText(f"Не удалось сохранить результат статистики: {error}. "
                                     "Показанные ранее данные не обновлены.")
             else:
-                self.render(self.pending)
-        self.pending = None
+                if request == self._request():
+                    self.render(self.pending)
+                else:
+                    self.status.setText("Расчёт завершён для ранее выбранного отбора.")
+        self._end_calculation()
+
+    def _unified_presented(self, result, model, error):
+        self._presentation_task = None
+        request = self._running_request
+        if self.cancelled or error == "CANCELLED":
+            self.status.setText("Расчет отменён. Показанные ранее данные не обновлены.")
+        elif error:
+            self.status.setText(UNIFIED_ERRORS[error] + " Показанные ранее данные не обновлены.")
+        else:
+            if request == self._request():
+                self._display(result, model, request, update_status=True)
+                if self._running_cache_only:
+                    self.status.setText(model.status + " · из кеша")
+            else:
+                self.status.setText("Единая статистика готова для ранее выбранного источника или отбора.")
+        self._end_calculation()
+
+    def _end_calculation(self):
+        self.pending = self._running_request = None
+        self.calculation_running_changed.emit(False)
+        self._reset_export_progress()
         self._update_export_button()
         schedule_status_reset(self.window, 0)
-        if self.closing:
+        if self._quit_after_unified:
+            self._quit_after_unified = False
+            QTimer.singleShot(0, QApplication.instance().quit)
+        elif self._close_target is not None:
+            target, self._close_target = self._close_target, None
+            QTimer.singleShot(0, target.close)
+        elif self.closing:
             QTimer.singleShot(0, self.window.close)
 
     def cancel(self):
@@ -858,18 +1160,26 @@ class DatasetStatisticsTab(QWidget):
                 self.force_details()
             else:
                 self.cancel_details()
-        elif self.process is not None:
+        elif self._busy() and not self.cancelled:
             self.cancelled = True
             self.cancel_button.setEnabled(False)
             self.status.setText("Отмена расчета…")
-            self.process.terminate()
-            self.kill_timer.start(1500)
+            if self._presentation_task is not None:
+                self._presentation_task.cancelled.set()
+            elif self._running_request[0] == "unified":
+                self.process.write(b"cancel\n")
+                self.kill_timer.start(35000)
+            else:
+                self.process.terminate()
+                self.kill_timer.start(1500)
 
     def _kill(self):
         if self.process is not None:
             self.process.kill()
 
     def _shutdown(self):
+        if self._presentation_task is not None:
+            self._presentation_task.cancelled.set()
         if self._export_task is not None:
             self._export_task.cancel()
         if self.detail_process is not None:
@@ -887,6 +1197,19 @@ class DatasetStatisticsTab(QWidget):
             self._detail_closing = self._detail_closing or watched is self.window
             self.cancel_details()
             return True
+        request = self._running_request
+        if (event.type() in (QEvent.Type.Close, QEvent.Type.Quit)
+                and request is not None and request[0] == "unified" and self._busy()):
+            if watched is QApplication.instance() and event.type() == QEvent.Type.Quit:
+                event.ignore()
+                self._quit_after_unified = True
+                self.cancel()
+                return True
+            if watched in (self, self.window) and event.type() == QEvent.Type.Close:
+                event.ignore()
+                self._close_target = watched
+                self.cancel()
+                return True
         if watched is self.window and event.type() == QEvent.Type.Close and self.process is not None:
             event.ignore()
             self.closing = True
@@ -895,13 +1218,29 @@ class DatasetStatisticsTab(QWidget):
         return super().eventFilter(watched, event)
 
     def render(self, result):
-        self.report = report.report_presentation(result)
-        for label, (_, value) in zip(self.card_labels, self.report.global_cards):
-            label.setText(_number(value))
-        self.displayed_result = result
+        if isinstance(result, UnifiedResult):
+            request = self._request()
+            if not _matches_unified_request(result, request):
+                return
+            model = unified_presentation(result)
+        else:
+            if self._mode() != "legacy":
+                return
+            request = ("legacy", self._calculation_source()[1], AnalysisFilter.from_dict(result["analysis_filter"]), "", "")
+            model = report.report_presentation(result)
+        self._display(result, model, request, update_status=True)
+
+    def _display(self, result, model, request, *, update_status=False):
+        self.report = model
+        for label, title, (name, value) in zip(self.card_labels, self.card_titles, model.global_cards):
+            title.setText(name)
+            label.setText(_cell_text(value) if isinstance(value, report.ReportMeasure) else _number(value))
+            label.setToolTip(value.tooltip if isinstance(value, report.ReportMeasure) else "")
+        self.displayed_result, self._display_request = result, request
         self._update_export_button()
         self._update_description()
-        self.status.setText(self.report.status)
+        if update_status or not self._busy():
+            self.status.setText(model.status)
         layouts = self._pages()
         for page, layout in zip(self.report.pages, layouts):
             if page.key == "customers":

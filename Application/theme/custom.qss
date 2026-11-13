@@ -264,3 +264,10 @@ QToolButton#analysisMultiSelect::menu-indicator {{
     subcontrol-position: center right;
     right: 8px;
 }}
+
+QLabel[class="statisticsContext"] {{
+    color: rgba({APP_TEXT_RGB}, 180);
+    background-color: transparent;
+    border: none;
+    font-size: 10pt;
+}}

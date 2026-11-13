@@ -1,4 +1,4 @@
-"""Aggregate report child: same QProcess/stdin control, never canonical or INDEXED."""
+"""Qt report child with optional detail rows from the pinned index generation."""
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import io
@@ -13,11 +13,11 @@ from time import monotonic
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from Application.statistics_detail_job import (
-    ERRORS,CLEANUP_CODES,MAX_MESSAGE,MAX_REPORT_INPUT,REPORT_TIMING_FORMAT,
+    ERRORS,CLEANUP_CODES,MAX_MESSAGE,MAX_REPORT_INPUT,MAX_UNIFIED_REPORT_INPUT,REPORT_TIMING_FORMAT,
     encode_message,decode_report_timings,allowed_report_cleanup_path,exception_diagnostic,
 )
 from Application.statistics_detail_storage import DetailExportError
-from Application.statistics_bundle_export import export_statistics_bundle
+from Application.statistics_bundle_export import export_statistics_bundle, validate_report_snapshot
 
 
 
@@ -115,14 +115,16 @@ class _ControlPipe:
             self.read_bytes=read_pipe
 
     def readline(self, limit):
+        start = 0
         while True:
-            newline = self.pending.find(b"\n")
+            newline = self.pending.find(b"\n", start)
             if newline >= 0 or len(self.pending) >= limit:
                 end = min(newline+1 if newline >= 0 else limit, limit)
                 data = bytes(self.pending[:end])
                 del self.pending[:end]
                 return data
-            chunk = self.read_bytes(min(8192, limit-len(self.pending)))
+            start = len(self.pending)
+            chunk = self.read_bytes(min(8192, limit-start))
             if not chunk:
                 data = bytes(self.pending)
                 self.pending.clear()
@@ -201,7 +203,13 @@ def main(argv=None, *, control=None, output=None):
     reporter=Reporter(output,cancelled)
     destination=Path()
     parser=_Parser(add_help=False,allow_abbrev=False)
+    from Application.dataset_statistics import DEFAULT_RAW_ROOT, DEFAULT_CATALOG_PATH
+    from Application.statistics_index import DEFAULT_INDEX_DIR
+
     parser.add_argument("--destination",required=True)
+    parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
+    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
+    parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
     parser.add_argument("--reserve-bytes",type=int,default=128*1024**2)
     parser.add_argument("--max-temporary-bytes",type=int,default=8*1024**3)
     def heartbeat():
@@ -211,20 +219,37 @@ def main(argv=None, *, control=None, output=None):
         args=parser.parse_args(argv)
         destination=Path(args.destination)
         channel=control if control is not None else _ControlPipe(sys.stdin.fileno())
-        from Application.statistics_cache import validate_result
-        line=channel.readline(MAX_REPORT_INPUT+1)
+        line=channel.readline(MAX_UNIFIED_REPORT_INPUT+1)
         try:
-            payload=json.loads(line,object_pairs_hook=_unique_object)
-            if len(line)>MAX_REPORT_INPUT or set(payload)!={"command","snapshot"} or payload["command"]!="report":
+            if len(line) > MAX_UNIFIED_REPORT_INPUT:
                 raise ValueError
-            captured=validate_result(payload["snapshot"])
+            payload=json.loads(line,object_pairs_hook=_unique_object)
+            snapshot = payload["snapshot"]
+            from Application.statistics_unified_dto import RESULT_SCHEMA
+
+            if len(line) > MAX_REPORT_INPUT and snapshot.get("schema_version") != RESULT_SCHEMA:
+                raise ValueError
+            detail = None
+            if payload["command"] == "detail" and set(payload) == {"command", "snapshot", "filter"}:
+                detail = payload["filter"]
+                if not isinstance(detail, dict):
+                    raise ValueError
+            elif payload["command"] != "report" or set(payload) != {"command", "snapshot"}:
+                raise ValueError
+            captured=validate_report_snapshot(snapshot)
+            del line, payload, snapshot
         except Exception:
             raise DetailExportError("REPORT_CONTEXT_MISMATCH") from None
         Thread(target=_read_control,args=(channel,cancelled,invalid),daemon=True).start()
         Thread(target=heartbeat,daemon=True).start()
+        options = {}
+        if detail is not None:
+            options.update(detail=detail, detail_source=dict(raw_root=args.raw_root, catalog_path=args.catalog,
+                                                              index_dir=args.index_dir))
         with redirect_stdout(_Discard()),redirect_stderr(_Discard()):
             result=export_statistics_bundle(captured,destination,progress=reporter.progress,
-                cancelled=cancelled.is_set,reserve_bytes=args.reserve_bytes,max_temporary_bytes=args.max_temporary_bytes)
+                cancelled=cancelled.is_set,reserve_bytes=args.reserve_bytes,max_temporary_bytes=args.max_temporary_bytes,
+                **options)
         reporter.timings(result.timings)
         reporter.terminal(dict(event="finished",files=len(result.files)))
         return 0

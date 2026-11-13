@@ -13,7 +13,7 @@ from Application import dataset_statistics as statistics,statistics_cache as cac
 from Application import statistics_report_presentation as report
 from Application.product_resolution import ProductResolver
 from Application.statistics_cohorts_core import CohortAggregates
-from Application.statistics_cohorts_presentation import cohort_sections,CATEGORY_TITLE,CATEGORY_LEGACY_TEXT,CHANNEL_TITLE
+from Application.statistics_cohorts_presentation import cohort_report_sections,CATEGORY_TITLE,CATEGORY_LEGACY_TEXT,CHANNEL_TITLE
 from Application.theme.apply_theme import apply_app_theme
 from tests.test_statistics_cohorts_categories import category_dataset,dataset,calculate
 from tests.tabs.test_dataset_statistics_tab import app,window
@@ -49,7 +49,7 @@ def test_saved_category_tables_coverage_and_multilabel_notes_agree_without_sourc
     tab.render(result);tab.sections.setCurrentIndex(3);tab.customer_sections.setCurrentIndex(4)
     QApplication.processEvents()
     page=tab.customer_sections.widget(4)
-    all_sections=cohort_sections(result,compact=True);sections=all_sections[-4:]
+    all_sections=cohort_report_sections(result);sections=all_sections[-4:]
     assert sections[0][0]==CATEGORY_TITLE
     assert next(i for i,s in enumerate(all_sections) if s[0]==CHANNEL_TITLE)+4==len(all_sections)-4
     assert all(not cards for _,cards,_,_ in sections)  # No duplicated global KPI tiles.

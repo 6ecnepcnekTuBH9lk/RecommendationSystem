@@ -260,3 +260,90 @@ def cohort_sections(result, *, include_extended=False, compact=False):
     sections.extend(_channel_sections(strict.get('purchase_channels')))
     sections.extend(_category_sections(strict.get('purchase_categories')))
     return sections
+
+
+COHORT_GROUP_TITLES = (
+    'Повторные покупки покупателей',
+    'Календарное удержание M0–M12',
+    'Денежная ценность когорт',
+    'Первая и вторая покупка: каналы и товарные категории',
+)
+REPEAT_TITLE = 'Повторная покупка в течение заданного срока'
+RETENTION_TITLE = 'Календарное удержание покупателей'
+
+
+def cohort_report_sections(result):
+    """Reorder saved tables for the common report; retain cohort_sections API."""
+    source = cohort_sections(result, compact=True)
+    saved = result.get('cohort_statistics')
+    primary = saved['policies'][POLICIES[0]] if saved is not None else None
+    by_title = {section[0]: section for section in source}
+    intro = ('Когорта — группа покупателей, объединённых месяцем первой наблюдаемой '
+        'подтверждённой покупки. Анализ показывает последующие покупки и удержание '
+        'в пределах доступной истории. Это не обязательно первая покупка клиента за всю историю компании. '
+        'Выбранные даты ограничивают отображаемые когорты; первая наблюдаемая покупка '
+        'определяется по соответствующей доступной истории заказов до отсечения. '
+        'База этого раздела определяется отображаемыми когортами; общая статистика покупателей использует выбранный период.')
+    if saved is not None:
+        bounds = saved['cohort_bounds']
+        intro += (f" Дата отсечения: {date.fromisoformat(saved['as_of_date']).strftime('%d.%m.%Y')}. "
+                  f"Отображаемые месяцы: {bounds['start'] or 'все наблюдаемые'} — "
+                  f"{bounds['end'] or 'все наблюдаемые'}. Все товары; подтверждённые покупки.")
+    base = (*source[0][:3], [('Контекст', intro)])
+    sections = [base, (COHORT_GROUP_TITLES[0], [], [], [])]
+    repeat_notes = [('Контекст', ' '.join(text for _, text in COHORT_NOTES[3:5]))]
+    if primary is None:
+        sections.append((REPEAT_TITLE, [], [], repeat_notes))
+    else:
+        sections.append((REPEAT_TITLE, [], source[1][2], repeat_notes))
+        tables = source[2][2]
+        sections.extend([
+            ('Повторные покупки по когортам', [], [tables[0]], [COHORT_NOTES[6]]),
+            ('Повторность по когортам и срокам наблюдения', [], [tables[1]], []),
+            ('Сравнение правил учета повторных покупок', [], source[6][2], [
+                ('Контекст', COHORT_NOTES[1][1] + ' Это сравнение действующих правил учёта; сейчас политики не меняются.')]),
+        ])
+    sections.append((COHORT_GROUP_TITLES[1], [], [], []))
+    retention_notes = [('Контекст', 'Повторная покупка в течение 90 дней — вторая покупка '
+        'не позднее 90 дней от первой. Удержание M3 — покупка в третьем календарном месяце '
+        'после месяца первой наблюдаемой покупки. Эти показатели не взаимозаменяемы. ' + COHORT_NOTES[5][1])]
+    sections.append((RETENTION_TITLE, [], source[5][2][:1] if primary is not None else [], retention_notes))
+    if primary is not None:
+        sections.append(('Наблюдаемость календарного удержания', [], source[5][2][1:], []))
+
+    monthly, second = (by_title[title] for title in MONEY_TITLES)
+    # The same methodology belongs to the whole money group, once for both currencies/subgroups.
+    sections.append((COHORT_GROUP_TITLES[2], [], [], [('Контекст', ' '.join(text for _, text in monthly[3][:2]))]))
+    sections.extend([
+        ('Денежная ценность месячных когорт', [], monthly[2], monthly[3][2:]),
+        ('Денежная ценность второй покупки', [], second[2], second[3][2:]),
+        (COHORT_GROUP_TITLES[3], [], [], [('Контекст',
+            'Анализируются первые две наблюдаемые покупки покупателей отображаемых когорт. '
+            'Результаты характеризуют последовательность покупок, а не всю дальнейшую историю покупателя.')]),
+    ])
+    channel_start = next(i for i, section in enumerate(source) if section[0] == CHANNEL_TITLE)
+    channel_sections = list(source[channel_start:channel_start+4])
+    title, cards, tables, notes = channel_sections[0]
+    cards, notes = list(cards), list(notes)
+    channels = primary.get('purchase_channels') if primary is not None else None
+    if channels is not None and (
+            channels['buyers'] == primary['displayed_buyers'] == primary['summary']['cohort_size']
+            and channels['repeat_buyers'] == primary['summary']['observed_repeat_buyers']):
+        # Core and existing validator bind these counters to the same displayed STRICT cohorts.
+        cards = cards[1:]
+        notes.insert(0, ('Контекст', f"База переходов: {channels['repeat_buyers']} покупателей "
+            'со второй наблюдаемой покупкой. Это наблюдаемая база, независимо от завершённости горизонтов.'))
+    notes.append(('Интерпретация', 'Различие идентификаторов каналов не доказывает переход между онлайн- и офлайн-продажами.'))
+    channel_sections[0] = (title, cards, tables, notes)
+    title, cards, tables, notes = channel_sections[-1]
+    channel_sections[-1] = ('Переходы между каналами', cards, tables, notes)
+    sections.extend(channel_sections)
+    category_sections = list(source[-4:])
+    title, cards, tables, notes = category_sections[0]
+    category_sections[0] = (title, cards, tables, [('Контекст',
+        'Переходы категорий описывают первую и вторую наблюдаемые покупки. '
+        'Совместные покупки в подразделе «Покупки» описывают категории внутри одного заказа.'), *notes])
+    title, cards, tables, notes = category_sections[-1]
+    category_sections[-1] = ('Переходы между категориями', cards, tables, notes)
+    sections.extend(category_sections)
+    return sections

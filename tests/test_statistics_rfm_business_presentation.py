@@ -13,13 +13,13 @@ from PyQt6.QtWidgets import QApplication,QLabel,QTableWidget
 from Application import dataset_statistics as statistics,statistics_cache as cache,statistics_bundle_export as bundle
 from Application import statistics_report_presentation as report
 from Application.statistics_rfm_core import RfmAggregates,WINDOWS
-from Application.statistics_rfm_presentation import rfm_sections,RFM_BUSINESS_TITLE,RFM_BUSINESS_LEGACY_TEXT,SEGMENT_LABELS
+from Application.statistics_rfm_presentation import rfm_report_sections,RFM_BUSINESS_LEGACY_TEXT,SEGMENT_LABELS
 from Application.statistics_charts import StatisticsChart
 from Application.theme.apply_theme import apply_app_theme
 from tests.test_statistics_rfm_business import segment_population
 from tests.test_statistics_rfm_core import AS_OF,SPACE,currency
 from tests.test_statistics_rfm_integration import dataset,calculate,SELECTION
-from tests.tabs.test_dataset_statistics_tab import app,window
+from tests.tabs.test_dataset_statistics_tab import LegacyStatisticsTab, app,window
 from tests.test_statistics_unified_presentation import Tables
 
 __all__=['app','window','dataset']
@@ -60,20 +60,20 @@ def test_saved_business_segments_three_windows_two_currencies_and_actions_match_
     _,tab=window;apply_app_theme(QApplication.instance(),dark)
     tab.render(result);tab.sections.setCurrentIndex(3);tab.customer_sections.setCurrentIndex(3)
     QApplication.processEvents()
-    sections=rfm_sections(result,compact=True)
-    assert sections[2][0]=='RFM — сегменты: подтверждённые покупки'
-    assert sections[3][0]==RFM_BUSINESS_TITLE and sections[5][0]=='RFM — баллы и пороги: подтверждённые покупки'
+    sections=rfm_report_sections(result)
+    assert sections[5][0]=='RFM-сегменты покупателей'
+    assert sections[7][0]=='Баллы и пороги RFM'
     page=tab.customer_sections.widget(3)
     labels=[label.text() for label in page.findChildren(QLabel)]
-    assert all(s[0].upper() in labels for s in sections[3:5])
+    assert all(s[0].upper() in labels for s in sections[5:7])
     assert len(page.findChildren(StatisticsChart))==1
     assert tab.sections.count()==tab.customer_sections.count()==5
-    headers,rows=sections[3][2][0]
+    headers,rows=sections[5][2][0]
     widgets=[table for table in page.findChildren(QTableWidget)
              if table.horizontalHeaderItem(0).text()==headers[0] and table.columnCount()==len(headers)
              and table.horizontalHeaderItem(1).text()==headers[1]]
-    # Match the business table by its unique width (or its legacy message).
-    widget=next(w for w in widgets if w.columnCount()==12 or w.item(0,1).text()==RFM_BUSINESS_LEGACY_TEXT)
+    # Match the expanded portrait or the original legacy segment distribution.
+    widget=next(w for w in widgets if w.columnCount()==(6 if scenario=='legacy' else 12))
     blocks=list(enumerate(tab.report.pages[3].groups[3].blocks))
     i,block=next((i,b) for i,b in blocks if b.kind=='table' and list(b.headers)==headers)
     values=[[cell.text for cell in row] for row in report.table_cells(block)]
@@ -90,9 +90,9 @@ def test_saved_business_segments_three_windows_two_currencies_and_actions_match_
             assert any(all(Decimal(str(a))==pytest.approx(v) if isinstance(v,Decimal) else
                            a==pytest.approx(v) if isinstance(v,float) else a==v for a,v in zip(candidate,row))
                        for candidate in excel)
-        actions=sections[4][2][0][1]
+        actions=sections[6][2][0][1]
         assert len(actions)==7 and [r[0] for r in actions]==[v[0] for v in SEGMENT_LABELS.values()]
-        for row in actions:assert any(tuple(candidate[:2])==tuple(row) for candidate in excel)
+        for row in actions:assert any(tuple(candidate[:3])==tuple(row) for candidate in excel)
         assert 'автоматически назначенными' in document
         assert 'не доказывает новизну' in document and 'не означают гарантированную потерю' in document
         assert 'data-rfm-window=' in document and 'data-rfm-currency=' in document
@@ -118,8 +118,8 @@ def test_old_business_snapshot_opens_on_startup_without_automatic_recalculation(
     monkeypatch.setattr(ui,'CACHE_PATH',path)
     monkeypatch.setattr(ui,'load_filter',lambda:SELECTION)
     monkeypatch.setattr(ui.DatasetStatisticsTab,'start',lambda self:pytest.fail('Automatic RFM recalculation'))
-    tab=ui.DatasetStatisticsTab(window[0])
+    tab=LegacyStatisticsTab(window[0])
     try:
         assert tab.displayed_result is not None and path.read_bytes()==original
-        assert RFM_BUSINESS_LEGACY_TEXT in str(rfm_sections(tab.displayed_result,compact=True))
+        assert RFM_BUSINESS_LEGACY_TEXT in str(rfm_report_sections(tab.displayed_result))
     finally:tab._shutdown()

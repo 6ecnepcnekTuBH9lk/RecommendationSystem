@@ -12,6 +12,8 @@ from Application.statistics_storage_safety import reject_reparse
 
 MAX_MESSAGE = 4096
 MAX_REPORT_INPUT = 64*1024*1024
+# At 44,598 catalog items the full v11 product rows can exceed the v10 cap.
+MAX_UNIFIED_REPORT_INPUT = 192*1024*1024
 STAGES = {
     'report_preparation': 'Подготовка отчета',
     'archive': 'Создание архива',
@@ -50,6 +52,7 @@ ERRORS = {
     'ACL_INSPECTION_FAILED': 'Не удалось проверить права. Проверьте среду Windows PowerShell и доступ.',
     'UNSAFE_STORAGE_ACL': 'Права каталога не обеспечивают безопасное размещение выгрузки.',
     'PRIVATE_INDEX_ROOT_REQUIRED': 'Временный каталог должен иметь приватные права текущего пользователя.',
+    'INSUFFICIENT_MEMORY': 'Недостаточно памяти для детализации. Выберите более короткий период.',
     'INSUFFICIENT_SPACE': 'Недостаточно свободного места. Освободите место или выберите другой каталог.',
     'TEMPORARY_BUDGET_EXCEEDED': 'Превышен лимит временного состояния.',
     'ACCESS_DENIED': 'Отказано в доступе. Проверьте права и не открыт ли файл назначения.',
@@ -164,7 +167,7 @@ def validate_message(message):
     if event == 'progress' and keys == {'event', 'stage', 'processed'}:
         if message['stage'] in STAGES and type(message['processed']) is int and 0 <= message['processed'] < 2**63:
             return message
-    elif event == 'finished' and keys == {'event','files'} and type(message['files']) is int and message['files']==2:
+    elif event == 'finished' and keys == {'event','files'} and type(message['files']) is int and message['files'] in (2, 6):
         return message
     elif event == 'finished' and keys == {'event', 'rows'}:
         rows = message['rows']

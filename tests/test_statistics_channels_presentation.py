@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import QApplication,QLabel,QTableWidget
 from Application import statistics_cache as cache,statistics_bundle_export as bundle
 from Application import statistics_report_presentation as report,dataset_statistics as statistics
 from Application.statistics_cohorts_core import CohortAggregates
-from Application.statistics_cohorts_presentation import cohort_sections,CHANNEL_NOTE,CHANNEL_LEGACY_TEXT,CHANNEL_TITLE
+from Application.statistics_cohorts_presentation import cohort_report_sections,CHANNEL_NOTE,CHANNEL_LEGACY_TEXT,CHANNEL_TITLE
 from Application.theme.apply_theme import apply_app_theme
 from tests.test_statistics_cohorts_channels import channel_dataset,dataset,calculate
 from tests.tabs.test_dataset_statistics_tab import app,window
@@ -44,7 +44,7 @@ def test_saved_channels_kpis_and_three_tables_agree_without_sources_or_calculati
     tab.render(result);tab.sections.setCurrentIndex(3);tab.customer_sections.setCurrentIndex(4)
     QApplication.processEvents()
     page=tab.customer_sections.widget(4)
-    all_sections=cohort_sections(result,compact=True)
+    all_sections=cohort_report_sections(result)
     start=next(i for i,s in enumerate(all_sections) if s[0]==CHANNEL_TITLE)
     sections=all_sections[start:start+4]
     labels=[label.text() for label in page.findChildren(QLabel)]

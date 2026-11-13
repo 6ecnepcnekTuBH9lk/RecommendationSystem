@@ -1,4 +1,4 @@
-"""Atomic two-file report from a captured aggregate snapshot; no source/data IO."""
+"""Atomic report from a captured aggregate snapshot and optional detail rows."""
 from copy import deepcopy
 from dataclasses import dataclass
 import errno
@@ -9,6 +9,7 @@ import tempfile
 from time import perf_counter
 from zipfile import ZipFile,ZIP_DEFLATED
 from Application.statistics_cache import validate_result
+from Application.statistics_unified_dto import RESULT_SCHEMA, UnifiedResult, read_envelope
 from Application.statistics_export import write_statistics_xlsx,suggested_filename as xlsx_filename
 from Application.statistics_html_export import build_statistics_html
 from Application.statistics_report_presentation import report_presentation
@@ -52,9 +53,20 @@ class _ReportWorkspace:
         fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|getattr(os,"O_BINARY",0),0o600)
         self.owned[name]=path_identity(path)
         return os.fdopen(fd,"wb")
-    def create_archive(self):
+    def create_archive(self, *, private=False):
         fd,name=tempfile.mkstemp(prefix=".statistics-report-",suffix=".partial",dir=self.parent)
         self.partial=Path(name);self.partial_id=path_identity(self.partial)
+        if private:
+            from Application.statistics_detail_storage import protect_file
+
+            os.close(fd)
+            self.check_partial()
+            protect_file(self.partial)
+            self.check_partial()
+            fd = os.open(self.partial, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+            if not os.path.samestat(os.fstat(fd), self.partial.stat()):
+                os.close(fd)
+                raise DetailExportError("PUBLICATION_PATH_CHANGED")
         return os.fdopen(fd,"wb")
     def check_file(self,path):
         self.check_folder()
@@ -107,33 +119,56 @@ class _ReportControl:
         size=sum((w.folder/name).stat().st_size for name in w.owned) if w.folder else 0
         if w.partial is not None:size+=w.partial.stat().st_size
         if size>self.budget:raise DetailExportError("TEMPORARY_BUDGET_EXCEEDED")
-    def stage(self,name):
-        self.check();self.space()
-        if self.progress:self.progress(dict(stage=name,processed=0))
+    def consume(self, _size):
         self.check()
 
-def _verify_archive(path,check):
+    def stage(self,name,processed=0):
+        self.check();self.space()
+        if self.progress:self.progress(dict(stage=name,processed=processed))
+        self.check()
+
+def _verify_archive(path,check,files=FILES):
     with ZipFile(path) as archive:
-        if tuple(archive.namelist())!=FILES:raise DetailExportError("ARCHIVE_MEMBERS_MISMATCH")
-        for name in FILES:
+        if tuple(archive.namelist())!=files:raise DetailExportError("ARCHIVE_MEMBERS_MISMATCH")
+        for name in files:
             with archive.open(name) as member:
                 while member.read(64*1024):check()
 
+def validate_report_snapshot(result):
+    if isinstance(result, UnifiedResult):
+        return read_envelope(result.envelope())
+    if isinstance(result, dict) and result.get("schema_version") == RESULT_SCHEMA:
+        return read_envelope(result)
+    return validate_result(result)
+
+
 def export_statistics_bundle(result,path,*,progress=None,cancelled=None,
-                             reserve_bytes=128*1024**2,max_temporary_bytes=8*1024**3):
-    """Render one saved presentation, package exactly two members and publish last."""
+                             reserve_bytes=128*1024**2,max_temporary_bytes=8*1024**3,detail=None,detail_source=None):
+    """Publish one captured report and, when requested, pinned detail rows."""
     started=perf_counter();workspace=None;timings={}
     try:
         destination=validate_report_destination(path)
+        if detail is not None and os.name == "nt" and destination.drive.upper() != "D:":
+            raise DetailExportError("TEMPORARY_ROOT_MUST_BE_ON_D")
         workspace=_ReportWorkspace(destination)
         control=_ReportControl(workspace,progress,cancelled,reserve_bytes,max_temporary_bytes)
         control.stage("report_preparation")
         stamp=perf_counter()
-        captured=validate_result(deepcopy(result))
+        captured=validate_report_snapshot(result if isinstance(result, UnifiedResult) else deepcopy(result))
         model=report_presentation(captured)
         timings["presentation"]=perf_counter()-stamp
         admit_destination(destination.parent)
         control.check();workspace.prepare()
+        if detail is not None:
+            from Application.statistics_index import protect_directory
+            from Application.statistics_storage_safety import validate_storage_root
+
+            if not isinstance(captured, UnifiedResult) or detail_source is None:
+                raise DetailExportError("REPORT_CONTEXT_MISMATCH")
+            workspace.check_folder()
+            protect_directory(workspace.folder)
+            workspace.check_folder()
+            validate_storage_root(workspace.folder)
         control.stage("statistics_xlsx");stamp=perf_counter()
         with workspace.create(FILES[0]) as stream:
             write_statistics_xlsx(captured,stream,check=control.check,presentation=model)
@@ -148,23 +183,34 @@ def export_statistics_bundle(result,path,*,progress=None,cancelled=None,
         del html
         timings["html"]=perf_counter()-stamp
         control.stage("archive");stamp=perf_counter()
-        with workspace.create_archive() as stream:
+        files = FILES
+        if detail is not None:
+            from Application.statistics_unified_detail import FILES as DETAIL_FILES
+            from Application.statistics_unified_detail import write_detail
+
+            files += DETAIL_FILES
+        with workspace.create_archive(private=detail is not None) as stream:
             with ZipFile(stream,"w",ZIP_DEFLATED,allowZip64=True) as archive:
                 for name in FILES:
                     source=workspace.folder/name;workspace.check_file(source)
                     with source.open("rb") as original,archive.open(name,"w",force_zip64=True) as member:
                         while chunk:=original.read(64*1024):
                             control.check();member.write(chunk)
+                if detail is not None:
+                    write_detail(archive, workspace, control, captured, detail, **detail_source)
             stream.flush();os.fsync(stream.fileno())
         workspace.check_partial()
-        _verify_archive(workspace.partial,control.check)
+        if detail is None:
+            _verify_archive(workspace.partial, control.check)
+        else:
+            _verify_archive(workspace.partial, control.check, files)
         control.space()
         workspace.cleanup_state()
         control.check()
         workspace.publish()  # No cancellation/error-producing callbacks after commit.
         timings["zip"]=perf_counter()-stamp
         timings["total"]=perf_counter()-started
-        return ReportExportResult(destination,timings)
+        return ReportExportResult(destination,timings,files)
     except (DetailExportError,InterruptedError):
         raise
     except OSError as error:

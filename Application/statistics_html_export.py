@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from Application import statistics_report_presentation as report
 from Application.analysis_filter import AnalysisFilter
+from Application.statistics_table_explanations import table_explanation, explanation_html
 
 SECTIONS = report.PAGE_LABELS
 ASSETS = Path(__file__).with_name("statistics_html_assets")
@@ -56,7 +57,10 @@ def _cell(value, *, identifier=False, percentage=False):
         cell = report.cell_presentation(value, percentage=percentage)
     sort = (format(Decimal(str(cell.value)), "f") if cell.kind == "number" else
             cell.value.isoformat() if cell.kind == "date" else "" if cell.value is None else str(cell.value))
-    return dict(text=cell.text, sort=sort, kind=cell.kind)
+    data = dict(text=cell.text, sort=sort, kind=cell.kind)
+    if cell.tooltip:
+        data["tooltip"] = cell.tooltip
+    return data
 
 
 def _project_block(block):
@@ -134,9 +138,14 @@ def _table_html(block, identifier, *, unavailable=False):
                 f'aria-label="Поиск по таблице {escape(headers[0], quote=True)}"></label>') if len(rows)>10 else ""
     head = "".join(f'<th scope="col" aria-sort="none"><button type="button" data-column="{i}">{escape(str(h))}'
                    '<span aria-hidden="true"> ↕</span></button></th>' for i,h in enumerate(headers))
-    body = "".join(f'<tr data-order="{i}">' + "".join(
-        f'<td data-sort="{escape(c["sort"],quote=True)}" data-kind="{c["kind"]}" class="{c["kind"]}">'
-        f'{escape(c["text"])}</td>' for c in row) + "</tr>" for i,row in enumerate(rows))
+    def render_cell(cell):
+        tooltip = cell.get("tooltip")
+        title = f' title="{escape(tooltip, quote=True)}"' if tooltip else ""
+        return (f'<td data-sort="{escape(cell["sort"], quote=True)}" data-kind="{cell["kind"]}"'
+                f' class="{cell["kind"]}"{title}>{escape(cell["text"])}</td>')
+
+    body = "".join(f'<tr data-order="{i}">' + "".join(render_cell(c) for c in row) + "</tr>"
+                   for i, row in enumerate(rows))
     if not rows:
         body = f'<tr><td colspan="{len(headers)}">Нет данных для таблицы.</td></tr>'
     return (f'<div class="table-card">{controls}<div class="table-scroll" tabindex="0">'
@@ -195,11 +204,16 @@ def build_statistics_html(result, *, snapshot_diagnostics=None, presentation=Non
             if block.kind == "heading":
                 content.append('<h3 class="section-title">'+escape(block.title)+"</h3>")
             elif block.kind == "text":
-                content.append('<p class="report-note">'+escape(block.title)+"</p>")
+                if not block.options.get("xlsx_only"):
+                    css="report-context" if block.options.get("context") else "report-note"
+                    content.append('<p class="'+css+'">'+escape(block.title)+"</p>")
             elif block.kind == "cards":
                 content.append(_cards_html(report.kpi_cells(block)))
             elif block.kind == "table":
                 content.append(_table_html(_project_block(block),identifier))
+                explanation = table_explanation(block.table_id)
+                if explanation is not None:
+                    content.append(explanation_html(block.table_id, explanation))
             elif block.kind in ("chart","rfm"):
                 n=chart_indices[page_index,group.key,index]
                 controls=""

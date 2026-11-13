@@ -6,7 +6,11 @@ import sys
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from Application.paths import PROJECT_ROOT
-from Application.statistics_detail_job import MAX_MESSAGE, MAX_REPORT_INPUT, allowed_report_cleanup_path, decode_message, decode_diagnostic, decode_report_timings
+from Application.statistics_unified_dto import UnifiedResult
+from Application.statistics_detail_job import (
+    MAX_MESSAGE, MAX_REPORT_INPUT, MAX_UNIFIED_REPORT_INPUT, allowed_report_cleanup_path,
+    decode_message, decode_diagnostic, decode_report_timings,
+)
 
 
 class DetailExportProcess(QObject):
@@ -29,10 +33,11 @@ class DetailExportProcess(QObject):
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.stalled)
 
-    def start(self, options, *, report_result=None):
+    def start(self, options, *, report_result=None, detail=None):
         if self.process is not None:
             return
         self.options = dict(options)
+        self.expected_files = 2 if detail is None else 6
         self.diagnostic = dict(interpreter=sys.executable,working_directory=str(PROJECT_ROOT),
             stage="report_preparation",exception_type=None,message=None,traceback=[],
             exit_code=None,exit_status=None,crash_exit=False,stderr_bytes=0,native_error=None)
@@ -43,9 +48,15 @@ class DetailExportProcess(QObject):
             return
         if report_result is not None:
             try:
-                payload = json.dumps({"command":"report","snapshot":report_result},
-                                     ensure_ascii=True,allow_nan=False,separators=(",",":")).encode()+b"\n"
-                if len(payload)>MAX_REPORT_INPUT:
+                unified = isinstance(report_result, UnifiedResult)
+                snapshot = report_result.envelope() if unified else report_result
+                message = {"command": "report", "snapshot": snapshot}
+                if detail is not None:
+                    message.update(command="detail", filter=detail)
+                payload = json.dumps(message,
+                                     ensure_ascii=not unified,allow_nan=False,separators=(",",":")).encode()+b"\n"
+                limit = MAX_UNIFIED_REPORT_INPUT if unified else MAX_REPORT_INPUT
+                if len(payload)>limit:
                     raise ValueError
             except (TypeError,ValueError,OverflowError):
                 self.completed.emit(dict(event="error",code="REPORT_CONTEXT_MISMATCH"))
@@ -206,6 +217,8 @@ class DetailExportProcess(QObject):
             terminal = dict(event='error', code=self.failure)
         elif status != QProcess.ExitStatus.NormalExit or terminal is None or code != expected[terminal['event']]:
             terminal = dict(event='error', code='WORKER_CRASHED')
+        elif terminal['event'] == 'finished' and terminal.get('files', 2) != self.expected_files:
+            terminal = dict(event='error', code='WORKER_PROTOCOL_ERROR')
         process.close()
         process.deleteLater()
         self.completed.emit(terminal)

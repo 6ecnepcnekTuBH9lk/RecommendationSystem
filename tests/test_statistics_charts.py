@@ -132,8 +132,8 @@ def test_final_charts_pages_legends_and_repeated_render(window, sample_result, a
     original = deepcopy(result)
     tab.render(result)
     widgets = tab.findChildren(charts.StatisticsChart)
-    assert len(widgets) == 17
-    assert [len(tab.sections.widget(i).findChildren(charts.StatisticsChart)) for i in range(5)] == [4, 6, 4, 3, 0]
+    assert len(widgets) == 19
+    assert [len(tab.sections.widget(i).findChildren(charts.StatisticsChart)) for i in range(5)] == [4, 7, 5, 3, 0]
     for widget in widgets:
         assert widget.chart().legend().isVisible() == (widget.data.kind == 'donut')
         if widget.data.kind == 'donut':
@@ -149,7 +149,7 @@ def test_final_charts_pages_legends_and_repeated_render(window, sample_result, a
         tab.render(result)
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
-        assert len(tab.findChildren(charts.StatisticsChart)) == 17
+        assert len(tab.findChildren(charts.StatisticsChart)) == 19
     assert all(sip.isdeleted(chart) for chart in old_charts)
     assert result == original and tab.displayed_result is result
 
@@ -169,8 +169,12 @@ def test_tooltip_exact_value_and_mouse_exit(app):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
-def test_main_window_theme_roundtrip_keeps_chart_objects_and_data(app, sample_result):
+def test_main_window_theme_roundtrip_keeps_chart_objects_and_data(app, sample_result, monkeypatch):
+    from Application.tabs.dataset_statistics_tab import DatasetStatisticsTab
     from main import MainWindow
+
+    # This fixture is a saved schema 10 result. Exercise its compatibility path.
+    monkeypatch.setattr(DatasetStatisticsTab, "_calculation_source", samples.LegacyStatisticsTab._calculation_source)
     window = MainWindow()
     try:
         tab = window.dataset_statistics_tab
@@ -190,7 +194,7 @@ def test_main_window_theme_roundtrip_keeps_chart_objects_and_data(app, sample_re
                     output.append(tuple(tuple(bars.at(i) for i in range(bars.count())) for bars in series.barSets()))
             return tuple(output)
         native_values = [series_snapshot(widget) for widget in widgets]
-        assert len(widgets) == 17
+        assert len(widgets) == 19
         backgrounds = []
         for dark in (False, True, False):
             window.apply_theme(dark)

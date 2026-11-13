@@ -5,6 +5,8 @@ import pytest
 from PyQt6.QtCore import QDate, QPoint, QProcess, QThreadPool, QTimer, Qt
 from PyQt6.QtWidgets import QFrame, QLabel, QTableWidget, QWidget, QComboBox, QStyleOptionViewItem
 
+from tests.tabs.test_dataset_statistics_tab import LegacyStatisticsTab
+
 from Application.analysis_filter import AnalysisFilter, AnalysisOptions
 from Application.analysis_filter_settings import load_filter, save_filter
 from Application.tabs import analysis_filter_tab as filters
@@ -98,7 +100,7 @@ def test_apply_reset_draft_and_signal_to_statistics(filter_tab, app, monkeypatch
     wait_until(lambda: tab._mapping_editable)
     parent = tab.parent()
     parent.analysis_filter_tab = tab
-    stats = statistics.DatasetStatisticsTab(parent)
+    stats = LegacyStatisticsTab(parent)
     monkeypatch.setattr(stats, "start", lambda: pytest.fail("Applying must not calculate"))
     tab.types.set_checked(False)
     assert not tab.apply_button.isEnabled()
@@ -157,7 +159,7 @@ def test_cached_result_stale_startup_keeps_values(app, sample_result, monkeypatc
     cache.save_result(statistics.CACHE_PATH, sample_result)
     parent = QWidget()
     parent.analysis_filter_tab = filters.AnalysisFilterTab(parent)
-    tab = statistics.DatasetStatisticsTab(parent)
+    tab = LegacyStatisticsTab(parent)
     try:
         assert tab.configured_filter == configured
         assert ("требуется пересчитать" in tab.description.text()) is not same
@@ -352,7 +354,7 @@ def test_mapping_save_reload_independent_of_filter(filter_tab, app, monkeypatch)
     tab = filter_tab
     wait_until(lambda: tab._mapping_editable)
     mapping_ready(tab)
-    stats = statistics.DatasetStatisticsTab(tab.parent())
+    stats = LegacyStatisticsTab(tab.parent())
     calls = []
     tab.filter_changed.connect(calls.append)
     before = stats.description.text(), stats.configured_filter, tab.configured_filter
@@ -403,7 +405,7 @@ def test_running_reason_and_restored_validation(filter_tab, monkeypatch, tmp_pat
     tab = filter_tab
     wait_until(lambda: tab._mapping_editable)
     tab.window.analysis_filter_tab = tab
-    stats = statistics.DatasetStatisticsTab(tab.window)
+    stats = LegacyStatisticsTab(tab.window)
     change_city(tab, 0, "Казань")
     class Process(QProcess):
         def start(self, program, arguments):

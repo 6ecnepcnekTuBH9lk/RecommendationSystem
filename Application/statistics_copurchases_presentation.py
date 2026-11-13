@@ -5,9 +5,11 @@ COPURCHASE_TITLE='Совместные покупки категорий'
 COPURCHASE_LEGACY_TEXT='Нет данных о совместных покупках в сохранённом результате. Для их получения пересчитайте статистику.'
 
 
-def copurchase_sections(strict,*,legacy=False):
+def copurchase_sections(strict,*,legacy=False,combined=False):
     saved=strict.get('category_copurchases') if strict is not None else None
     titles=('Категории в составе заказов','Совместные покупки категорий','Сила сочетаний категорий')
+    if combined:
+        titles=titles[:2]
     notes=[('Методика','Все уникальные подтверждённые заказы той же области, что и покупательская аналитика, '
         'без товарного отбора и ограничения первыми двумя покупками. Прямые категории взяты из снимка каталога расчёта; '
         'родительские категории не добавляются. Заказ учитывается один раз в категории и неупорядоченной паре; '
@@ -45,4 +47,11 @@ def copurchase_sections(strict,*,legacy=False):
          [(pair_label(r['category1']),pair_label(r['category2']),r['orders'],r['buyers'],r['order_rate']) for r in saved['pairs']]),
         (['Категория 1','Категория 2','Категория 2 в заказах категории 1, %','Категория 1 в заказах категории 2, %'],
          [(pair_label(r['category1']),pair_label(r['category2']),r['given_first_rate'],r['given_second_rate']) for r in saved['pairs']])]
+    if combined:
+        # Read each saved pair once by its stable codes; never join translated labels.
+        tables=[tables[0],(
+            ['Категория 1','Категория 2','Заказов вместе','Уникальных покупателей','Доля заказов, %',
+             'Категория 2 среди заказов с категорией 1, %','Категория 1 среди заказов с категорией 2, %'],
+            [(pair_label(r['category1']),pair_label(r['category2']),r['orders'],r['buyers'],r['order_rate'],
+              r['given_first_rate'],r['given_second_rate']) for r in saved['pairs']])]
     return [main]+[(title,[],[table],[]) for title,table in zip(titles,tables)]

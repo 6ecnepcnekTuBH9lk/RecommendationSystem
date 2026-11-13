@@ -21,8 +21,8 @@ from Application.statistics_presentation import (
     interval_text, status_label, SOURCE_LABELS, SOURCE_KIND_LABELS, DIAGNOSTIC_LABELS,
     WARNING_LABELS, _date, _calculation_message,
 )
-from Application.statistics_rfm_presentation import rfm_sections
-from Application.statistics_cohorts_presentation import cohort_sections, cohort_display, HORIZON_HEADERS, MATRIX_HEADERS
+from Application.statistics_rfm_presentation import rfm_report_sections
+from Application.statistics_cohorts_presentation import cohort_report_sections, cohort_display, REPEAT_TITLE, RETENTION_TITLE
 from Application.analysis_filter import AnalysisFilter
 
 PAGE_LABELS = ("Действия", "Заказы", "Товары", "Клиенты", "Техническая информация")
@@ -33,6 +33,15 @@ class ReportNumber:
     value: Decimal
     money: bool = True
     half_up: bool = False
+
+@dataclass(frozen=True)
+class ReportMeasure:
+    value: object
+    known: object
+    quality: str
+    reasons: tuple[str, ...] = ()
+    tooltip: str = ""
+
 
 def number_text(value):
     number=value.value
@@ -52,6 +61,7 @@ class ReportBlock:
     choices: tuple = ()
     analytics: bool = False
     options: dict = dataclass_field(default_factory=dict)
+    table_id: str = ""
 
 class _Blocks(list):
     def addWidget(self, block):
@@ -75,6 +85,7 @@ class StatisticsReport:
     global_cards: tuple
     status: str
     pages: tuple
+    metadata: dict = dataclass_field(default_factory=dict)
 
 def _section_heading(layout, title):
     layout.append(ReportBlock("heading",title=title))
@@ -99,8 +110,8 @@ def _present_value(value, display):
         return ReportNumber(Decimal(str(value)),half_up=True)
     return display(value) if display else value
 
-def _table(layout, headers, rows, *, display=None):
-    block=ReportBlock("table",headers=tuple(headers),rows=tuple(
+def _table(layout, headers, rows, *, display=None, table_id=""):
+    block=ReportBlock("table",table_id=table_id,headers=tuple(headers),rows=tuple(
         tuple(_present_value(v,display) for v in row) for row in rows))
     layout.append(block)
     return block
@@ -118,9 +129,11 @@ def RfmSegmentsWidget(result):
 def CohortRetentionHeatmap(result):
     return ReportBlock("heatmap",data=cohort_retention_heatmap_data(result))
 
-def _analytics_sections(layout, sections, display=_buyer_display, before_tables=None):
+def _analytics_sections(layout, sections, display=_buyer_display, before_tables=None, context=None):
     for section_index,(title,cards,tables,notes) in enumerate(sections):
         section=_section_heading(layout,title)
+        if section_index == 0 and context:
+            _context(section,context)
         if cards:
             _cards(section,[(label,_present_value(value,display)) for label,value in cards])
         for table_index,(headers,rows) in enumerate(tables):
@@ -131,65 +144,214 @@ def _analytics_sections(layout, sections, display=_buyer_display, before_tables=
             section.addWidget(_label("\n".join(f"{label}: {text}" for label,text in notes)))
 
 
+def _context(layout, text):
+    layout.append(ReportBlock("text",title=text,options={"context":True}))
+
+
+def _period_context(period):
+    if period is None:
+        return "Период не сохранён в результате"
+    if period.get("start_date") is None:
+        return "Период: доступное покрытие источников"
+    return "Период: " + " — ".join(date.fromisoformat(period[k]).strftime("%d.%m.%Y")
+                                  for k in ("start_date","end_date"))
+
+
+def _buyer_context(result, *, comparison=False):
+    saved=result.get("buyer_statistics")
+    policy=("Подтверждённые покупки F/sold и расширенный учёт F/sold/CP"
+            if comparison else "Подтверждённые покупки F/sold")
+    text="База: " + policy + " • Все товары • " + _period_context(saved["period"] if saved else None)
+    if saved is not None and not saved["coverage_complete"]:
+        text+=" • Покрытие заказов неполное"
+    return text
+
+
+def _item_context(result):
+    selection=AnalysisFilter.from_dict(result["analysis_filter"])
+    products="Все товары" if not selection.product_restricted else "Отобранные товары"
+    return ("База: товарный срез • " + products + " • " + _period_context(result["analysis_filter"])
+            + " • Правило покупок товарной статистики сохранённого расчёта")
+
+
+def _overview_buyer_sections(result, sections):
+    """Drop a narrow display only when its saved values occur exactly in the richer table."""
+    saved=result.get("buyer_statistics")
+    strict=saved["policies"]["STRICT_COMPLETED"] if saved else None
+    demo=strict.get("demography") if strict else None
+    analytics=strict.get("demographic_analytics") if strict else None
+    redundant=set()
+    if demo is not None and analytics is not None:
+        for dimension,header in (("gender","Пол покупателей"),("age","Возраст покупателей")):
+            expected=[(g["label"],g["buyers"],g["buyer_rate"]) for g in analytics[dimension]]
+            if [tuple(row) for row in demo[dimension]]==expected:
+                redundant.add(header)
+    return [(title,cards,[(h,rows) for h,rows in tables if h[0] not in redundant],notes)
+            for title,cards,tables,notes in sections]
+
+
 def _customer_overview_page(layout, result, sections):
-    _cards(layout, [(PROFILE_SLICE_LABEL, result['customers']), (ITEM_CLIENTS_LABEL, result['interaction_users']), ('Покупатели', result['purchase_users']), ('Повторные покупатели (от 2 покупок)', result['repeat_buyers'])])
-    for title, rows in customer_scope_sections(result):
-        customer_section = _section_heading(layout, title)
-        _table(customer_section, ['Показатель', 'Значение'], rows)
-    customer_section = _section_heading(layout, 'Портрет клиента')
+    for index,(title,rows) in enumerate(customer_scope_sections(result)):
+        section=_section_heading(layout,title)
+        if index==0:
+            scope=result.get("customer_scope")
+            context=("База: клиентская база • Идентифицированные клиенты доступных источников • "
+                     +_period_context(scope["period"] if scope else None)+" • Все товары, включая события без товара")
+            if scope is not None and not all(scope[k] for k in ("profiles_available","actions_available","orders_available")):
+                context+=" • Источники доступны не полностью"
+            _context(section,context)
+        _table(section,['Показатель','Значение'],rows)
+    section=_section_heading(layout,'Демография клиентов')
+    _context(section,"База: профили клиентов соответствующего среза • Не только подтверждённые покупатели • "
+             "Возраст на дату оценки сохранённого расчёта")
     if result['customers'] is None:
-        customer_section.addWidget(_label('Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'))
-    customer_section = _section_heading(layout, 'Возрастная структура клиентов')
-    _cards(customer_section, [('Средний возраст', result['mean_age']), ('Медианный возраст', result['median_age'])])
-    customer_section.addWidget(_chart(chart_data.distribution_data(result, 'age')))
-    _table(customer_section, ['Возрастная группа', 'Количество клиентов', 'Доля, %'], result['age_distribution'])
-    customer_section = _section_heading(layout, 'Распределение по полу')
-    customer_section.addWidget(_chart(chart_data.gender_chart_data(result)))
-    _table(customer_section, ['Пол', 'Количество клиентов', 'Доля, %'], result['gender_distribution'])
-    customer_section = _section_heading(layout, 'Активность клиентов')
-    _table(customer_section, ['Показатель', 'Значение'], [('Клиенты с просмотрами', result['view_users']), ('Клиенты с добавлениями в избранное', result['favorite_users']), ('Клиенты с покупками', result['purchase_users']), ('Клиенты с просмотрами и покупками', result['view_purchase_users']), ('Клиенты с избранным и покупками', result['favorite_purchase_users']), ('Клиенты со всеми типами взаимодействий', result['all_interaction_type_users']), ('Среднее число взаимодействий на активного клиента', result['mean_interactions']), ('Медиана числа взаимодействий на активного клиента', result['median_interactions']), ('Доля активных клиентов, совершивших покупку, %', result['active_buyer_rate'])])
-    customer_section = _section_heading(layout, chart_data.interaction_frequency_data(result).title)
-    customer_section.addWidget(_chart(chart_data.interaction_frequency_data(result)))
-    _table(customer_section, ['Количество взаимодействий', 'Клиентов', 'Доля, %'], result['interaction_activity_distribution'])
-    _analytics_sections(layout, sections)
+        section.addWidget(_label('Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'))
+    section=_section_heading(layout,'Возрастная структура клиентов')
+    _cards(section,[('Средний возраст',result['mean_age']),('Медианный возраст',result['median_age'])])
+    section.addWidget(_chart(chart_data.distribution_data(result,'age')))
+    _table(section,['Возрастная группа','Количество клиентов','Доля, %'],result['age_distribution'])
+    section=_section_heading(layout,'Распределение по полу')
+    section.addWidget(_chart(chart_data.gender_chart_data(result)))
+    _table(section,['Пол','Количество клиентов','Доля, %'],result['gender_distribution'])
+    section=_section_heading(layout,'Активность клиентов товарного среза')
+    _context(section,_item_context(result))
+    # customers is already in the shared header; purchase_users remains in the activity table.
+    _cards(section,[(ITEM_CLIENTS_LABEL,result['interaction_users']),
+                    ('Повторные покупатели (от 2 покупок)',result['repeat_buyers'])])
+    _table(section,['Показатель','Значение'],[
+        ('Клиенты с просмотрами',result['view_users']),('Клиенты с добавлениями в избранное',result['favorite_users']),
+        ('Клиенты с покупками',result['purchase_users']),('Клиенты с просмотрами и покупками',result['view_purchase_users']),
+        ('Клиенты с избранным и покупками',result['favorite_purchase_users']),
+        ('Клиенты со всеми типами взаимодействий',result['all_interaction_type_users']),
+        ('Среднее число взаимодействий на активного клиента',result['mean_interactions']),
+        ('Медиана числа взаимодействий на активного клиента',result['median_interactions']),
+        ('Доля активных клиентов, совершивших покупку, %',result['active_buyer_rate'])])
+    section=_section_heading(layout,chart_data.interaction_frequency_data(result).title)
+    section.addWidget(_chart(chart_data.interaction_frequency_data(result)))
+    _table(section,['Количество взаимодействий','Клиентов','Доля, %'],result['interaction_activity_distribution'])
+    _analytics_sections(layout,_overview_buyer_sections(result,sections),context=_buyer_context(result))
+
 
 def _customer_purchases_page(layout, result, sections):
-    customer_section = _section_heading(layout, 'Покупательская активность')
-    _table(customer_section, ['Количество заказов', 'Покупателей', 'Доля покупателей, %'], result['purchase_order_distribution'])
-    _table(customer_section, ['Показатель', 'Значение'], [('Среднее число заказов на покупателя', result['mean_orders_per_buyer']), ('Медиана числа заказов на покупателя', result['median_orders_per_buyer']), ('Доля повторных покупателей, %', result['repeat_buyer_rate'])])
-    slots = {}
-    for i, (_, _, tables, _) in enumerate(sections):
-        for j, (headers, _) in enumerate(tables):
-            if tuple(headers) == ('Заказов на покупателя','Покупателей','Доля покупателей, %','Заказов'):
-                slots[i,j] = (lambda: analytics_chart(buyer_frequency_chart_data(result)),)
-            elif tuple(headers) == ('Показатель','Подтверждённые покупки','Расширенный учёт покупок'):
-                slots[i,j] = (lambda: analytics_chart(purchase_policy_comparison_chart_data(result)),)
-    _analytics_sections(layout, sections, before_tables=slots)
+    from Application.statistics_copurchases_presentation import copurchase_sections
+    saved=result.get("buyer_statistics")
+    strict=saved["policies"]["STRICT_COMPLETED"] if saved else None
+    comparison=None
+    if strict is not None:
+        # These two section schemas are the existing grouped_buyer_sections contract.
+        main,frequency=sections[:2]
+        _analytics_sections(layout,[main],context=_buyer_context(result))
+        _,interval_cards,tables,notes=frequency
+        _analytics_sections(layout,[('Частота подтверждённых покупок',[],tables[:1],[])],
+            before_tables={(0,0):(lambda:analytics_chart(buyer_frequency_chart_data(result)),)})
+        _analytics_sections(layout,[('Интервалы между подтверждёнными покупками',interval_cards,tables[1:2],notes)])
+        _analytics_sections(layout,[('Первые и последние наблюдаемые покупки периода',[],tables[2:],[
+            ('Наблюдение','Первая и последняя покупка внутри показанного периода; это не первая историческая покупка из когорт.')])])
+        comparison=next(section for section in sections if any(
+            tuple(headers)==('Показатель','Подтверждённые покупки','Расширенный учёт покупок')
+            for headers,_ in section[2]))
+    else:
+        _analytics_sections(layout,sections[:1],context=_buyer_context(result))
+    _analytics_sections(layout,copurchase_sections(strict,legacy=saved is None,combined=True))
+    section=_section_heading(layout,'Покупательская активность отобранных товаров')
+    _context(section,_item_context(result))
+    _table(section,['Количество заказов','Покупателей','Доля покупателей, %'],result['purchase_order_distribution'])
+    _table(section,['Показатель','Значение'],[
+        ('Среднее число заказов на покупателя',result['mean_orders_per_buyer']),
+        ('Медиана числа заказов на покупателя',result['median_orders_per_buyer']),
+        ('Доля повторных покупателей, %',result['repeat_buyer_rate'])])
+    if comparison is not None:
+        _,cards,tables,notes=comparison
+        _analytics_sections(layout,[('Как изменяются показатели при расширенном учёте покупок',cards,tables,notes)],
+            before_tables={(0,0):(lambda:analytics_chart(purchase_policy_comparison_chart_data(result)),)},
+            context=_buyer_context(result,comparison=True))
+
+def _money_demographic_tables(result, sections):
+    """Remove only the shared unvalued-order column sourced from the same DTO group."""
+    saved=result.get("buyer_statistics")
+    strict=saved["policies"]["STRICT_COMPLETED"] if saved else None
+    analytics=strict.get("demographic_analytics") if strict else None
+    demographic=[(headers,list(rows)) for _,_,tables,_ in sections[-4:] for headers,rows in tables]
+    common=[]
+    if analytics is not None:
+        for dimension,label,positions in (("gender","Пол",(0,1)),("age","Возраст",(2,3))):
+            expected=[(g["label"],g["unvalued_orders"]) for g in analytics[dimension]]
+            if all(len(demographic[i][0])==8 and [(row[0],row[3]) for row in demographic[i][1]]==expected
+                   for i in positions):
+                common.extend((label,name,count) for name,count in expected)
+                for i in positions:
+                    headers,rows=demographic[i]
+                    demographic[i]=(headers[:3]+headers[4:],[row[:3]+row[4:] for row in rows])
+    return demographic,common
+
 
 def _customer_money_page(layout, result, sections):
-    if sections:
-        slots = {(0, 1): (lambda: analytics_chart(buyer_turnover_chart_data(result, 'RUB')),), (1, 1): (lambda: analytics_chart(buyer_turnover_chart_data(result, 'KZT')),)}
-        _analytics_sections(layout, sections, before_tables=slots)
-    else:
-        layout.addWidget(_label('Нет денежных показателей в сохранённом результате.'))
+    # The provider's contract is two currency sections (when available),
+    # one shared demographic note and four demographic tables. Do not route by translated titles.
+    available=(len(sections)==7 and all(len(section[2])==3 for section in sections[:2]))
+    standard=len(sections) in (5,7) and all(len(section[2])==1 for section in sections[-4:])
+    if not standard:
+        if sections:
+            _analytics_sections(layout,sections)
+        else:
+            layout.addWidget(_label('Нет денежных показателей в сохранённом результате.'))
+        return
+    section=_section_heading(layout,'Денежные показатели покупателей')
+    _context(section,_buyer_context(result)+" • RUB и KZT отдельно, без суммирования")
+    section.addWidget(_label(
+        'Известная сумма покупок — сумма достоверно оценённых принятых позиций. '
+        'Полная денежная оценка — только покупатели с достоверной оценкой всех наблюдаемых покупок периода '
+        'по действующим правилам; известный подытог не заменяет полную оценку.'))
+    # Preserve the existing demographic money/coverage limitations once, for both currencies.
+    note=sections[2] if available else sections[0]
+    if note[3]:
+        section.addWidget(_label("\n".join(f"{label}: {text}" for label,text in note[3])))
+    demographic,common=_money_demographic_tables(result,sections)
+    if common:
+        section.addWidget(_label('Общие счётчики заказов без денежной оценки приведены один раз после валютных групп. '
+                                'Они относятся ко всем валютам и не складываются между группировками пола и возраста.'))
+    for index,currency in enumerate(("RUB","KZT")):
+        section=_section_heading(layout,'Денежные показатели — '+currency)
+        if available:
+            _,cards,tables,notes=sections[index]
+            _cards(section,[(label,_present_value(value,_buyer_display)) for label,value in cards])
+            _analytics_sections(layout,[('Полнота денежной оценки — '+currency,[],tables[:1],[])])
+            _analytics_sections(layout,[('Распределение полной денежной ценности — '+currency,[],tables[1:2],[])],
+                before_tables={(0,0):(lambda unit=currency:analytics_chart(buyer_turnover_chart_data(result,unit)),)})
+            _analytics_sections(layout,[('Годовая денежная аналитика — '+currency,[],tables[2:],notes)])
+        else:
+            section.addWidget(_label('Денежные итоги недоступны в сохранённом результате.'))
+        for dimension,title,offset in (("gender","По полу",0),("age","По возрасту",2)):
+            _analytics_sections(layout,[(title+' — '+currency,[],[demographic[offset+index]],[])])
+    if common:
+        section=_section_heading(layout,'Общие показатели денежной оценки — все валюты')
+        _table(section,['Группировка','Группа','Заказы без достоверной денежной оценки (все валюты)'],common)
 
 def _customer_rfm_page(layout, result):
-    slot = (2, 0) if result.get('rfm_statistics') is not None else (0, 0)
-    _analytics_sections(layout, rfm_sections(result, compact=True), before_tables={slot: (lambda: RfmSegmentsWidget(result),)})
+    for title, cards, tables, notes in rfm_report_sections(result):
+        context = ' '.join(text for label, text in notes if label == 'Контекст')
+        notes = [(label, text) for label, text in notes if label != 'Контекст']
+        chart = title == 'RFM-сегменты покупателей' or (result.get('rfm_statistics') is None and title == 'RFM-анализ покупателей')
+        _analytics_sections(layout, [(title, cards, tables, notes)], context=context,
+            before_tables={(0, 0): (lambda: RfmSegmentsWidget(result),)} if chart else None)
 
 def _customer_cohorts_page(layout, result):
-    repeat = lambda: analytics_chart(cohort_repeat_chart_data(result))
-    heatmap = lambda: CohortRetentionHeatmap(result)
-    sections = cohort_sections(result, compact=True)
-    slots = {(0, 0): (repeat, heatmap)} if result.get('cohort_statistics') is None else {}
-    if result.get('cohort_statistics') is not None:
-        for i, (_, _, tables, _) in enumerate(sections):
-            for j, (headers, _) in enumerate(tables):
-                if tuple(headers) == HORIZON_HEADERS:
-                    slots[i, j] = (repeat,)
-                elif tuple(headers) == MATRIX_HEADERS:
-                    slots[i, j] = (heatmap,)
-    _analytics_sections(layout, sections, cohort_display, slots)
+    for title, cards, tables, notes in cohort_report_sections(result):
+        section = _section_heading(layout, title)
+        context = ' '.join(text for label, text in notes if label == 'Контекст')
+        if context:
+            _context(section, context)
+        if cards:
+            _cards(section, [(label, _present_value(value, cohort_display)) for label, value in cards])
+        if title == REPEAT_TITLE:
+            section.addWidget(analytics_chart(cohort_repeat_chart_data(result)))
+        elif title == RETENTION_TITLE:
+            section.addWidget(CohortRetentionHeatmap(result))
+        for headers, rows in tables:
+            _table(section, headers, rows, display=cohort_display)
+        notes = [(label, text) for label, text in notes if label != 'Контекст']
+        if notes:
+            section.addWidget(_label('\n'.join(f'{label}: {text}' for label, text in notes)))
 
 def _actions_page(layout, result):
     section = layout
@@ -220,8 +382,8 @@ def _actions_page(layout, result):
 def _products_page(layout, result):
     section = layout
 
-    def table(headers, rows):
-        return _table(section, headers, rows)
+    def table(headers, rows, *, table_id=""):
+        return _table(section, headers, rows, table_id=table_id)
 
     def group(first, field):
         table([first, 'Товаров', 'Просмотры', 'Добавления в избранное', 'Покупки', 'Продано единиц'], [(*row[:5], _decimal_display(row[5], money=False)) for row in result[field]])
@@ -234,10 +396,11 @@ def _products_page(layout, result):
     table(['Код', 'Название', 'Добавления в избранное', 'Клиенты с избранным', 'Просмотры', 'Покупки'], result['top_favorited_products'])
     section = _section_heading(layout, 'Популярные товары по покупкам')
     section.addWidget(_chart(chart_data.purchased_products_data(result)))
-    table(['Код', 'Название', 'Покупки', 'Покупатели', 'Продано единиц', 'Просмотры', 'Добавления в избранное'], [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result['top_purchased_products']])
+    table(['Код', 'Название', 'Покупки', 'Покупатели', 'Продано единиц', 'Просмотры', 'Добавления в избранное'], [(*row[:4], _decimal_display(row[4], money=False), *row[5:]) for row in result['top_purchased_products']], table_id='products.purchased')
     section = _section_heading(layout, 'Категории товаров')
+    section.addWidget(_chart(chart_data.product_category_chart_data(result)))
     section.addWidget(_label(DIRECT_CATEGORY_NOTE))
-    categories = table(CATEGORY_HEADERS, [(*row[:7], _decimal_display(row[7], money=False)) for row in product_category_rows(result)])
+    categories = table(CATEGORY_HEADERS, [(*row[:7], _decimal_display(row[7], money=False)) for row in product_category_rows(result)], table_id='products.categories')
     categories.options['nowrap'] = True
     categories.options['full_width_columns'] = (2,)
     for title, field in (('Спрос по полу товара', 'product_gender_statistics'), ('Спрос по сезону', 'product_season_statistics'), ('Спрос по стилевой группе', 'product_style_statistics')):
@@ -252,16 +415,16 @@ def _products_page(layout, result):
 def _orders_page(layout, result):
     section = layout
 
-    def table(headers, rows):
-        return _table(section, headers, rows)
+    def table(headers, rows, *, table_id=""):
+        return _table(section, headers, rows, table_id=table_id)
     _cards(section, [('Заказы с покупкой', result['purchase_orders']), ('Невыкупленные заказы', result['orders_without_purchase']), ('Позиции покупок', result['purchase_interactions']), ('Покупатели', result['purchase_users'])])
     section = _section_heading(layout, 'Корзина заказа')
     basket_rates = {label: rate for label, _, rate in result['purchase_basket_distribution']}
     _cards(section, [('Среднее число позиций на заказ', result['mean_purchase_lines_per_order']), ('Медиана числа позиций на заказ', result['median_purchase_lines_per_order']), ('Доля заказов с 1 позицией', f"{basket_rates['1 позиция']:.2f}%"), ('Доля заказов с 3+ позициями', f"{sum((basket_rates[key] for key in ('3–5 позиций', '6–10 позиций', '11+ позиций'))):.2f}%")])
     section.addWidget(_chart(chart_data.distribution_data(result, 'basket')))
-    table(['Количество позиций', 'Заказов', 'Доля, %'], result['purchase_basket_distribution'])
+    table(['Количество позиций', 'Заказов', 'Доля, %'], result['purchase_basket_distribution'], table_id='orders.basket')
     section = _section_heading(layout, 'Финансовые показатели')
-    table(['Валюта', 'Заказов', 'Позиции', 'Единиц', 'Сумма покупок', 'Средняя сумма заказа', 'Медианная сумма заказа'], [(currency, n, lines, _decimal_display(units, money=False), *(_decimal_display(v) for v in (amount, mean, median))) for currency, n, lines, units, amount, mean, median in result['order_financials']])
+    table(['Валюта', 'Заказов', 'Позиции', 'Единиц', 'Сумма покупок', 'Средняя сумма заказа', 'Медианная сумма заказа'], [(currency, n, lines, _decimal_display(units, money=False), *(_decimal_display(v) for v in (amount, mean, median))) for currency, n, lines, units, amount, mean, median in result['order_financials']], table_id='orders.financials')
     mixed, unknown = (result['mixed_currency_purchase_orders'], result['unknown_currency_purchase_orders'])
     if mixed or unknown:
         section.addWidget(_label(f'Заказы со смешанной валютой: {_number(mixed)}. С неопределённой валютой: {_number(unknown)}.'))
@@ -274,12 +437,13 @@ def _orders_page(layout, result):
     table(['Месяц', 'Заказы RUB', 'Сумма RUB', 'Заказы KZT', 'Сумма KZT'], [(month[5:] + '.' + month[:4], rub_n, _decimal_display(rub), kzt_n, _decimal_display(kzt)) for month, rub_n, rub, kzt_n, kzt in result['order_monthly_dynamics']])
     for currency in ('RUB', 'KZT'):
         section = _section_heading(layout, 'Магазины и каналы — ' + currency)
-        table(['Магазин / канал', 'Заказов', 'Покупателей', 'Позиции', 'Единиц', 'Сумма покупок', 'Средняя сумма заказа'], [(name, n, buyers, lines, _decimal_display(units, money=False), _decimal_display(amount), _decimal_display(mean)) for unit, key, name, n, buyers, lines, units, amount, mean in result['store_statistics'] if unit == currency])
+        section.addWidget(_chart(chart_data.store_purchase_chart_data(result, currency)))
+        table(['Магазин / канал', 'Заказов', 'Покупателей', 'Позиции', 'Единиц', 'Сумма покупок', 'Средняя сумма заказа'], [(name, n, buyers, lines, _decimal_display(units, money=False), _decimal_display(amount), _decimal_display(mean)) for unit, key, name, n, buyers, lines, units, amount, mean in result['store_statistics'] if unit == currency], table_id='orders.stores.' + currency)
     section = _section_heading(layout, 'Оплата')
     section.addWidget(_chart(chart_data.payment_chart_data(result)))
-    table(['Способ оплаты', 'Заказов с этим способом', 'Доля заказов, %'], result['payment_type_distribution'])
+    table(['Способ оплаты', 'Заказов с этим способом', 'Доля заказов, %'], result['payment_type_distribution'], table_id='orders.payments')
     section = _section_heading(layout, 'Статусы позиций')
-    table(['Статус', 'Позиции', 'Доля, %', 'Считается покупкой'], [(status_label(name), count, 100 * count / result['order_lines'] if result['order_lines'] else 0, 'Да' if purchase else 'Нет') for name, count, purchase in result['line_statuses']])
+    table(['Статус', 'Позиции', 'Доля, %', 'Считается покупкой'], [(status_label(name), count, 100 * count / result['order_lines'] if result['order_lines'] else 0, 'Да' if purchase else 'Нет') for name, count, purchase in result['line_statuses']], table_id='orders.line_statuses')
 
 def _technical_page(technical,result):
     coverage = []
@@ -352,6 +516,12 @@ def header_rows(result, *, snapshot_diagnostics=None):
     return tuple(rows)
 
 def report_presentation(result, *, snapshot_diagnostics=None):
+    from Application.statistics_unified_dto import UnifiedResult
+
+    if isinstance(result, UnifiedResult):
+        from Application.statistics_unified_presentation import unified_presentation
+
+        return unified_presentation(result)
     buyer_groups={key:[] for key in CUSTOMER_GROUP_ORDER}
     for group,section in grouped_buyer_sections(result,compact=True):
         buyer_groups[group].append(section)
@@ -383,11 +553,27 @@ class ReportCell:
     text: str
     kind: str
     number_format: str = "@"
+    tooltip: str = ""
+    known: object = None
+    quality: str = ""
+    reasons: tuple[str, ...] = ()
 
 def cell_presentation(value, *, percentage=False, numeric_hint=False):
     """One display/type boundary; percent values retain the saved 0..100 scale."""
     import re
     from datetime import date
+    if isinstance(value, ReportMeasure):
+        cell = cell_presentation(value.value, percentage=percentage, numeric_hint=numeric_hint)
+        if value.value is not None:
+            text = cell.text.replace(".", ",") if isinstance(value.value, ReportNumber) else cell.text
+        else:
+            text = "Недоступно"
+            if value.known is not None and value.known != 0:
+                part = cell_presentation(value.known, percentage=percentage).text.replace(".", ",")
+                text += " · известно: " + part
+        known = value.known.value if isinstance(value.known, ReportNumber) else value.known
+        return ReportCell(cell.value, text, cell.kind, cell.number_format, value.tooltip, known,
+                          value.quality, value.reasons)
     raw = value.value if isinstance(value, ReportNumber) else value
     if isinstance(value, ReportNumber):
         text = number_text(value)

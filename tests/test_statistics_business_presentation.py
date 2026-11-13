@@ -48,7 +48,7 @@ def test_six_tables_cache_roundtrip_shared_values_and_no_recalculation(window,ri
     assert not any(cards for _,cards,_,_ in overview[1:]+money[2:])
     assert "по доступному профилю на дату расчета" in overview[-1][3][0][1]
     assert tab.sections.count()==tab.customer_sections.count()==5
-    assert len(tab.customer_sections.findChildren(QTableWidget))==60
+    assert len(tab.customer_sections.findChildren(QTableWidget))==(58 if legacy else 57)
     target=tmp_path/"statistics.zip";bundle.export_statistics_bundle(result,target)
     with ZipFile(target) as archive:
         assert archive.namelist()==["Статистика.xlsx","Статистика.html"] and archive.testzip() is None
@@ -80,8 +80,8 @@ def test_six_tables_cache_roundtrip_shared_values_and_no_recalculation(window,ri
             for group,row in zip(expected[dimension],rows):
                 m=group["money"][currency]
                 assert row[1:4]==(m["known_buyers"],m["known_orders"],group["unvalued_orders"])
-                assert any(candidate[:4]==tuple(row[:4]) for candidate in excel_values)
-        assert len(parsed.tables)==89
+                assert any(candidate[:3]==tuple(row[:3]) and candidate[3]==row[4] for candidate in excel_values)
+        assert len(parsed.tables)==86
     book.close()
     assert result==before and saved.read_bytes()==payload
     assert host.isVisible()

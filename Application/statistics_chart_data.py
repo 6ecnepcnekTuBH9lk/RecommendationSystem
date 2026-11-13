@@ -267,3 +267,43 @@ def gender_chart_data(result):
                      (('Клиентов', tuple(row[1] for row in rows)),),
                      (tuple(f'{label}\nКлиентов: {exact_number(count)}\nДоля: {rate:.2f} %'.replace('.', ',')
                             for label, count, rate in rows),))
+
+def _tooltip_money(value):
+    # Reuse the common table formatter; import lazily because the report imports projections.
+    from Application.statistics_report_presentation import ReportNumber, number_text
+    return number_text(ReportNumber(Decimal(value))).replace(".", ",")
+
+
+def store_purchase_chart_data(result, currency):
+    """Rank saved channel totals by exact money, independently of table order."""
+    if currency not in ("RUB", "KZT"):
+        raise ValueError("Unsupported chart currency")
+    rows = [row for row in (result.get("store_statistics") or ()) if row[0] == currency]
+    rows.sort(key=lambda r: (Decimal(r[7]).copy_negate(), r[1] is not None, r[1] or "", r[2]))
+    rows = rows[:10]
+    names = [r[2] for r in rows]
+    labels = tuple(name if names.count(name) == 1 else f"{name} [{r[1] or 'не указан'}]"
+                   for name, r in zip(names, rows))
+    return ChartData(f"Магазины и каналы — {currency}", "horizontal", labels,
+        ((currency, tuple(Decimal(r[7]) for r in rows)),),
+        (tuple(f"Магазин / канал: {r[2]}\nВалюта: {currency}\n"
+               f"Сумма покупок: {_tooltip_money(r[7])} {currency}\nЗаказов: {exact_number(r[3])}\n"
+               f"Покупателей: {exact_number(r[4])}\nСредняя сумма заказа: {_tooltip_money(r[8])} {currency}"
+               for r in rows),), ranked=True, money=True, secondary=currency == "KZT",
+        zero_is_data=True)
+
+
+def product_category_chart_data(result):
+    """Direct saved categories; purchases are occurrences, never units or money."""
+    from Application.statistics_presentation import product_category_rows
+    rows = product_category_rows(result) if result.get("product_category_statistics") else []
+    rows.sort(key=lambda r: (-r[6], r[0]))
+    rows = rows[:10]
+    names = ['Категория не указана' if r[0] == 'Не указан' else r[1] for r in rows]
+    return ChartData("Категории товаров — TOP-10 по покупкам", "horizontal",
+        tuple(name if names.count(name) == 1 else f"{name} [{r[0]}]" for name, r in zip(names, rows)),
+        (("Покупки", tuple(r[6] for r in rows)),),
+        (tuple(f"Категория: {r[1]}\nКод категории: {r[0]}\nПуть категории: {r[2]}\n"
+               f"Покупки: {exact_number(r[6])}\nПросмотры: {exact_number(r[4])}\n"
+               f"Добавления в избранное: {exact_number(r[5])}\nПродано единиц: {exact_number(r[7])}"
+               for r in rows),), ranked=True)

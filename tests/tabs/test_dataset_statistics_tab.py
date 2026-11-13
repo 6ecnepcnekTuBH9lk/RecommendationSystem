@@ -110,8 +110,19 @@ def sample_result():
     ))
 
 
+class LegacyStatisticsTab(ui.DatasetStatisticsTab):
+    """Exercise the historical report and worker in compatibility tests."""
+
+    def _calculation_source(self):
+        return "legacy", "AUTO"
+
+
 @pytest.fixture
 def window(app):
+    yield from statistics_window(app, LegacyStatisticsTab)
+
+
+def statistics_window(app, tab_class):
     window = QWidget()
     window.status_label = QLabel(window)
     window.status_icon = QLabel(window)
@@ -120,7 +131,7 @@ def window(app):
     window._status_reset_timer.timeout.connect(lambda: set_ready_status(window))
     set_ready_status(window)
     layout = QVBoxLayout(window)
-    tab = ui.DatasetStatisticsTab(window)
+    tab = tab_class(window)
     layout.addWidget(tab)
     window.resize(1000, 700)
     window.show()
@@ -374,7 +385,7 @@ def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_resu
         assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
         assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
             ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
-        for index, counts in enumerate((8, 7, 9, 33)):
+        for index, counts in enumerate((8, 7, 9, 31)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = next(table for table in tab.sections.widget(3).findChildren(QTableWidget)
                          if table.horizontalHeaderItem(0).text() == 'Пол')
@@ -455,7 +466,7 @@ def test_saved_result_loads_automatically_without_process(app, sample_result, mo
     cache.save_result(ui.CACHE_PATH, sample_result)
     monkeypatch.setattr(ui.DatasetStatisticsTab, "start", lambda *args: pytest.fail("Must not recalculate"))
     window = QWidget()
-    tab = ui.DatasetStatisticsTab(window)
+    tab = LegacyStatisticsTab(window)
     try:
         assert tab.process is None
         assert tab.card_labels[0].text() == "3"
@@ -474,7 +485,7 @@ def test_saved_result_loads_automatically_without_process(app, sample_result, mo
 def test_corrupt_cache_starts_empty_without_overwriting_file(app, content, caplog):
     ui.CACHE_PATH.write_bytes(content)
     window = QWidget()
-    tab = ui.DatasetStatisticsTab(window)
+    tab = LegacyStatisticsTab(window)
     try:
         assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен."
         assert [label.text() for label in tab.card_labels] == ["—"] * 4
@@ -659,20 +670,19 @@ def test_customer_analytics_render_themes_scroll_and_no_duplication(window, samp
         page = tab.customer_sections.widget(0)
         assert page.widgetResizable()
         assert page.widget().layout().spacing() == ui.SECTION_SPACING
-        assert card_titles(page) == ["Профили текущего среза", "Клиенты с товарными взаимодействиями", "Покупатели", "Повторные покупатели (от 2 покупок)",
-                                    "Средний возраст", "Медианный возраст"]
+        assert card_titles(page) == ["Средний возраст", "Медианный возраст", "Клиенты с товарными взаимодействиями",
+                                    "Повторные покупатели (от 2 покупок)"]
         assert [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsNumber"] == [
-            "2", "2", "1", "0", "—", "—"]
+            "—", "—", "2", "0"]
         headings = [label.text() for label in page.findChildren(QLabel) if label.property("class") == "statisticsSection"]
         assert headings == ["ОХВАТ КЛИЕНТСКОЙ БАЗЫ", "ЦИФРОВАЯ АКТИВНОСТЬ КЛИЕНТОВ", "ПОКУПАТЕЛИ И КЛИЕНТЫ БЕЗ ПОКУПОК",
-                            "ПОРТРЕТ КЛИЕНТА", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ",
-                            "АКТИВНОСТЬ КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ",
+                            "ДЕМОГРАФИЯ КЛИЕНТОВ", "ВОЗРАСТНАЯ СТРУКТУРА КЛИЕНТОВ", "РАСПРЕДЕЛЕНИЕ ПО ПОЛУ",
+                            "АКТИВНОСТЬ КЛИЕНТОВ ТОВАРНОГО СРЕЗА", "РАСПРЕДЕЛЕНИЕ КЛИЕНТОВ ПО КОЛИЧЕСТВУ ВЗАИМОДЕЙСТВИЙ",
                             "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ ПО ПОЛУ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ ПО ВОЗРАСТУ"]
         assert [label.text() for label in tab.customer_sections.widget(1).findChildren(QLabel)
-                if label.property("class") == "statisticsSection"] == ["ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ", "ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА",
-                    "СОВМЕСТНЫЕ ПОКУПКИ КАТЕГОРИЙ", "КАТЕГОРИИ В СОСТАВЕ ЗАКАЗОВ",
-                    "СОВМЕСТНЫЕ ПОКУПКИ КАТЕГОРИЙ", "СИЛА СОЧЕТАНИЙ КАТЕГОРИЙ"]
-        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 33
+                if label.property("class") == "statisticsSection"] == ["ПОКУПАТЕЛЬСКАЯ АНАЛИТИКА", "СОВМЕСТНЫЕ ПОКУПКИ КАТЕГОРИЙ", "КАТЕГОРИИ В СОСТАВЕ ЗАКАЗОВ",
+                    "СОВМЕСТНЫЕ ПОКУПКИ КАТЕГОРИЙ", "ПОКУПАТЕЛЬСКАЯ АКТИВНОСТЬ ОТОБРАННЫХ ТОВАРОВ"]
+        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 31
         tables = page.findChildren(QTableWidget)
         assert [table.rowCount() for table in tables] == [7, 5, 4, 8, 3, 9, 7, 1, 1]
         assert tables[5].item(8, 1).text() == "50,00 %"
@@ -703,11 +713,11 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         page = tab.customer_sections.widget(0)
         layout = page.widget().layout()
         items = _visual_items(layout)
-        assert items[0].widget().layout().count() == 4
-        assert items[1].widget().text() == 'ОХВАТ КЛИЕНТСКОЙ БАЗЫ'
+        assert items[0].widget().text() == 'ОХВАТ КЛИЕНТСКОЙ БАЗЫ'
+        assert items[1].widget().property("class") == "statisticsContext"
         profile_index = next(i for i, item in enumerate(items)
-                             if isinstance(item.widget(), QLabel) and item.widget().text() == 'ПОРТРЕТ КЛИЕНТА')
-        index = profile_index + 1
+                             if isinstance(item.widget(), QLabel) and item.widget().text() == 'ДЕМОГРАФИЯ КЛИЕНТОВ')
+        index = profile_index + 2  # Always-visible profile-base caption.
         if customers is None:
             assert items[index].widget().text() == 'Данные профилей клиентов отсутствуют. Пол и возраст недоступны.'
             index += 1
@@ -724,13 +734,13 @@ def test_customer_demographic_layout_order_and_missing_profiles(window, sample_r
         gender_table = items[index + 6].widget()
         assert isinstance(gender, StatisticsChart) and gender.data.kind == 'donut'
         assert isinstance(gender_table, QTableWidget) and gender_table.horizontalHeaderItem(0).text() == 'Пол'
-        assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ'
+        assert items[index + 7].widget().text() == 'АКТИВНОСТЬ КЛИЕНТОВ ТОВАРНОГО СРЕЗА'
         assert len(page.findChildren(QTableWidget)) == 9
-        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 33
+        assert len(tab.sections.widget(3).findChildren(QTableWidget)) == 31
         assert len(page.findChildren(StatisticsChart)) == 3
-        assert len(tab.findChildren(StatisticsChart)) == 17
-        assert card_titles(page) == ['Профили текущего среза', 'Клиенты с товарными взаимодействиями', 'Покупатели',
-                                    'Повторные покупатели (от 2 покупок)', 'Средний возраст', 'Медианный возраст']
+        assert len(tab.findChildren(StatisticsChart)) == 19
+        assert card_titles(page) == ['Средний возраст', 'Медианный возраст', 'Клиенты с товарными взаимодействиями',
+                                    'Повторные покупатели (от 2 покупок)']
         assert result == before
 
 
@@ -739,7 +749,7 @@ def test_old_complete_cache_opens_empty_without_modifying_it(app, sample_result)
     ui.CACHE_PATH.write_text(json.dumps({"schema_version": 8, "result": sample_result}), encoding="utf-8")
     saved = ui.CACHE_PATH.read_bytes()
     window = QWidget()
-    tab = ui.DatasetStatisticsTab(window)
+    tab = LegacyStatisticsTab(window)
     try:
         assert [label.text() for label in tab.card_labels] == ["—"] * 4
         assert not tab.sections.widget(3).findChildren(QTableWidget)
@@ -777,6 +787,7 @@ def test_orders_analytics_headers_themes_scroll_and_immutable_display(window, sa
             "КОРЗИНА ЗАКАЗА", "ФИНАНСОВЫЕ ПОКАЗАТЕЛИ", "ДИНАМИКА КОЛИЧЕСТВА ПОКУПОК — RUB", "ДИНАМИКА КОЛИЧЕСТВА ПОКУПОК — KZT", "ДИНАМИКА СУММЫ ПОКУПОК — RUB", "ДИНАМИКА СУММЫ ПОКУПОК — KZT",
             "МАГАЗИНЫ И КАНАЛЫ — RUB",
             "МАГАЗИНЫ И КАНАЛЫ — KZT", "ОПЛАТА", "СТАТУСЫ ПОЗИЦИЙ"]
+        assert not page.findChildren(ui.StatisticsTableExplanation)
         assert not any("превышать 100%" in label for label in labels)
         assert not any(label.startswith("RUB —") for label in labels)
         assert not any(label.startswith("KZT —") for label in labels)
@@ -1190,6 +1201,7 @@ def test_saved_quality_and_categories_gui_xlsx_html_parity_without_source_reads(
     assert category_table.rowCount() == len(category_rows)
     assert [tuple(category_table.item(r, c).text() for c in range(8)) for r in range(category_table.rowCount())] == [
         (*row[:3], *(ui._number(v) for v in row[3:7]), ui._decimal_display(row[7], money=False)) for row in category_rows]
+    assert not products.findChildren(ui.StatisticsTableExplanation)
     assert ui.DIRECT_CATEGORY_NOTE in [label.text() for label in products.findChildren(QLabel)]
     scope_sections = ui.customer_scope_sections(cached)
     client_tables = tab.customer_sections.widget(0).findChildren(QTableWidget)
@@ -1281,10 +1293,10 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         tab.render(result)
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         QApplication.processEvents()
-        assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(5)] == [4, 6, 4, 3, 0]
-        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 33, 5]
+        assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(5)] == [4, 7, 5, 3, 0]
+        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 31, 5]
         chart_widgets = tab.findChildren(StatisticsChart)
-        assert len(chart_widgets) == 17
+        assert len(chart_widgets) == 19
         actions = _visual_items(tab.sections.widget(0).widget().layout())
         action_charts = tab.sections.widget(0).findChildren(StatisticsChart)
         assert {chart.data.title for chart in action_charts} == {
@@ -1300,7 +1312,7 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         favorite = next(chart for chart in action_charts if chart.data.title.endswith('избранного'))
         assert next(i for i, item in enumerate(actions) if item.widget() is favorite) == next(i for i, item in enumerate(actions) if item.widget() is view) + 3
         assert not any(label.text() == 'ДИНАМИКА КЛИЕНТОВ С ПРОСМОТРАМИ' for label in tab.findChildren(QLabel))
-        assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 17
+        assert sum(len(chart.findChildren(QLabel)) for chart in chart_widgets) == 19
         clients = _visual_items(tab.customer_sections.widget(0).widget().layout())
         frequency = next(chart for chart in chart_widgets if chart.data.title == 'Распределение клиентов по количеству взаимодействий')
         index = next(i for i, item in enumerate(clients) if item.widget() is frequency)
@@ -1346,6 +1358,7 @@ def test_polished_gui_quality_last_status_fallback_notes_hidden_and_snapshot_unc
             assert quality.item(i, 1).text() == ui._number(value)
     assert all(text not in "\n".join(labels) for _, text in SOURCE_EVENT_QUALITY_NOTES)
     products = tab.sections.widget(2)
+    assert not products.findChildren(ui.StatisticsTableExplanation)
     assert ui.DIRECT_CATEGORY_NOTE in [label.text() for label in products.findChildren(QLabel)]
     assert all(text not in "\n".join(label.text() for label in products.findChildren(QLabel))
                for _, text in RESOLUTION_NOTES)
@@ -1414,18 +1427,28 @@ def test_customer_nested_navigation_exact_sections_values_charts_and_no_duplicat
     groups = {key: [] for key in CUSTOMER_GROUP_ORDER}
     for group, section in grouped_buyer_sections(result, compact=True):
         groups[group].append(section)
-    groups["rfm"] = ui.rfm_sections(result, compact=True)
-    groups["cohorts"] = ui.cohort_sections(result, compact=True)
-    base_counts = {"overview": 7, "purchases": 2, "money": 0, "rfm": 0, "cohorts": 0}
-    expected_card_count = 6  # Four overview KPIs + mean/median age.
-    expected_table_count = 9  # Seven overview + two purchase activity tables.
+    from Application.statistics_rfm_presentation import rfm_report_sections
+    groups["rfm"] = rfm_report_sections(result)
+    from Application.statistics_cohorts_presentation import cohort_report_sections
+    groups["cohorts"] = cohort_report_sections(result)
+    base_counts = {"overview": 0, "purchases": 0, "money": 0, "rfm": 0, "cohorts": 0}
+    expected_card_count = 0
+    expected_table_count = 0
     for i, group in enumerate(CUSTOMER_GROUP_ORDER):
         page = nested.widget(i)
         headers = [label.text() for label in page.findChildren(QLabel)
                    if label.property("class") == "statisticsSection"]
         sections = groups[group]
-        assert all(title.upper() in headers for title, _, _, _ in sections)
-        expected_tables = [(h, rows) for _, _, tables, _ in sections for h, rows in tables]
+        if group in ("overview","purchases","money"):
+            # These two groups intentionally transform the legacy section projection.
+            blocks=tab.report.pages[3].groups[i].blocks
+            assert headers == [b.title.upper() for b in blocks if b.kind=="heading"]
+            expected_tables=[(b.headers,b.rows) for b in blocks if b.kind=="table"]
+            card_count=sum(len(b.values) for b in blocks if b.kind=="cards")
+        else:
+            assert all(title.upper() in headers for title, _, _, _ in sections)
+            expected_tables = [(h, rows) for _, _, tables, _ in sections for h, rows in tables]
+            card_count=sum(len(cards) for _,cards,_,_ in sections)
         tables = page.findChildren(QTableWidget)[base_counts[group]:]
         assert len(tables) == len(expected_tables)
         display = ui.cohort_display if group == "cohorts" else ui._buyer_display
@@ -1435,7 +1458,7 @@ def test_customer_nested_navigation_exact_sections_values_charts_and_no_duplicat
                     for r in range(table.rowCount())] == [
                         [ui._cell_text(value, display=display, percentage=ui.report.percentage_cell(head,row,c))
                          for c, value in enumerate(row)] for row in rows]
-        expected_card_count += sum(len(cards) for _, cards, _, _ in sections)
+        expected_card_count += card_count
         expected_table_count += len(expected_tables)
         if group != "rfm":
             assert "RFM-АНАЛИЗ ПОКУПАТЕЛЕЙ" not in headers
@@ -1559,8 +1582,8 @@ def test_analytics_charts_are_immediately_before_original_tables(window, rich_cu
     assert isinstance(preceding(4,lambda h:h[0]=="Горизонт, дней"),StatisticsChart)
     heatmap = preceding(4,lambda h:len(h)>1 and h[1]=="M0: покупателей")
     assert isinstance(heatmap,CohortRetentionHeatmap) and heatmap.model().columnCount()==14
-    # All 39 original, six demographic, four cohort-money and three channel and three category and three co-purchase and two RFM business tables survive; heatmap is a separate chart view.
-    assert len(tab.customer_sections.findChildren(QTableWidget))==60
+    # Unique analytics remain after verified presentation deduplication; heatmap is a separate chart view.
+    assert len(tab.customer_sections.findChildren(QTableWidget))==57
     assert rich_customer_result==before and tab.displayed_result is rich_customer_result
 
 

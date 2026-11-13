@@ -13,7 +13,7 @@ from Application import dataset_statistics as statistics,statistics_cache as cac
 from Application import statistics_report_presentation as report
 from Application.statistics_copurchases import CategoryCoPurchases
 from Application.statistics_copurchases_presentation import COPURCHASE_TITLE,COPURCHASE_LEGACY_TEXT
-from Application.statistics_presentation import grouped_buyer_sections
+from Application.statistics_copurchases_presentation import copurchase_sections
 from Application.statistics_charts import StatisticsChart
 from Application.theme.apply_theme import apply_app_theme
 from Application.analysis_filter import AnalysisFilter
@@ -49,17 +49,20 @@ def test_copurchase_kpis_three_tables_conditional_rates_and_missing_states_match
     _,tab=window;apply_app_theme(QApplication.instance(),dark)
     tab.render(result);tab.sections.setCurrentIndex(3);tab.customer_sections.setCurrentIndex(1)
     QApplication.processEvents()
-    sections=[s for group,s in grouped_buyer_sections(result,compact=True) if group=='purchases'][-4:]
+    sections=copurchase_sections(result['buyer_statistics']['policies']['STRICT_COMPLETED'],combined=True)
     assert sections[0][0]==COPURCHASE_TITLE
     expected=[(h,rows) for _,_,tables,_ in sections for h,rows in tables]
-    assert len(expected)==3
+    assert len(expected)==2
     page=tab.customer_sections.widget(1);labels=[label.text() for label in page.findChildren(QLabel)]
     assert all(title.upper() in labels for title,_,_,_ in sections)
     # The original frequency/policy charts remain; no co-purchase graph appears.
     assert len(page.findChildren(StatisticsChart))==(0 if scenario=='empty' else 2)
-    widgets=page.findChildren(QTableWidget)[-3:]
     group=tab.report.pages[3].groups[1]
-    blocks=[(i,b) for i,b in enumerate(group.blocks) if b.kind=='table'][-3:]
+    wanted=[(tuple(h),tuple(tuple(r) for r in rows)) for h,rows in expected]
+    blocks=[(i,b) for i,b in enumerate(group.blocks) if b.kind=='table' and (b.headers,b.rows) in wanted]
+    table_blocks=[b for b in group.blocks if b.kind=='table']
+    gui_tables=page.findChildren(QTableWidget)
+    widgets=[gui_tables[table_blocks.index(b)] for _,b in blocks]
     target=tmp_path/'report.zip';bundle.export_statistics_bundle(result,target)
     with ZipFile(target) as archive:
         assert archive.namelist()==['Статистика.xlsx','Статистика.html'] and archive.testzip() is None

@@ -186,3 +186,75 @@ def rfm_sections(result, *, compact=False):
         (['Окно','Политика','База покупателей 48 месяцев','Наблюдаемые заказы','Сегмент определён RUB','Сегмент определён KZT',
           'Известная сумма RUB','Известная сумма KZT'],comparison)], []))
     return sections
+
+
+
+def rfm_report_sections(result):
+    """Visible report structure over saved sections; keep the legacy projection API."""
+    source = rfm_sections(result, compact=True)
+    saved = result.get('rfm_statistics')
+    reference = ('Определения сегментов и возможные бизнес-действия', [], [
+        (['Сегмент', 'Определение', 'Возможное бизнес-действие'],
+         [(label, definition, RFM_BUSINESS_ACTIONS[code])
+          for code, (label, definition) in SEGMENT_LABELS.items()])], source[-1][3] if saved is None else source[4][3])
+    if saved is None:
+        # No empty business portrait and no fabricated numeric data for old caches.
+        return [source[0], reference]
+
+    windows = tuple(WINDOW_LABELS)[:3]
+    slices = [saved['policies'][POLICIES[0]]['windows'][name]['currencies'][unit]
+              for name in windows for unit in ('RUB', 'KZT')]
+    present = ['segment_business' in c for c in slices]
+    agreed = all(present) and all(
+        [(r['segment'], r['buyers'], r['buyer_rate']) for r in c['segment_business']]
+        == [tuple(row) for row in c['segments']] for c in slices)
+    if any(present) and not agreed:
+        # Use the existing validation/error contract. If tolerant validation accepts
+        # a tiny share difference, retain both projections rather than hide it.
+        from Application.statistics_cache import validate_result
+        validate_result(result)
+
+    title, cards, _, _ = source[0]
+    bounds = interval_bounds(saved['windows']['LAST_48M']['start'], saved['windows']['LAST_48M']['end'])
+    cutoff = date.fromisoformat(saved['as_of_date']).strftime('%d.%m.%Y')
+    base = (title, cards, [], [('Контекст',
+        'RFM характеризует покупателей по давности, частоте и денежной ценности покупок. '
+        f'База 48 месяцев: {bounds[0]} — {bounds[1]}; дата отсечения: {cutoff}. '
+        'Окна 12, 24 и 48 месяцев; подтверждённые покупки, все товары. '
+        'RUB и KZT рассматриваются отдельно, их базы и суммы не складываются.')])
+    status = {'FULL': 'полное', 'PARTIAL': 'частичное', 'NONE': 'нет покрытия'}
+    coverage = '; '.join(f"{WINDOW_LABELS[name]}: {status[saved['windows'][name]['status']]}" for name in windows)
+    activity = [('Активность покупателей и качество наблюдения', [], [], [
+        ('Контекст', 'Короткие окна сохраняют базу наблюдаемых покупателей за 48 месяцев. '
+         f'Покрытие: {coverage}. Нули при неполной истории не доказывают отсутствие покупок; '
+         'покупатель без покупок окна не считается гарантированно потерянным.')])]
+    for label, table in zip(('Покупательская активность', 'Денежные данные и качество оценки', 'Показатели R, F и M'), source[1][2]):
+        notes = []
+        if label == 'Денежные данные и качество оценки':
+            notes = [('Контекст', RFM_NOTES[4][1])]
+        elif label == 'Показатели R, F и M':
+            notes = [('Контекст', RFM_NOTES[3][1])]
+        activity.append((label, [], [table], notes))
+
+    tables = [] if agreed else list(source[2][2])
+    if all(present):
+        tables.extend(source[3][2])
+    segment_notes = [('Контекст',
+        'Подтверждённые покупки; окна 12/24/48 месяцев и отдельные валютные базы RUB/KZT. '
+        'Переключатели меняют только график; все сочетания приведены в таблице.')]
+    if all(present):
+        segment_notes.extend(source[3][3][1:4])
+    else:
+        segment_notes.append(('Доступность', RFM_BUSINESS_LEGACY_TEXT))
+    segments = ('RFM-сегменты покупателей', [], tables, segment_notes)
+    scores = ('Баллы и пороги RFM', [], source[5][2], [('Контекст',
+        'Баллы R, F и M рассчитываются по распределениям показателей покупателей '
+        'в соответствующем окне и валютной базе. ' + RFM_NOTES[5][1])])
+    comparison = ('Изменение активности за два последовательных 12-месячных периода', [], source[6][2], [
+        ('Контекст', 'Сравниваются последние и предыдущие 12 месяцев — два последовательных интервала. '
+         'Это не разница между вложенными окнами 12 и 24 месяца. '
+         'Полнота и достоверность сравнения приведены в таблицах.')])
+    policies = (*source[7][:3], [('Контекст',
+        'Временное сравнение двух действующих правил учёта покупок: подтверждённого и расширенного. '
+        'Это один алгоритм RFM; политики не суммируются и будут пересмотрены отдельно.')])
+    return [base, *activity, segments, reference, scores, comparison, policies]

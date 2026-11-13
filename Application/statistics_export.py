@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -74,6 +75,8 @@ class _Sheet:
     def _cell(self, row, column, value, *, header=False, fmt=None):
         cell = self.ws.cell(row, column)
         if isinstance(value, report.ReportCell):
+            if value.tooltip:
+                cell.comment = Comment(value.tooltip, "KANZLER AI")
             value, fmt = value.value if value.kind != "empty" else value.text, value.number_format
         elif isinstance(value, report.ReportNumber):
             cell_data = report.cell_presentation(value)
@@ -165,7 +168,8 @@ class _Sheet:
 
 
 def suggested_filename(result):
-    return "Статистика_" + parse_timestamp(result["calculated_at"]).strftime("%Y-%m-%d_%H-%M-%S") + ".xlsx"
+    calculated_at = result["calculated_at"] if isinstance(result, dict) else result.calculated_at
+    return "Статистика_" + parse_timestamp(calculated_at).strftime("%Y-%m-%d_%H-%M-%S") + ".xlsx"
 
 
 def write_statistics_xlsx(result, stream, *, check=lambda: None, workspace=None, snapshot_diagnostics=None, presentation=None):

@@ -15,10 +15,10 @@ from Application import dataset_statistics as statistics, statistics_cache as ca
 from Application import statistics_export as xlsx, statistics_html_export as html
 from Application.analysis_filter import AnalysisFilter
 from Application.statistics_cohorts_core import CohortAggregates
-from Application.statistics_cohorts_presentation import cohort_sections, COHORT_TITLE, COHORT_LEGACY_TEXT, MATRIX_HEADERS, CHANNEL_TITLE
+from Application.statistics_cohorts_presentation import cohort_sections, cohort_report_sections, COHORT_TITLE, COHORT_LEGACY_TEXT, MATRIX_HEADERS, CHANNEL_TITLE
 from Application.tabs import dataset_statistics_tab as ui
 from tests.test_statistics_cohorts_integration import dataset, calculate, SELECTION, save
-from tests.tabs.test_dataset_statistics_tab import window, app
+from tests.tabs.test_dataset_statistics_tab import LegacyStatisticsTab, window, app
 
 
 __all__ = ['dataset','window','app']
@@ -87,7 +87,7 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
         xlsx.export_statistics(result,target)
         rendered = html.build_statistics_html(result)
     assert result == before and path.read_bytes() == saved
-    sections = cohort_sections(result, compact=True)
+    sections = cohort_report_sections(result)
     page = tab.customer_sections.widget(4)
     labels = [label.text() for label in page.findChildren(QLabel)]
     assert all(title.upper() in labels for title,_,_,_ in sections)
@@ -113,7 +113,7 @@ def test_gui_xlsx_html_show_same_saved_tables_without_calculation_or_sources(dat
         rows = list(book['Клиенты'].values)
         html_blocks = html.presentation(result)[3].blocks
         all_html_rows = [r for block in html_blocks if block['kind']=='table' for r in block['rows']]
-        for title,cards,blocks,notes in cohort_sections(result,compact=True):
+        for title,cards,blocks,notes in cohort_report_sections(result):
             assert any(r[0]==title for r in rows)
             assert html.display_text(title) in rendered
             for label,value in cards:
@@ -154,7 +154,7 @@ def test_legacy_cache_opens_on_startup_without_automatic_recalculation(dataset,w
     monkeypatch.setattr(ui,'load_filter',lambda:SELECTION)
     monkeypatch.setattr(ui,'CACHE_PATH',path)
     monkeypatch.setattr(ui.DatasetStatisticsTab,'start',lambda self:pytest.fail('Automatic recalculation'))
-    tab = ui.DatasetStatisticsTab(window[0])
+    tab = LegacyStatisticsTab(window[0])
     try:
         assert tab.displayed_result is not None and 'cohort_statistics' not in tab.displayed_result
         assert path.read_bytes()==before
@@ -180,7 +180,7 @@ def test_extended_matrices_remain_in_exports_without_duplicating_gui_matrix(data
 
 def test_gui_cohort_rounding_matches_html_without_rounding_stored_values(app,monkeypatch):
     number = 2.675  # Binary float formatting with .2f alone would produce 2.67.
-    monkeypatch.setattr(ui.report,'cohort_sections',lambda result, **kwargs:[(COHORT_TITLE,[],[(['M1, %'],[(number,)])],[])])
+    monkeypatch.setattr(ui.report,'cohort_report_sections',lambda result, **kwargs:[(COHORT_TITLE,[],[(['M1, %'],[(number,)])],[])])
     widget = QWidget()
     try:
         ui._customer_cohorts_page(QVBoxLayout(widget),{})
