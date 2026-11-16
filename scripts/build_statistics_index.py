@@ -22,10 +22,13 @@ def main(argv=None):
     mode.add_argument("--status", action="store_true")
     mode.add_argument("--build", action="store_true")
     parser.add_argument("--unified", action="store_true", help="Use the schema 4 statistics generation")
+    parser.add_argument("--analytics", action="store_true", help="Prepare or check reconciled facts from the published schema 4")
     parser.add_argument("--expected-gib", type=float, help="Pilot-based size budget; double headroom + 20 GiB reserve")
     parser.add_argument("--cancel-file", type=Path, help="Creating this file requests cooperative cancellation")
     args = parser.parse_args(argv)
     inputs = dict(raw_root=args.raw_root, catalog_path=args.catalog, index_dir=args.index_dir)
+    if args.analytics and not args.unified:
+        parser.error("--analytics requires --unified")
     if args.unified:
         from Application.statistics_unified_index import POINTER_NAME, build_unified_index, open_unified_index
     if args.status:
@@ -33,7 +36,11 @@ def main(argv=None):
             state = "MISSING"
             if (args.index_dir / POINTER_NAME).exists():
                 try:
-                    with open_unified_index(**inputs):
+                    with open_unified_index(**inputs) as reader:
+                        if args.analytics:
+                            from Application.statistics_unified_analytics import open_analytics
+                            with open_analytics(args.index_dir.resolve(), reader, lambda: None):
+                                pass
                         state = "READY"
                 except StatisticsIndexError as exc:
                     state = str(exc)
@@ -62,7 +69,11 @@ def main(argv=None):
         options = dict(expected_bytes=int(args.expected_gib * GIB),
                        cancelled=lambda: stopped or bool(args.cancel_file and args.cancel_file.exists()),
                        observer=lambda sample: emit("resources", sample))
-        if args.unified:
+        if args.analytics:
+            from Application.statistics_unified_analytics import prepare_analytics
+            result = prepare_analytics(**inputs, **options)
+            result = {"schema": 1, "generation": result["generation"]}
+        elif args.unified:
             result = build_unified_index(**inputs, **options)
             result = {"schema": 4, "generation": result["binding"]["generation"]}
         else:

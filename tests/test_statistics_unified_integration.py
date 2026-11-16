@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 
@@ -11,6 +11,7 @@ import pytest
 from Application import dataset_statistics as legacy
 from Application import statistics_cache as legacy_cache
 from Application import statistics_unified_cache as cache
+from Application import statistics_unified_analytics as analytics
 from Application import statistics_unified_dto as dto
 from Application import statistics_unified_index as index
 from Application import statistics_unified_service as service
@@ -29,10 +30,12 @@ _SECOND = "2025-11-01T10:00:00Z"
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     result = cohort_tests.source.__wrapped__(tmp_path, monkeypatch)
-    root = result[0]
+    root, catalog, *_ = result
+    catalog.write_text("КодНоменклатуры|Номенклатура|КатегорияНаСайте|ВидНоменклатуры\n"
+                       "000001|A|cat-A|Type A\n000002|B|cat-B|Type B\n", encoding="utf-8-sig")
     folder = root / "cache"
     folder.mkdir(mode=0o700)
-    for module in (cache, service):
+    for module in (cache, service, analytics):
         monkeypatch.setattr(module, "validate_storage_root", lambda path, **kwargs: path_identity(path))
     return result
 
@@ -94,22 +97,22 @@ def test_full_reference_report_with_independent_expected_values(source, monkeypa
     monkeypatch.setattr(service, "_orders", counted)
     result = _report(source)
     assert len(calls) == len(set(calls)) == 8
-    assert result.envelope()["schema_version"] == 11
-    assert result.policy["policy_id"] == "UNIFIED_PURCHASE_V1"
+    assert result.envelope()["schema_version"] == dto.RESULT_SCHEMA
+    assert result.policy["policy_id"] == "UNIFIED_PURCHASE_V2"
     assert result.policy["time_basis_id"] == "ORDER_CREATED_PURCHASE_PROXY_V1"
     assert result.source["reader"] == "REFERENCE" and result.source["projection_schema"] is None
     assert set(result.contexts) == set(result.coverage) == set(dto.CONTEXTS)
-    assert result.orders["purchase_orders"]["known"] == 4
-    assert result.orders["purchase_positions"]["known"] == 5
+    assert result.orders["purchase_orders"]["known"] == 3
+    assert result.orders["purchase_positions"]["known"] == 4
     assert result.orders["unique_orders"]["known"] == 8
     assert result.orders["cancellations"]["orders"]["known"] == 1
     assert result.orders["return_states"]["orders"]["known"] == 1
     assert result.orders["return_states"]["returned_units"]["value"] is None
     assert result.actions["data"]["VIEW_FAVORITE_PURCHASE"]["value"] == 1
     rub = result.money["currencies"]["RUB"]["amounts"]
-    assert Decimal(rub["recognized_purchase"]["known"]) == Decimal("1035.00000000000000000000000001")
-    assert rub["recognized_purchase"]["value"] is None
-    assert {"CP_ALLOCATION_UNKNOWN", "PRICE_INVALID", "STATUS_CONFLICT"} <= set(rub["recognized_purchase"]["reasons"])
+    assert Decimal(rub["recognized_purchase"]["value"]) == Decimal("1500.00000000000000000000000001")
+    assert {"PRICE_INVALID", "STATUS_CONFLICT"} <= set(result.diagnostics["reason_counts"])
+    assert result.diagnostics["counters"]["excluded_conflicting_positions"] == 1
     assert rub["confirmed_refund"]["reasons"] == ["LEDGER_UNAVAILABLE"]
     assert rub["confirmed_refund"]["value"] is rub["net_after_refunds"]["value"] is None
     assert result.money["currencies"]["KZT"]["amounts"]["recognized_purchase"]["value"] == "0"
@@ -119,10 +122,10 @@ def test_full_reference_report_with_independent_expected_values(source, monkeypa
     assert result.diagnostics["counters"]["exact_duplicates"] == 1
     assert result.diagnostics["counters"]["snapshot_conflicts"] == 1
     last = result.rfm["windows"]["LAST_12M"]["currencies"]["RUB"]
-    assert dict((row[0], row[1]) for row in last["segments"])["UNSCORABLE"] == 2
+    assert dict((row[0], row[1]) for row in last["segments"])["UNSCORABLE"] == 1
     october = result.cohorts["months"]["2025-10"]
-    assert october["cohort_size"] == 1 and october["horizons"]["30"]["repeated"] == 1
-    assert october["retention"][1]["active"] == 1
+    assert october["cohort_size"] == 1 and october["horizons"]["30"]["repeated"] == 0
+    assert october["retention"][1]["active"] == 0
     assert result.metadata["detail"]["available"] is False
     assert dto.read_envelope(json.loads(json.dumps(result.envelope()))) == result
 
@@ -146,7 +149,7 @@ def test_serialized_schema4_parity_and_no_raw_fallback(source, monkeypatch):
     assert _business(actual) == _business(expected)
     assert actual.contexts["order_product_slice"]["product_filter_key"]
     assert actual.contexts["rfm_48m"]["product_filter_key"] is None
-    assert actual.orders["purchase_orders"]["known"] == 1
+    assert actual.orders["purchase_orders"]["known"] == 0
     assert actual.rfm["base_buyers"] == 2 and actual.cohorts["quality"]["base_buyers"] == 2
     assert pointer.read_bytes() == saved
 
@@ -158,15 +161,160 @@ def test_cache_roundtrip_uses_pinned_fingerprint_and_skips_raw_spool(source, mon
     first = _report(source, cache_dir=directory, cache_mode=mode)
     stored, = directory.iterdir()
     payload = json.loads(stored.read_text(encoding="utf-8"))
-    assert payload["schema_version" if mode == "latest" else "schema"] == (11 if mode == "latest" else 2)
+    assert payload["schema_version" if mode == "latest" else "schema"] == (dto.RESULT_SCHEMA if mode == "latest" else 2)
 
     def no_spool(*args, **kwargs):
         pytest.fail("A valid REFERENCE cache hit must precede raw projection")
 
     monkeypatch.setattr(service, "reference_order_reader", no_spool)
     assert _report(source, cache_dir=directory, cache_mode=mode) == first
+    assert _report(source, cache_dir=directory, cache_mode=mode,
+                   calculated_at=rfm_tests._NOW + timedelta(seconds=1)) == first
     assert cache.UnifiedCache(directory, mode=mode).load("a"*64) is None
     assert dto.read_envelope(first.envelope()) == first
+
+
+def test_prepared_index_matches_observation_reader_for_new_filters(source, monkeypatch):
+    _write(source)
+    root, catalog, _, _, directory = source
+    paths = dict(raw_root=root, catalog_path=catalog, index_dir=directory)
+    index.build_unified_index(**paths, expected_bytes=1024**2)
+    prepared = analytics.prepare_analytics(**paths, expected_bytes=1024**2)
+    assert prepared["binding"]["schema"] == 1
+    day = datetime(2025, 10, 2, tzinfo=timezone.utc)
+    period = (day, day + timedelta(days=31))
+    cases = (
+        {"selected_end": None},
+        {"selected_items": ["000002"]},
+        {"selected_items": []},
+        {"order_period": period, "buyer_period": period, "customer_period": period,
+         "selected_start": "2025-10-02", "selected_items": ["000001"]},
+        {"order_period": period, "buyer_period": period, "customer_period": period,
+         "selected_start": "2025-10-02", "selected_end": "2025-11-01", "selected_items": ["000001"]},
+    )
+    expected = [_report(source, reader="INDEXED", index_dir=directory, **options) for options in cases]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Prepared requests must reuse reconciliation and pinned profiles")
+
+    monkeypatch.setattr(service, "_orders", forbidden)
+    monkeypatch.setattr(index, "_read_profile_values", forbidden)
+    monkeypatch.setattr(analytics, "prepare_order", forbidden)
+    for options, reference in zip(cases, expected, strict=True):
+        actual = _report(source, reader="INDEXED", index_dir=directory, prepared_index=True, **options)
+        assert actual.envelope() == reference.envelope()
+
+    cached = dict(reader="INDEXED", index_dir=directory, prepared_index=True,
+                  cache_dir=root / "cache", cache_mode="slice")
+    first = _report(source, **cached, **cases[0])
+    second = _report(source, **cached, **cases[1])
+    assert first.metadata["fingerprint"] != second.metadata["fingerprint"]
+    assert _report(source, **cached, **cases[0], cache_only=True,
+                   calculated_at=rfm_tests._NOW + timedelta(seconds=1)) == first
+    assert _report(source, **cached, **cases[1], cache_only=True) == second
+    with pytest.raises(StatisticsIndexError, match="UNIFIED_CACHE_MISS"):
+        _report(source, **cached, **cases[0], cache_only=True,
+                calculated_at=rfm_tests._NOW + timedelta(days=2))
+
+
+def test_prepared_summary_requires_current_rfm_segmentation(source):
+    from contextlib import closing
+    import sqlite3
+    from types import SimpleNamespace
+
+    _write(source)
+    root, catalog, _, _, directory = source
+    paths = dict(raw_root=root, catalog_path=catalog, index_dir=directory)
+    index.build_unified_index(**paths, expected_bytes=1024**2)
+    analytics.prepare_analytics(**paths, expected_bytes=1024**2)
+    with index.open_unified_index(**paths) as reader:
+        with analytics.open_analytics(directory, reader, lambda: None) as prepared:
+            history, = prepared.db.execute("SELECT value FROM metadata WHERE key='history'").fetchone()
+            rfm, cohort = analytics._load(history)
+            expected = prepared.history(rfm.context, cohort.context, None)
+            assert expected == (rfm, cohort)
+
+    with closing(sqlite3.connect(":memory:")) as old_metadata:
+        old_metadata.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
+        old_metadata.execute("INSERT INTO metadata VALUES('history',?)", (history,))
+        assert analytics.PreparedAnalytics.history(SimpleNamespace(db=old_metadata), rfm.context, cohort.context,
+                                                   None) == (None, cohort)
+
+
+def test_analytics_cancel_preserves_published_generation(source):
+    _write(source)
+    root, catalog, _, _, directory = source
+    paths = dict(raw_root=root, catalog_path=catalog, index_dir=directory, expected_bytes=1024**2)
+    index.build_unified_index(**paths)
+    analytics.prepare_analytics(**paths)
+    pointer = (directory / analytics.POINTER).read_bytes()
+    previous = set(directory.iterdir())
+    with pytest.raises(InterruptedError):
+        analytics.prepare_analytics(**paths, cancelled=lambda: True)
+    assert (directory / analytics.POINTER).read_bytes() == pointer
+    assert set(directory.iterdir()) == previous
+
+
+def test_prepared_action_headers_keep_quality_and_full_product_evidence(source):
+    _write(source)
+    root, catalog, data, _, directory = source
+    actions_file = root / data["manual_interactions"]["actions"]["directory"] / "actions_part_001.json"
+    view = DEFAULT_SELECTION.view_action_system_names[0]
+    favorite = DEFAULT_SELECTION.favorite_action_system_names[0]
+    events = [
+        action(favorite, ["000002-a"], "old", stamp=_FIRST),
+        action(view, ["000001-a", "000002-a"], "new", stamp=_FIRST),
+        action(view, ["unknown-a"], "old", stamp=_SECOND),
+        action("OtherAction", ["000001-a"], "inactive", stamp=_SECOND),
+        action(favorite, ["000001-a"], "old", stamp="invalid"),
+    ]
+    actions_file.write_text(encode({"customerActions": events}), encoding="utf-8")
+    paths = dict(raw_root=root, catalog_path=catalog, index_dir=directory, expected_bytes=1024**2)
+    index.build_unified_index(**paths)
+    analytics.prepare_analytics(**paths)
+    period = (datetime(2025, 10, 1, tzinfo=timezone.utc), datetime(2025, 11, 2, tzinfo=timezone.utc))
+    options = dict(reader="INDEXED", index_dir=directory, order_period=period,
+                   customer_period=period, selected_items=("000001",))
+    expected = _report(source, **options)
+    actual = _report(source, prepared_index=True, **options)
+    assert actual.envelope() == expected.envelope()
+
+
+def test_button_workflow_prepares_once_and_reopens_previous_selection(source, monkeypatch):
+    from Application.analysis_filter import AnalysisFilter
+    from scripts import dataset_statistics as worker
+
+    _write(source)
+    root, catalog, _, _, directory = source
+    cache_dir = root / "cache"
+    selection = AnalysisFilter(nomenclature_types=("Type B",))
+    paths = dict(raw_root=root, catalog_path=catalog, index_dir=directory)
+    monkeypatch.setattr(worker, "_private_directory", lambda path, **kwargs: path)
+    phases = []
+    worker._ensure_index(root, catalog, directory, 1024**2, lambda: False, phases.append)
+    assert any("Согласование заказов" in message for message in phases)
+    assert (directory / index.POINTER_NAME).is_file()
+    assert (directory / analytics.POINTER).is_file()
+    phases.clear()
+    worker._ensure_index(root, catalog, directory, 1024**2, lambda: False, phases.append)
+    assert not any("Согласование заказов" in message for message in phases)
+
+    report = _report(source, reader="INDEXED", index_dir=directory, selected_end=None, prepared_index=True,
+                     cache_dir=cache_dir, cache_mode="slice",
+                     product_filter=lambda _, item: selection.matches(item),
+                     remember_selection=(selection.to_dict(), "", ""))
+    saved, request = service.open_latest_statistics(**paths, cache_dir=cache_dir)
+    assert saved == report and request[2] == selection
+    pointer = cache_dir / cache.LATEST_SELECTION_NAME
+    previous = pointer.read_bytes()
+    pointer.write_text("{", encoding="utf-8")
+    with pytest.raises(StatisticsIndexError, match="SAVED_REPORT_STALE"):
+        service.open_latest_statistics(**paths, cache_dir=cache_dir)
+    assert pointer.read_text(encoding="utf-8") == "{"
+    pointer.write_bytes(previous)
+    analytics.prepare_analytics(**paths, expected_bytes=1024**2)
+    with pytest.raises(StatisticsIndexError, match="SAVED_REPORT_STALE"):
+        service.open_latest_statistics(**paths, cache_dir=cache_dir)
 
 
 def test_legacy_schema10_reader_preserves_values_and_does_not_rewrite(source):
@@ -183,7 +331,7 @@ def test_legacy_schema10_reader_preserves_values_and_does_not_rewrite(source):
     assert cache.UnifiedCache(directory).load("a"*64) is None
     assert path.read_bytes() == old
     with pytest.raises(dto.StatisticsResultError, match="INCOMPATIBLE_RESULT_SCHEMA"):
-        dto.read_envelope({"schema_version": 12, "result": decoded})
+        dto.read_envelope({"schema_version": 11, "result": decoded})
 
 
 @pytest.mark.parametrize(("field", "error"), [
@@ -207,7 +355,7 @@ def test_validator_rejects_semantic_corruption_even_with_recomputed_content_dige
     elif field == "contexts":
         raw["contexts"]["rfm_48m"]["identity_space"] = "wrong"
     elif field == "money":
-        raw["money"]["currencies"]["RUB"]["amounts"]["recognized_purchase"]["value"] = "0"
+        raw["money"]["currencies"]["RUB"]["amounts"]["recognized_purchase"]["value"] = "not-a-price"
     elif field == "refund":
         raw["money"]["currencies"]["RUB"]["amounts"]["confirmed_refund"] = dict(
             known="0", value="0", quality="KNOWN", reasons=[])
@@ -217,7 +365,7 @@ def test_validator_rejects_semantic_corruption_even_with_recomputed_content_dige
         if cell["value"] is not None:
             cell["value"] = cell["known"]
     elif field == "cohorts":
-        raw["cohorts"]["months"]["2025-10"]["horizons"]["30"]["confirmed_without_event"] = 1
+        raw["cohorts"]["months"]["2025-10"]["horizons"]["30"]["confirmed_without_event"] = 0
     elif field == "rfm":
         raw["rfm"]["windows"]["LAST_12M"]["currencies"]["RUB"]["segments"][-1][1] = 0
     raw["metadata"]["content_digest"] = dto.content_digest(raw)
@@ -229,7 +377,7 @@ def test_cache_invalidates_source_code_filter_and_rejects_changed_policy(source,
     rows = _write(source)
     directory = source[0] / "cache"
     initial = _report(source, cache_dir=directory)
-    path = directory / "unified-v11-latest.json"
+    path = directory / cache.LATEST_RESULT_NAME
     altered = json.loads(path.read_text(encoding="utf-8"))
     altered["result"]["policy"]["time_basis_id"] = "another-basis"
     path.write_text(json.dumps(altered), encoding="utf-8")
@@ -239,7 +387,7 @@ def test_cache_invalidates_source_code_filter_and_rejects_changed_policy(source,
     rows[-1]["lines"][0]["status"]["ids"]["externalId"] = "F"
     rfm_tests._write_orders(source, rows)
     changed = _report(source, cache_dir=directory)
-    assert changed.orders["purchase_orders"]["known"] == 5
+    assert changed.orders["purchase_orders"]["known"] == 4
     assert changed.metadata["fingerprint"] != initial.metadata["fingerprint"]
     version = "7"*64
     monkeypatch.setattr(service, "algorithm_version", lambda: version)
@@ -272,7 +420,7 @@ def test_error_or_cancel_preserves_previous_cache_and_removes_own_temporary_file
     root, _, _, scratch, _ = source
     directory = root / "cache"
     previous = _report(source, cache_dir=directory)
-    path = directory / "unified-v11-latest.json"
+    path = directory / cache.LATEST_RESULT_NAME
     before = path.read_bytes()
     options = dict(cache_dir=directory, selected_items=["000002"])
     if failure == "calculation_cancel":
@@ -287,7 +435,7 @@ def test_error_or_cancel_preserves_previous_cache_and_removes_own_temporary_file
         monkeypatch.setattr(service.cohorts, "_spool_order", stop)
         options["cancelled"] = lambda: not active
     elif failure == "write_cancel":
-        options["cancelled"] = lambda: any(directory.glob(".unified-v11-*.tmp"))
+        options["cancelled"] = lambda: any(directory.glob(f".unified-v{dto.RESULT_SCHEMA}-*.tmp"))
     else:
         original = cache.os.replace
 
@@ -321,7 +469,7 @@ def test_source_change_after_calculation_leaves_previous_cache(source, monkeypat
     rows = _write(source)
     directory = source[0] / "cache"
     old = _report(source, cache_dir=directory)
-    path = directory / "unified-v11-latest.json"
+    path = directory / cache.LATEST_RESULT_NAME
     before = path.read_bytes()
     assemble = service.assemble_result
 
@@ -343,7 +491,7 @@ def test_cache_rejects_hard_link_before_read_or_replace(source):
     directory = root / "cache"
     original = root / "external-report.json"
     original.write_bytes(b"outside cache")
-    link = directory / "unified-v11-latest.json"
+    link = directory / cache.LATEST_RESULT_NAME
     try:
         link.hardlink_to(original)
     except OSError:

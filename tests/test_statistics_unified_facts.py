@@ -94,20 +94,20 @@ def test_mixed_order_is_one_purchase(second, kind, positions, flag):
     assert fact.has_completed and getattr(fact, flag)
 
 
-def test_cp_preserves_subtotal_and_nominal_without_allocating():
+def test_cp_uses_full_line_price_and_nominal_quantity():
     fact = _fact(_raw(_line("F"), _line("CP", key="line-two", qty=5, price=1000)))
     rub = fact.money[0]
     assert fact.purchase.nominal_units.value == 6
     assert fact.purchase.fulfilled_units.value is None
     assert rub.partial_nominal.value == 1000
-    assert rub.known_purchase_subtotal.value == 100
-    assert rub.recognized_purchase == Measured(None, Quality.UNKNOWN, ("CP_ALLOCATION_UNKNOWN",))
-    assert (rub.valued_purchase_positions, rub.unvalued_purchase_positions) == (1, 1)
+    assert rub.known_purchase_subtotal.value == 1100
+    assert rub.recognized_purchase == Measured(Decimal(1100), Quality.KNOWN)
+    assert (rub.valued_purchase_positions, rub.unvalued_purchase_positions) == (2, 0)
     cp_return = _fact(_raw(_line("CP"), _line("Return", key="line-two")))
     assert cp_return.current_kind is OrderKind.MIXED
     assert cp_return.has_partial and cp_return.has_returned
     assert cp_return.purchase.positions.value == 1
-    assert cp_return.money[0].known_purchase_subtotal.value is None
+    assert cp_return.money[0].known_purchase_subtotal.value == 100
     assert cp_return.money[0].returned_nominal.value == 100
 
 
@@ -164,15 +164,15 @@ def test_two_currencies_are_separate_and_unknown_currency_preserves_subtotal():
     unknown = _fact(_raw(first, _line("F", key="line-two", namespace="unrecognized", price=200)))
     assert unknown.order_currency.quality is Quality.UNKNOWN
     assert unknown.money[0].known_purchase_subtotal.value == 150
-    assert unknown.money[0].recognized_purchase.value is None
+    assert unknown.money[0].recognized_purchase.value == 150
     assert unknown.money[1].recognized_purchase.value is None
 
 
 def test_conflicting_explicit_currency_cannot_be_counted():
     fact = _fact(_raw(_line("F"), currency="KZT"))
-    assert fact.purchase.observed.value is True
-    assert fact.order_currency.quality is Quality.CONFLICT
-    assert all(entry.recognized_purchase.value is None for entry in fact.money)
+    assert fact.purchase.observed.value is False
+    assert "CURRENCY_CONFLICT" in fact.diagnostics
+    assert all(entry.valued_purchase_positions == 0 for entry in fact.money)
 
 
 @pytest.mark.parametrize("code,reason", [("future", "UNKNOWN_CODE"), (_MISSING, "MISSING_CODE"), (False, "INVALID_CODE")])
@@ -214,40 +214,39 @@ def test_exact_duplicate_business_equivalent_and_permutation():
         assert reconcile_order(ordered, order_sort_rank=4) == expected
 
 
-def test_f_return_conflict_retains_historical_purchase_and_known_price():
+def test_f_return_conflict_retains_provenance_but_excludes_purchase():
     observations = _observations(_raw(_line("F")), _raw(_line("Return", price=120)))
     fact = reconcile_order(observations, order_sort_rank=1)
     assert reconcile_order(reversed(observations), order_sort_rank=1) == fact
     assert fact.current_kind is OrderKind.CONFLICT
-    assert fact.purchase.observed.value is True
-    assert fact.purchase.positions.value == 1
-    assert fact.money[0].known_purchase_subtotal.value == 100
-    assert fact.money[0].recognized_purchase.quality is Quality.CONFLICT
+    assert fact.purchase.observed.value is False
+    assert fact.purchase.positions.value == 0
+    assert fact.purchase.excluded_positions == 1
+    assert fact.money[0].valued_purchase_positions == 0
+    assert {"STATUS_CONFLICT", "PRICE_CONFLICT"} <= set(fact.diagnostics)
     assert fact.money[0].returned_nominal.value is None
     assert fact.money[0].confirmed_refund.value is None
     assert fact.snapshots.conflicting_snapshots == 1
 
 
-def test_cp_f_for_the_same_line_counts_once_and_never_values_cp():
+def test_cp_f_for_the_same_line_counts_once_at_full_price():
     fact = _fact(_raw(_line("CP")), _raw(_line("F")))
     assert fact.purchase.observed.value is True
     assert fact.purchase.positions.value == 1
-    assert fact.current_kind is OrderKind.CONFLICT
-    assert fact.money[0].known_purchase_subtotal.value is None
-    assert "CP_ALLOCATION_UNKNOWN" in fact.money[0].recognized_purchase.reasons
+    assert fact.current_kind is OrderKind.COMPLETED_ONLY
+    assert fact.money[0].recognized_purchase.value == 100
 
 
 def test_price_and_quantity_conflicts_are_independent_of_status():
     fact = _fact(_raw(_line("F", qty=1)), _raw(_line("F", qty=2)))
     assert fact.current_kind is OrderKind.COMPLETED_ONLY
-    assert fact.purchase.positions.value == 1
-    assert fact.purchase.nominal_units.reasons == ("QUANTITY_CONFLICT",)
-    assert fact.money[0].known_purchase_subtotal.value == 100
-    assert fact.money[0].recognized_purchase.quality is Quality.CONFLICT
+    assert fact.purchase.positions.value == 0
+    assert "QUANTITY_CONFLICT" in fact.diagnostics
+    assert fact.money[0].valued_purchase_positions == 0
     price = _fact(_raw(_line("F")), _raw(_line("F", price=120)))
     assert price.current_kind is OrderKind.COMPLETED_ONLY
-    assert price.money[0].recognized_purchase.reasons == ("PRICE_CONFLICT",)
-    assert price.money[0].known_purchase_subtotal.value is None
+    assert "PRICE_CONFLICT" in price.diagnostics
+    assert price.purchase.known_positions == price.money[0].valued_purchase_positions == 0
 
 
 def test_changed_basket_keeps_only_unambiguous_common_line():
@@ -258,7 +257,7 @@ def test_changed_basket_keeps_only_unambiguous_common_line():
     assert fact.purchase.known_positions == 1 and fact.purchase.positions.value is None
     assert fact.purchase.nominal_units.value is None
     assert fact.money[0].known_purchase_subtotal.value == 100
-    assert fact.money[0].recognized_purchase.value is None
+    assert fact.money[0].recognized_purchase.value == 100
     assert "LINE_SET_CONFLICT" in fact.diagnostics
 
 
@@ -273,9 +272,13 @@ def test_local_and_duplicate_line_ids_do_not_invent_cross_snapshot_links():
     assert conflict.money[0].known_purchase_subtotal.value is None
     dup = _fact(_raw(_line("F"), _line("F")))
     assert dup.purchase.observed.value is True
-    assert dup.purchase.positions.quality is Quality.CONFLICT
-    assert dup.purchase.known_positions == 0
-    assert "LINE_ID_DUPLICATE" in dup.diagnostics
+    assert dup.purchase.positions.quality is Quality.KNOWN
+    assert dup.purchase.known_positions == 1
+    assert "LINE_ID_DUPLICATE" not in dup.diagnostics
+    ambiguous = _fact(_raw(_line("F"), _line("F", price=200)))
+    assert ambiguous.purchase.excluded_positions == 1
+    assert ambiguous.purchase.known_positions == 0
+    assert "LINE_ID_DUPLICATE" in ambiguous.diagnostics
 
 
 def test_proxy_dates_are_utc_and_execution_is_unknown():
@@ -322,12 +325,12 @@ def test_product_filter_keeps_whole_order_state_and_uses_matching_positive_evide
     versions = (_raw(_line("F", item="A")), _raw(_line("Return", item="B")))
     assert _fact(*versions, predicate=lambda item: item == "B").purchase.observed.value is False
     known = _fact(*versions, predicate=lambda item: item == "A")
-    assert known.purchase.observed.value is True
-    assert known.purchase.positions.value is None
+    assert known.purchase.observed.value is False
+    assert known.purchase.known_positions == 0
     assert "PRODUCT_CONFLICT" in known.diagnostics
-    assert known.money[0].recognized_purchase.value is None
+    assert known.money[0].valued_purchase_positions == 0
     all_products = _fact(*versions)
-    assert all_products.purchase.positions.value == 1
+    assert all_products.purchase.positions.value == 0
 
 
 def test_unresolved_product_does_not_create_scoped_zero_or_remove_order_evidence():
@@ -362,8 +365,8 @@ def test_invalid_groups_and_cancel_fail_safely():
 
 def test_purchase_code_changes_can_leave_full_recognized_amount_known():
     fact = _fact(_raw(_line("F")), _raw(_line("sold")))
-    assert fact.current_kind is OrderKind.CONFLICT
-    assert fact.resolved_lines[0].status_code.reasons == ("STATUS_CONFLICT",)
+    assert fact.current_kind is OrderKind.COMPLETED_ONLY
+    assert fact.resolved_lines[0].status_code.value == "F"
     assert fact.purchase.positions.value == 1
     assert fact.money[0].recognized_purchase == Measured(Decimal(100), Quality.KNOWN)
 
@@ -374,7 +377,7 @@ def test_nonpositive_snapshot_provenance_survives_dedup():
     observations = _observations(sold, returned, returned)
     fact = reconcile_order(reversed(observations), order_sort_rank=1)
     assert fact.observation_groups == (((0, 1, 0),), ((0, 1, 1), (0, 1, 2)))
-    assert fact.purchase.evidence_sources == ((0, 1, 0),)
+    assert fact.purchase.evidence_sources == ()
     assert fact.snapshots == SnapshotCounts(3, 3, 1, 0, 1)
 
 
@@ -393,4 +396,5 @@ def test_unqualified_quantity_keeps_the_other_sale_as_a_subtotal():
     assert fact.purchase.positions.value == 1
     assert fact.money[0].partial_nominal.value == 900
     assert fact.money[0].known_purchase_subtotal.value == 100
-    assert fact.money[0].recognized_purchase.reasons == ("INVALID_QUANTITY",)
+    assert fact.money[0].recognized_purchase.value == 100
+    assert "INVALID_QUANTITY" in fact.diagnostics

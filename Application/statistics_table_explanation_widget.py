@@ -88,7 +88,7 @@ class StatisticsTableExplanation(QFrame):
     def _set_expanded(self, expanded):
         self.content.setVisible(expanded)
         self.toggle.update()
-        state = "развёрнуто" if expanded else "свёрнуто"
+        state = "развернуто" if expanded else "свернуто"
         self.toggle.setAccessibleName("Как читать таблицу — " + state)
         self.toggle.setAccessibleDescription("Пояснение к таблице. Пробел: раскрыть или свернуть.")
         self.content.updateGeometry()

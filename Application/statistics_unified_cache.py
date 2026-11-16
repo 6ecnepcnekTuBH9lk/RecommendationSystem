@@ -1,4 +1,4 @@
-"""Private versioned cache for schema 11; latest and filter-keyed slices."""
+"""Private versioned cache for latest and filter-keyed reports."""
 
 from contextlib import suppress
 import json
@@ -21,7 +21,10 @@ def _safe_file(path):
     return info
 
 
-LATEST_RESULT_NAME = "unified-v11-latest.json"
+_NAMESPACE = f"unified-v{RESULT_SCHEMA}"
+LATEST_RESULT_NAME = f"{_NAMESPACE}-latest.json"
+LATEST_SELECTION_NAME = f"{_NAMESPACE}-last-selection.json"
+_SLICE_LIMIT = 16
 
 def _identity(info):
     return info.st_dev, info.st_ino
@@ -42,14 +45,14 @@ class UnifiedCache:
     def _path(self, fingerprint):
         if not (fingerprint is None and self.mode == "latest") and not _digest(fingerprint):
             raise ValueError("Invalid unified cache fingerprint")
-        name = LATEST_RESULT_NAME if self.mode == "latest" else f"unified-v11-slice-{fingerprint}.json"
+        name = LATEST_RESULT_NAME if self.mode == "latest" else f"{_NAMESPACE}-slice-{fingerprint}.json"
         return self.directory / name
 
     def _verify(self, *paths):
         if validate_storage_root(self.directory, children=paths) != self.root_id:
             raise StatisticsIndexError("CACHE_ROOT_CHANGED")
 
-    def load(self, fingerprint, *, check=lambda: None):
+    def load(self, fingerprint, *, check=lambda: None, semantic=False):
         path = self._path(fingerprint)
         self._verify()
         check()
@@ -89,7 +92,7 @@ class UnifiedCache:
             result = read_envelope(saved, check=check)
         except StatisticsResultError:
             return None
-        return result if isinstance(result, UnifiedResult) and (fingerprint is None or
+        return result if isinstance(result, UnifiedResult) and (semantic or fingerprint is None or
                          result.metadata["fingerprint"] == fingerprint) else None
 
     def latest_candidate(self, *, check=lambda: None):
@@ -98,9 +101,53 @@ class UnifiedCache:
             raise ValueError("Only the latest cache has a single candidate")
         return self.load(None, check=check)
 
-    def save(self, result, *, check=lambda: None):
+    def last_selection(self):
+        path = self.directory / LATEST_SELECTION_NAME
+        if not os.path.lexists(path):
+            return None
+        self._verify(path)
+        before = _stamp(_safe_file(path))
+        if before[2] > 64 * 1024:
+            return {}
+        try:
+            with path.open(encoding="utf-8") as stream:
+                value = json.load(stream, object_pairs_hook=_unique_object)
+        except (OSError, ValueError):
+            return {}
+        if _stamp(_safe_file(path)) != before:
+            raise StatisticsIndexError("CACHE_FILE_CHANGED")
+        return value if isinstance(value, dict) else {}
+
+    def publish_selection(self, *, key, selection, fingerprint, analytics_generation, check):
+        from Application.mindbox.canonical_storage import atomic_json
+        if self.mode != "slice" or not _digest(key) or not _digest(fingerprint):
+            raise ValueError("Invalid latest report binding")
+        path = self.directory / LATEST_SELECTION_NAME
+        self._verify(self._path(key))
+        if os.path.lexists(path):
+            _safe_file(path)
+            self._verify(path)
+        check()
+        atomic_json(path, dict(key=key, selection=selection, fingerprint=fingerprint,
+                               analytics_generation=analytics_generation))
+        # Keep a bounded history. Only remove files in our exact slice namespace.
+        with suppress(OSError, StatisticsIndexError):
+            active = self._path(key)
+            candidates = []
+            for item in self.directory.glob(f"{_NAMESPACE}-slice-*.json"):
+                if item != active and _digest(item.stem.removeprefix(f"{_NAMESPACE}-slice-")):
+                    with suppress(OSError, StatisticsIndexError):
+                        candidates.append((_stamp(_safe_file(item)), item))
+            candidates.sort(key=lambda entry: (entry[0][3], entry[1].name), reverse=True)
+            for stamp, item in candidates[_SLICE_LIMIT - 1:]:
+                with suppress(OSError, StatisticsIndexError):
+                    self._verify(item)
+                    if _stamp(_safe_file(item)) == stamp:
+                        item.unlink()
+
+    def save(self, result, *, check=lambda: None, key=None):
         validate_unified(result, check=check)
-        fingerprint = result.metadata["fingerprint"]
+        fingerprint = key if key is not None else result.metadata["fingerprint"]
         path = self._path(fingerprint)
         self._verify()
         previous = _stamp(_safe_file(path)) if os.path.lexists(path) else None
@@ -110,7 +157,7 @@ class UnifiedCache:
         if self.mode == "slice":
             saved = {"schema": SLICE_SCHEMA, "fingerprint": fingerprint, "report": saved}
         check()
-        fd, temp = tempfile.mkstemp(prefix=".unified-v11-", suffix=".tmp", dir=self.directory)
+        fd, temp = tempfile.mkstemp(prefix=f".{_NAMESPACE}-", suffix=".tmp", dir=self.directory)
         temp = Path(temp)
         identity = None
         try:

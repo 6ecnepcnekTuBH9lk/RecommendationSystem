@@ -206,7 +206,7 @@ def customer_scope_context(result):
         return 'Новый охват не рассчитан в сохранённом результате. Пересчёт при открытии или экспорте не выполняется.'
     period = AnalysisFilter(**scope['period'])
     text = ('Период событий: ' + period.summary().removeprefix('Отбор → период ') + '.' if period.start_date else
-            'Период событий: вся доступная наблюдаемая история; покрытие источников приведено в технической информации.')
+            'Период событий: вся доступная наблюдаемая история.')
     if not all(scope[k] for k in ('profiles_available', 'actions_available', 'orders_available')):
         text += ' Не все источники доступны: общая база B и её доли неизвестны. Наблюдаемые ID событий показывают доступную часть.'
     return text

@@ -199,7 +199,7 @@ def test_saved_gui_html_zip_tables_order_full_rows_and_no_source_access(window,s
             if unit=='KZT':assert isinstance(preceding,QWidget)  # Empty saved currency placeholder.
             elif unit:assert isinstance(preceding,charts.StatisticsChart)
             else:assert isinstance(preceding,QLabel) and preceding.text()==DIRECT_CATEGORY_NOTE
-        assert len(book.sheetnames)==5
+        assert len(book.sheetnames)==4
         assert all('Как читать таблицу' not in str(c.value) for sheet in book for row in sheet for c in row)
         assert result==cache.load_result(saved) and saved.read_bytes()==payload and sample_result==before
     finally:book.close()

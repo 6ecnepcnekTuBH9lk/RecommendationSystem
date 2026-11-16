@@ -85,6 +85,6 @@ def test_saved_channels_kpis_and_three_tables_agree_without_sources_or_calculati
             assert any(widget.item(r,0).text()=='Не указан' for widget in actual[:2] for r in range(widget.rowCount()))
         assert book.sheetnames==list(report.PAGE_LABELS)
         assert result==before and path.read_bytes()==original
-        assert tab.sections.count()==tab.customer_sections.count()==5
+        assert tab.sections.count()==4 and tab.customer_sections.count()==5
     finally:
         book.close()

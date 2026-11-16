@@ -84,6 +84,6 @@ def test_saved_category_tables_coverage_and_multilabel_notes_agree_without_sourc
             assert any(widget.item(r,0).text()=='Категория не определена' for widget in actual[:2] for r in range(widget.rowCount()))
         assert result==before and path.read_bytes()==original
         assert book.sheetnames==list(report.PAGE_LABELS)
-        assert tab.sections.count()==tab.customer_sections.count()==5
+        assert tab.sections.count()==4 and tab.customer_sections.count()==5
     finally:
         book.close()

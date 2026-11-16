@@ -1,4 +1,4 @@
-"""Status and quantity rules for the isolated UNIFIED_PURCHASE_V1 core."""
+"""Mindbox purchase policy and the stable normalization rules for observations."""
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -8,6 +8,7 @@ from typing import Generic, TypeVar
 from unicodedata import category
 
 UNIFIED_PURCHASE_V1 = "UNIFIED_PURCHASE_V1"
+UNIFIED_PURCHASE_V2 = "UNIFIED_PURCHASE_V2"
 MINDBOX_STATUS_CATALOG_V1 = "MINDBOX_STATUS_CATALOG_V1"
 ORDER_CREATED_PURCHASE_PROXY_V1 = "ORDER_CREATED_PURCHASE_PROXY_V1"
 T = TypeVar("T")
@@ -40,11 +41,11 @@ class Measured(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class PurchasePolicy:
-    policy_id: str = UNIFIED_PURCHASE_V1
+    policy_id: str = UNIFIED_PURCHASE_V2
     status_catalog_id: str = MINDBOX_STATUS_CATALOG_V1
     time_basis_id: str = ORDER_CREATED_PURCHASE_PROXY_V1
-    snapshot_policy_id: str = "ORDER_OBSERVATION_RECONCILIATION_V1"
-    money_policy_id: str = "OBSERVED_LINE_VALUE_V1"
+    snapshot_policy_id: str = "ORDER_OBSERVATION_RECONCILIATION_V2"
+    money_policy_id: str = "ACCEPTED_LINE_VALUE_V2"
 
 
 class StatusGroup(str, Enum):

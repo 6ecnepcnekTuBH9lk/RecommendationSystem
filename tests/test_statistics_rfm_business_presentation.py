@@ -67,7 +67,7 @@ def test_saved_business_segments_three_windows_two_currencies_and_actions_match_
     labels=[label.text() for label in page.findChildren(QLabel)]
     assert all(s[0].upper() in labels for s in sections[5:7])
     assert len(page.findChildren(StatisticsChart))==1
-    assert tab.sections.count()==tab.customer_sections.count()==5
+    assert tab.sections.count()==4 and tab.customer_sections.count()==5
     headers,rows=sections[5][2][0]
     widgets=[table for table in page.findChildren(QTableWidget)
              if table.horizontalHeaderItem(0).text()==headers[0] and table.columnCount()==len(headers)

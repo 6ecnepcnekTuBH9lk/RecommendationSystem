@@ -49,7 +49,7 @@ def test_purchase_evidence_controls_entry_into_cohort(source, status, buyers):
     result = _reference(source, [order])
     assert result.identified_order_customers == 1
     assert result.behavior["base_buyers"] == buyers
-    assert result.context.policy.policy_id == "UNIFIED_PURCHASE_V1"
+    assert result.context.policy.policy_id == "UNIFIED_PURCHASE_V2"
     assert result.context.policy.time_basis_id == "ORDER_CREATED_PURCHASE_PROXY_V1"
     if buyers:
         assert result.customer.first.value.created_at == datetime(2024, 2, 1, 1, 10, tzinfo=timezone.utc)
@@ -70,16 +70,14 @@ def test_changed_and_identical_snapshots_preserve_one_purchase(source, transitio
     a = _reference(source, [first, first, changed])
     b = _reference(source, [changed, first, first])
     assert a == replace(b, context=a.context)
-    assert a.behavior["base_buyers"] == 1
+    assert a.behavior["base_buyers"] == int(transition[-1] == "F")
     assert a.behavior["summary"]["observed_repeat_buyers"] == 0
     assert a.customer.second.value is None
-    amount = a.monetary["cohorts"]["2024-01"]["total"]["currencies"]["RUB"]["recognized"]
-    assert amount.total.value is None
-    assert "STATUS_CONFLICT" in amount.total.reasons
-    if transition[0] == "F":
-        assert amount.known == 40
+    if transition[-1] == "F":
+        amount = a.monetary["cohorts"]["2024-01"]["total"]["currencies"]["RUB"]["recognized"]
+        assert amount.total.value == amount.known == 40
     else:
-        assert "CP_ALLOCATION_UNKNOWN" in amount.total.reasons
+        assert not a.monetary["cohorts"]
 
 
 @pytest.mark.parametrize("distance", [30, 60, 90, 180, 365, 366])
@@ -87,9 +85,7 @@ def test_inclusive_repeat_horizons_and_calendar_retention(source, distance):
     first = datetime(2024, 1, 1, tzinfo=timezone.utc)
     last = first + timedelta(days=distance, hours=23)
     second = _order("second", last.isoformat(), "sold")
-    later_return = deepcopy(second)
-    later_return["lines"][0]["status"]["ids"]["externalId"] = "Return"
-    result = _reference(source, [_order("first", first.isoformat(), "CP"), second, later_return])
+    result = _reference(source, [_order("first", first.isoformat(), "CP"), second, deepcopy(second)])
     row = result.behavior["cohorts"]["2024-01"]
     assert row["second_purchase_days"]["distribution"] == [[distance, 1]]
     for horizon in (30, 60, 90, 180, 365):
@@ -213,16 +209,17 @@ def test_decimal_money_separates_cp_nominal_unknown_and_real_zero(source):
     result = _reference(source, [paid, cp, cp, kzt, free])
     rows = result.monetary["cohorts"]["2024-01"]
     total = rows["total"]
-    assert (total["orders"], total["unvalued_orders"], total["fully_valued_buyers"], total["unvalued_buyers"]) == (4, 1, 2, 1)
+    assert (total["orders"], total["unvalued_orders"], total["fully_valued_buyers"], total["unvalued_buyers"]) == (4, 0, 3, 0)
     rub, kzt = (total["currencies"][currency] for currency in ("RUB", "KZT"))
-    assert rub["recognized"].known == amount and rub["recognized"].total.quality is Quality.UNKNOWN
-    assert rub["recognized"].total.reasons == ("CP_ALLOCATION_UNKNOWN",)
+    assert rub["recognized"].known == rub["recognized"].total.value == Decimal("12000.00000000000000000000000001")
     assert rub["partial_nominal"].total.value == 4000
-    assert rub["valued_orders"] == 2 and rub["mean_per_valued_buyer"] == 0
+    assert rub["valued_orders"] == 3 and rub["fully_valued_buyers"] == 2
+    assert rub["mean_per_valued_buyer"] == Decimal("6000.000000000000000000000000005")
     assert kzt["recognized"].total.value == 3000
+    assert kzt["fully_valued_buyers"] == 1 and kzt["mean_per_valued_buyer"] == 3000
     assert rows["first"]["currencies"]["RUB"]["recognized"].total.value == amount
     h30 = result.monetary["horizons"]["30"]
-    assert h30["unvalued_orders"] == h30["buyers"] == 1
+    assert h30["unvalued_orders"] == 0 and h30["buyers"] == 1
     assert h30["currencies"]["RUB"]["partial_nominal"].total.value == 4000
     result = _reference(source, [free])
     assert result.monetary["cohorts"]["2024-01"]["total"]["currencies"]["RUB"]["recognized"].total.value == 0

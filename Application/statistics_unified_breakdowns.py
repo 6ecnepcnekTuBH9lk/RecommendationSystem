@@ -2,7 +2,7 @@
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from decimal import Decimal, localcontext
+from decimal import Context, Decimal, Inexact, InvalidOperation, MAX_EMAX, MIN_EMIN, Overflow, localcontext
 import json
 
 from Application.order_statistics import BASKET_LABELS, CURRENCIES, histogram_median
@@ -12,6 +12,16 @@ from Application.statistics_unified_policy import EvidenceQuality as Quality
 
 _ZERO = Decimal(0)
 _NO_BASE = (Quality.UNKNOWN, "NO_FULLY_VALUED_BASE")
+_EXACT_ADDITION = Context(prec=48, Emin=MIN_EMIN, Emax=MAX_EMAX, traps=[Inexact, InvalidOperation, Overflow])
+
+
+def add_exact_decimal(left, right):
+    """Use the native Decimal operations when the addition fits exactly."""
+    try:
+        value = _EXACT_ADDITION.add(left, right)
+    except Inexact:
+        return _sum([left, right])
+    return _EXACT_ADDITION.normalize(value) if value else _ZERO
 
 
 def _amount(values):
@@ -43,19 +53,19 @@ class _Valuation:
     def add(self, fact, money):
         self.orders += 1
         self.lines += fact.purchase.known_positions
-        self.units = _amount((self.units, fact.purchase.known_nominal_units))
+        self.units = add_exact_decimal(self.units, fact.purchase.known_nominal_units)
         self.issues.update(_issues(money.recognized_purchase))
-        if money.known_purchase_subtotal.value is not None:
-            self.known_subtotal = _amount((self.known_subtotal or _ZERO, money.known_purchase_subtotal.value))
-        if money.recognized_purchase.value is not None:
+        if money.valued_purchase_positions:
+            self.known_subtotal = add_exact_decimal(self.known_subtotal or _ZERO, money.known_purchase_subtotal.value)
             self.valued += 1
-            self.valued_amount = _amount((self.valued_amount, money.recognized_purchase.value))
+            self.valued_amount = add_exact_decimal(self.valued_amount, money.recognized_purchase.value)
 
     def result(self, issues):
         issues = self.issues | issues
         return dict(orders=self.orders, positions=self.lines, nominal_units=self.units, valued_orders=self.valued,
                     unvalued_orders=self.orders-self.valued,
-                    recognized=_result(self.known_subtotal or _ZERO, issues), known_subtotal=self.known_subtotal,
+                    recognized=_result(self.known_subtotal, ()) if self.known_subtotal is not None
+                    else _result(None, issues or {_NO_BASE}), known_subtotal=self.known_subtotal,
                     mean_valued_order=_result(_mean(self.valued_amount, self.valued), () if self.valued else (_NO_BASE,)))
 
 
@@ -80,14 +90,10 @@ class OrderBreakdowns:
             return
         self.orders += 1
         purchase = fact.purchase
-        if purchase.positions.value is not None and purchase.positions.value > 0:
-            self.lines[purchase.positions.value] += 1
-        else:
-            self.basket_issues.update(_issues(purchase.positions))
-        if purchase.nominal_units.value is not None:
-            self.units[purchase.nominal_units.value] += 1
-        else:
-            self.basket_issues.update(_issues(purchase.nominal_units))
+        self.lines[purchase.known_positions] += 1
+        self.units[purchase.known_nominal_units] += 1
+        self.basket_issues.update(_issues(purchase.positions))
+        self.basket_issues.update(_issues(purchase.nominal_units))
         attributes = dict(fact.order_attributes)
         for attribute, counter in (("ordering_method", self.methods), ("delivery_type", self.delivery_types),
                                ("payment_types", self.payment_types)):
@@ -99,27 +105,27 @@ class OrderBreakdowns:
                 counter.update({_label(value) for value in metric.value} or {"Не указано"})
             else:
                 counter[_label(metric.value)] += 1
-        currency = fact.order_currency.value
-        if currency not in CURRENCIES:
-            return
-        money = next(row for row in fact.money if row.currency == currency)
         month = fact.order_created_at.value.strftime("%Y-%m")
-        self.months[month, currency].add(fact, money)
-        self.currencies[currency].add(fact, money)
         channel, name = fact.channel.value or (None, None)
-        self.store_names[channel][_label(name)] += 1
-        key = json.dumps((currency, channel), ensure_ascii=False)
-        add_member("order_store", fact.customer_key.value, key)
-        self.stores[currency, channel].add(fact, money)
         delivery = attributes["delivery_cost"]
-        self.delivery_issues[currency].update(_issues(delivery))
-        if delivery.value is not None:
-            if whole_currency == currency:
-                self.delivery[currency][delivery.value] += 1
-            else:
-                self.delivery_issues[currency].add((Quality.UNKNOWN, "DELIVERY_CURRENCY_UNVERIFIED"))
-        if money.recognized_purchase.value is not None:
-            self.checks[currency][money.recognized_purchase.value] += 1
+        for money in fact.money:
+            currency = money.currency
+            if fact.order_currency.value != currency and not money.valued_purchase_positions:
+                continue
+            self.months[month, currency].add(fact, money)
+            self.currencies[currency].add(fact, money)
+            self.store_names[channel][_label(name)] += 1
+            key = json.dumps((currency, channel), ensure_ascii=False)
+            add_member("order_store", fact.customer_key.value, key)
+            self.stores[currency, channel].add(fact, money)
+            self.delivery_issues[currency].update(_issues(delivery))
+            if delivery.value is not None:
+                if whole_currency == currency:
+                    self.delivery[currency][delivery.value] += 1
+                else:
+                    self.delivery_issues[currency].add((Quality.UNKNOWN, "DELIVERY_CURRENCY_UNVERIFIED"))
+            if money.valued_purchase_positions:
+                self.checks[currency][money.recognized_purchase.value] += 1
 
     def result(self, issues, members):
         denominator = sum(self.lines.values())
@@ -179,7 +185,7 @@ def product_breakdowns(rows, metadata, views, favorites):
             bucket = bins[key]
             for index, value in enumerate((1, row.views, row.favorites, row.purchase_positions.known)):
                 bucket[index] += value
-            bucket[4] = _amount((bucket[4], row.nominal_units.known or _ZERO))
+            bucket[4] = add_exact_decimal(bucket[4], row.nominal_units.known or _ZERO)
     return dict(viewers=viewers, favorite_users=saved,
                 groups={field: [(label, *counts) for label, counts in sorted(bins.items())]
                         for field, bins in groups.items()})
@@ -192,26 +198,25 @@ class BuyerBreakdowns:
         self.db, self.check = db, check
         db.executescript("""
             CREATE TABLE buyer_breakdown(customer TEXT, stamp TEXT, rank INTEGER, lines INTEGER, units TEXT,
-                currency TEXT, amount TEXT, PRIMARY KEY(customer,stamp,rank)) WITHOUT ROWID;
+                rub TEXT, kzt TEXT, PRIMARY KEY(customer,stamp,rank)) WITHOUT ROWID;
             CREATE TABLE buyer_breakdown_profile(customer TEXT PRIMARY KEY, gender TEXT, age INTEGER) WITHOUT ROWID;
             CREATE TABLE buyer_breakdown_seen(customer TEXT PRIMARY KEY) WITHOUT ROWID;
         """)
         self.width = [1, 0]
         self.orders = 0
 
-    def add(self, fact, valued_currency):
-        amount = next((row.recognized_purchase.value for row in fact.money if row.currency == valued_currency), None)
+    def add(self, fact):
+        amounts = {row.currency: format(row.recognized_purchase.value, "f")
+                   for row in fact.money if row.valued_purchase_positions}
         units = format(fact.purchase.known_nominal_units, "f")
-        amount = format(amount, "f") if amount is not None else None
-        for value in (units, amount):
-            if value is not None:
-                integral, _, fraction = value.partition(".")
-                self.width[0] = max(self.width[0], len(integral))
-                self.width[1] = max(self.width[1], len(fraction))
+        for value in (units, *amounts.values()):
+            integral, _, fraction = value.partition(".")
+            self.width[0] = max(self.width[0], len(integral))
+            self.width[1] = max(self.width[1], len(fraction))
         self.orders += 1
         self.db.execute("INSERT INTO buyer_breakdown VALUES(?,?,?,?,?,?,?)",
                         (fact.customer_key.value, fact.order_created_at.value.isoformat(timespec="microseconds"),
-                         fact.order_sort_rank, fact.purchase.known_positions, units, valued_currency, amount))
+                         fact.order_sort_rank, fact.purchase.known_positions, units, amounts.get("RUB"), amounts.get("KZT")))
 
     def demographics(self, profiles, *, available, restricted, as_of):
         from Application.customer_demographics import AGE_LABELS, age_group, calendar_age
@@ -246,45 +251,74 @@ class BuyerBreakdowns:
         from types import SimpleNamespace
         from Application.statistics_buyer_aggregates import _Purchases
 
-        query = """SELECT b.customer,b.stamp,b.lines,b.units,b.currency,b.amount,p.gender,p.age
+        query = """SELECT b.customer,b.stamp,b.lines,b.units,b.rub,b.kzt,p.gender,p.age
                    FROM buyer_breakdown b LEFT JOIN buyer_breakdown_profile p USING(customer)
                    ORDER BY b.customer,b.stamp,b.rank"""
         with closing(self.db.execute(query)) as rows:
             for _, group in groupby(rows, key=lambda row: row[0]):
                 state, days, codes = _Purchases(), [], array("I")
                 profile = None
-                for _, stamp, lines, units, currency, amount, gender, age in group:
+                for _, stamp, lines, units, rub, kzt, gender, age in group:
                     self.check()
                     day = date.fromisoformat(stamp[:10])
                     days.append(day.toordinal())
                     profile = (gender, age) if gender is not None else None
-                    price = Decimal(amount) if amount is not None else None
-                    state.add(day.year, SimpleNamespace(line_count=lines, units=Decimal(units), currency=currency,
-                                                       amount=price, monetary_available=price is not None))
-                    if amounts is not None and price is not None:
-                        amounts.budget.reserve(8)
-                        codes.append(amounts.code(currency, price))
+                    prices = [(unit, Decimal(amount)) for unit, amount in (("RUB", rub), ("KZT", kzt)) if amount is not None]
+                    unit, price = prices[0] if prices else (None, None)
+                    state.add(day.year, SimpleNamespace(line_count=lines, units=Decimal(units), currency=unit,
+                                                       amount=price, monetary_available=bool(prices)))
+                    annual = state.years[day.year]
+                    for unit, price in prices[1:]:
+                        annual.amounts[unit] = add_exact_decimal(annual.amounts.get(unit, _ZERO), price)
+                        annual.counts[unit] += 1
+                    if amounts is not None:
+                        amounts.budget.reserve(8 * len(prices))
+                        codes.extend(amounts.code(unit, price) for unit, price in prices)
                 yield state, days, profile, codes
                 if amounts is not None:
                     amounts.budget.release(8*len(codes))
 
-    def result(self, coverage, profiles_available):
-        from Application.statistics_buyer_aggregates import GENDERS, _Summary
+    def result(self, coverage, profiles_available, *, period=None):
+        from datetime import timedelta
+        from Application.statistics_buyer_aggregates import GENDERS, _Summary, quintiles
         from Application.statistics_buyer_demography import DemographicSummary, OrderAmounts
-        from Application.statistics_unified_policy import UNIFIED_PURCHASE_V1
+        from Application.statistics_cohorts_core import _month, _month_key
+        from Application.statistics_unified_policy import UNIFIED_PURCHASE_V2
         from types import SimpleNamespace
 
         histograms = defaultdict(Counter)
-        for stamp, currency, amount in self.db.execute(
-                "SELECT substr(stamp,1,4),currency,amount FROM buyer_breakdown WHERE amount IS NOT NULL"):
+        monthly = {currency: {} for currency in CURRENCIES}
+        for currency, column in (("RUB", "rub"), ("KZT", "kzt")):
+            for month, buyers, orders in self.db.execute(
+                    f"SELECT substr(stamp,1,7),COUNT(DISTINCT customer),COUNT(*) "
+                    f"FROM buyer_breakdown WHERE {column} IS NOT NULL GROUP BY substr(stamp,1,7)"):
+                monthly[currency][month] = [buyers, orders, _ZERO]
+        for month, rub, kzt in self.db.execute("SELECT substr(stamp,1,7),rub,kzt FROM buyer_breakdown"):
             self.check()
-            histograms[int(stamp), currency][Decimal(amount)] += 1
+            for currency, amount in (("RUB", rub), ("KZT", kzt)):
+                if amount is not None:
+                    price = Decimal(amount)
+                    histograms[int(month[:4]), currency][price] += 1
+                    row = monthly[currency][month]
+                    row[2] = add_exact_decimal(row[2], price)
+        months = sorted({_month_key(n) for start, end in ((period,) if period is not None else coverage)
+                         for n in range(_month(start), _month(end - timedelta(microseconds=1)) + 1)})
         with localcontext() as context:
             context.prec = max(28, sum(self.width) + len(str(self.orders or 1)) + 4)
             summary = _Summary()
+            repeats = {currency: Counter() for currency in CURRENCIES}
             for state, days, profile, _ in self._buyers():
                 summary.add(state, days, profile, self.check)
-            output = summary.result(UNIFIED_PURCHASE_V1, histograms, Counter(), profiles_available, coverage)
+                if state.orders >= 2:
+                    for currency in CURRENCIES:
+                        values = [year.amounts[currency] for year in state.years.values() if currency in year.amounts]
+                        if values:
+                            repeats[currency][_amount(values)] += 1
+            output = summary.result(UNIFIED_PURCHASE_V2, histograms, Counter(), profiles_available, coverage)
+            for currency in CURRENCIES:
+                output["money"][currency]["quintiles"] = quintiles(summary.money[currency].known, repeats[currency])
+            output["monthly_money"] = {currency: [(month, *rows.get(month, (0, 0, None))) for month in months]
+                                       for currency, rows in monthly.items()}
             if profiles_available:
                 amounts = OrderAmounts()
                 # Intern only distinct fully valued order amounts. Partition

@@ -143,7 +143,8 @@ def validate_report_snapshot(result):
 
 
 def export_statistics_bundle(result,path,*,progress=None,cancelled=None,
-                             reserve_bytes=128*1024**2,max_temporary_bytes=8*1024**3,detail=None,detail_source=None):
+                             reserve_bytes=128*1024**2,max_temporary_bytes=8*1024**3,detail=None,detail_source=None,
+                             applied_filter=None):
     """Publish one captured report and, when requested, pinned detail rows."""
     started=perf_counter();workspace=None;timings={}
     try:
@@ -155,7 +156,12 @@ def export_statistics_bundle(result,path,*,progress=None,cancelled=None,
         control.stage("report_preparation")
         stamp=perf_counter()
         captured=validate_report_snapshot(result if isinstance(result, UnifiedResult) else deepcopy(result))
-        model=report_presentation(captured)
+        try:
+            model=report_presentation(captured, applied_filter=applied_filter if applied_filter is not None else detail)
+        except (KeyError, TypeError, ValueError) as error:
+            if applied_filter is not None or detail is not None:
+                raise DetailExportError("REPORT_CONTEXT_MISMATCH") from error
+            raise
         timings["presentation"]=perf_counter()-stamp
         admit_destination(destination.parent)
         control.check();workspace.prepare()

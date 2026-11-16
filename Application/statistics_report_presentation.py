@@ -14,18 +14,17 @@ from Application.statistics_chart_data import (
     rfm_segments_chart_data, cohort_retention_heatmap_data, RFM_WINDOWS,
 )
 from Application.statistics_presentation import (
-    source_action_rows, source_action_quality_rows,
     SOURCE_EVENT_QUALITY_HEADING, source_event_quality_rows,
     CATEGORY_HEADERS, DIRECT_CATEGORY_NOTE, product_category_rows, customer_scope_sections,
     PROFILE_SLICE_LABEL, ITEM_CLIENTS_LABEL, CUSTOMER_GROUP_ORDER, grouped_buyer_sections,
-    interval_text, status_label, SOURCE_LABELS, SOURCE_KIND_LABELS, DIAGNOSTIC_LABELS,
+    interval_text, status_label, SOURCE_LABELS,
     WARNING_LABELS, _date, _calculation_message,
 )
 from Application.statistics_rfm_presentation import rfm_report_sections
 from Application.statistics_cohorts_presentation import cohort_report_sections, cohort_display, REPEAT_TITLE, RETENTION_TITLE
 from Application.analysis_filter import AnalysisFilter
 
-PAGE_LABELS = ("Действия", "Заказы", "Товары", "Клиенты", "Техническая информация")
+PAGE_LABELS = ("Действия", "Заказы", "Товары", "Клиенты")
 CUSTOMER_TAB_LABELS = ("Обзор", "Покупки", "Денежные показатели", "RFM-анализ", "Когорты")
 
 @dataclass(frozen=True)
@@ -33,6 +32,7 @@ class ReportNumber:
     value: Decimal
     money: bool = True
     half_up: bool = False
+    places: int | None = None
 
 @dataclass(frozen=True)
 class ReportMeasure:
@@ -44,6 +44,8 @@ class ReportMeasure:
 
 
 def number_text(value):
+    if value.places is not None:
+        return format(value.value, f",.{value.places}f").replace(",", " ").replace(".", ",")
     number=value.value
     if value.half_up:
         number=number.quantize(Decimal(".01"),rounding=ROUND_HALF_UP)
@@ -86,6 +88,7 @@ class StatisticsReport:
     status: str
     pages: tuple
     metadata: dict = dataclass_field(default_factory=dict)
+    summary: str = ""
 
 def _section_heading(layout, title):
     layout.append(ReportBlock("heading",title=title))
@@ -445,38 +448,6 @@ def _orders_page(layout, result):
     section = _section_heading(layout, 'Статусы позиций')
     table(['Статус', 'Позиции', 'Доля, %', 'Считается покупкой'], [(status_label(name), count, 100 * count / result['order_lines'] if result['order_lines'] else 0, 'Да' if purchase else 'Нет') for name, count, purchase in result['line_statuses']], table_id='orders.line_statuses')
 
-def _technical_page(technical,result):
-    coverage = []
-    for source in result["coverage"]:
-                period = "; ".join(interval_text(a, b) for a, b in source["intervals"])
-                if not period and source["updated"]:
-                    period = "Снимок данных от " + _date(source["updated"])
-                coverage.append((SOURCE_LABELS[source["source"]], period or "—",
-                                 "/".join(SOURCE_KIND_LABELS.get(kind, kind) for kind in source["source_kinds"]) or "—"))
-    _table(technical, ["Источник", "Период / состояние", "Источник данных"], coverage)
-    filtered = AnalysisFilter.from_dict(result["analysis_filter"]).active
-    base = [("Количество взаимодействий", result["total_interactions"]), ("Заказы", result["orders"]),
-                    ("Позиции заказов", result["order_lines"]), ("Профили клиентов", result["customers"]),
-                    ("Просмотры", result["view_interactions"]),
-                    ("Добавления в избранное", result["favorite_interactions"]),
-                    ("Покупки", result["purchase_interactions"]),
-                    ("Клиенты с взаимодействиями", result["interaction_users"]),
-                    ("Уникальные исходные идентификаторы товаров", result["unique_source_products"]),
-                    ("Уникальные распознанные товары", result["unique_resolved_items"]),
-                    ("Распознанные взаимодействия", result["resolved_interactions"]),
-                    ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-                    ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")]
-    _table(technical, ["Показатель", "Значение"], base)
-    _table(technical, ["Системное название", "Количество", "Доля, %"], source_action_rows(result))
-    _table(technical, ["Классификация событий", "Количество"], source_action_quality_rows(result))
-    _table(technical, ["Диагностика", "Количество"],
-                   [(DIAGNOSTIC_LABELS[key], value) for key, value in result["diagnostics"]]
-                   + [("Заказы выбранного среза" if filtered else "Исходные заказы", result["orders"]),
-                      ("Позиции заказов выбранного среза" if filtered else "Исходные позиции заказов", result["order_lines"]),
-                      ("Распознанные взаимодействия", result["resolved_interactions"]),
-                      ("Нераспознанные взаимодействия", result["unresolved_interactions"]),
-                      ("Доля распознанных, %", f"{result['resolution_rate']:.4f}")])
-
 def _blocks(provider,result,*args):
     blocks=_Blocks()
     provider(blocks,result,*args)
@@ -515,13 +486,13 @@ def header_rows(result, *, snapshot_diagnostics=None):
             ("Конфликтующих повторов снимков",saved["conflicting"])))
     return tuple(rows)
 
-def report_presentation(result, *, snapshot_diagnostics=None):
+def report_presentation(result, *, snapshot_diagnostics=None, applied_filter=None):
     from Application.statistics_unified_dto import UnifiedResult
 
     if isinstance(result, UnifiedResult):
         from Application.statistics_unified_presentation import unified_presentation
 
-        return unified_presentation(result)
+        return unified_presentation(result, applied_filter=applied_filter)
     buyer_groups={key:[] for key in CUSTOMER_GROUP_ORDER}
     for group,section in grouped_buyer_sections(result,compact=True):
         buyer_groups[group].append(section)
@@ -536,7 +507,6 @@ def report_presentation(result, *, snapshot_diagnostics=None):
                                ("products",PAGE_LABELS[2],_products_page)):
         pages.append(ReportPage(key,title,(ReportGroup(key,title,_blocks(provider,result)),)))
     pages.append(ReportPage("customers",PAGE_LABELS[3],customer_groups))
-    pages.append(ReportPage("technical",PAGE_LABELS[4],(ReportGroup("technical",PAGE_LABELS[4],_blocks(_technical_page,result)),)))
     status="\n".join([_calculation_message(result),
         *(WARNING_LABELS.get(warning,warning) for warning in result["warnings"] if warning not in {
         "Позиции заказов с нецелым количеством исключены из статистики.",
@@ -558,26 +528,33 @@ class ReportCell:
     quality: str = ""
     reasons: tuple[str, ...] = ()
 
+    @property
+    def displayed_value(self):
+        return self.value if self.value is not None else self.known
+
 def cell_presentation(value, *, percentage=False, numeric_hint=False):
     """One display/type boundary; percent values retain the saved 0..100 scale."""
     import re
     from datetime import date
     if isinstance(value, ReportMeasure):
         cell = cell_presentation(value.value, percentage=percentage, numeric_hint=numeric_hint)
+        known = value.known.value if isinstance(value.known, ReportNumber) else value.known
         if value.value is not None:
             text = cell.text.replace(".", ",") if isinstance(value.value, ReportNumber) else cell.text
+        elif known is not None:
+            part = cell_presentation(value.known, percentage=percentage)
+            return ReportCell(None, part.text.replace(".", ","), part.kind, part.number_format,
+                              value.tooltip, known, value.quality, value.reasons)
         else:
-            text = "Недоступно"
-            if value.known is not None and value.known != 0:
-                part = cell_presentation(value.known, percentage=percentage).text.replace(".", ",")
-                text += " · известно: " + part
-        known = value.known.value if isinstance(value.known, ReportNumber) else value.known
+            text = "—"
         return ReportCell(cell.value, text, cell.kind, cell.number_format, value.tooltip, known,
                           value.quality, value.reasons)
     raw = value.value if isinstance(value, ReportNumber) else value
     if isinstance(value, ReportNumber):
         text = number_text(value)
-        places = 2 if value.money else len(format(raw,"f").partition(".")[2].rstrip("0"))
+        places = value.places
+        if places is None:
+            places = 2 if value.money else len(format(raw,"f").partition(".")[2].rstrip("0"))
         fmt = "#,##0" + ("."+"0"*places if places else "")
     elif raw is None:
         return ReportCell(None,"—","empty")

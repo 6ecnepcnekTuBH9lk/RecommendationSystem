@@ -43,13 +43,13 @@ class Document(HTMLParser):
             self.chart_json += data
 
 
-def test_five_pages_and_five_client_groups_all_kpi_filters_no_external_resources(sample_result):
+def test_four_pages_and_five_client_groups_all_kpi_filters_no_external_resources(sample_result):
     result=complete_snapshot(sample_result)
     result["analysis_filter"]=AnalysisFilter("2025-01-01","2025-01-31",("Рубашки",),("Зима",)).to_dict()
     before=deepcopy(result);doc=Document(html.build_statistics_html(result))
     assert result==before
-    assert len([a for t,a in doc.tags if t=="section"])==10
-    assert len([a for t,a in doc.tags if a.get("role")=="tab"])==10
+    assert len([a for t,a in doc.tags if t=="section"])==9
+    assert len([a for t,a in doc.tags if a.get("role")=="tab"])==9
     model=report.report_presentation(result)
     cards=4+sum(len(b.values) for p in model.pages for g in p.groups for b in g.blocks if b.kind=="cards")
     assert len([a for t,a in doc.tags if a.get("class")=="kpi"])==cards
@@ -57,6 +57,7 @@ def test_five_pages_and_five_client_groups_all_kpi_filters_no_external_resources
     assert all(not any(key in attrs for key in ("src","href")) for _,attrs in doc.tags)
     assert not any(tag in ("iframe","img","object","link") for tag,_ in doc.tags)
     texts="".join(doc.texts)
+    assert "Техническая информация" not in texts
     assert all(text in texts for text in ("Рубашки","Зима","01.01.2025","31.01.2025","24.09.2026"))
     charts=json.loads(doc.chart_json)
     assert len(charts)==19 and sum(bool(c["data"]) for c in charts)==17
@@ -215,7 +216,7 @@ def test_split_charts_preserve_all_original_months_and_series(sample_result):
     result['action_monthly_dynamics'] = tuple((month, 1000000, 1, 2, 1) for month, *_ in result['action_monthly_dynamics'])
     result['order_monthly_dynamics'] = tuple((month, 100000, rub, 1, kzt) for month, _, rub, _, kzt in result['order_monthly_dynamics'])
     specs = html.chart_specs(result)
-    assert [sum(spec['section'] == section for spec in specs) for section in range(5)] == [4, 6, 4, 5, 0]
+    assert [sum(spec['section'] == section for spec in specs) for section in range(4)] == [4, 6, 4, 5]
     assert all(len(spec['data']) <= 1 for spec in specs)
     for section in (1,):
         for currency, expected in (('RUB', '100000'), ('KZT', '1')):

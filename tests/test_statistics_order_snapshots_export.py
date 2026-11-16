@@ -74,7 +74,7 @@ def test_reference_selection_matches_export_without_duplicate_rows_and_with_safe
     with ZipFile(job.target) as archive:
         assert len(archive.namelist())==5 and all(n.endswith((".xlsx",".html")) for n in archive.namelist())
         book=load_workbook(BytesIO(archive.read("Статистика.xlsx")),read_only=True)
-        assert len(book.sheetnames)==5
+        assert len(book.sheetnames)==4
         for sheet in book:
             rows=list(sheet.values)
             assert any(r[:2]==("Конфликтующих повторов снимков",conflicting) for r in rows)
@@ -161,7 +161,7 @@ def test_production_qprocess_uses_saved_aggregates_without_reselecting_snapshots
     with ZipFile(job.target) as archive:
         assert archive.testzip() is None and archive.namelist()==["Статистика.xlsx","Статистика.html"]
         book=load_workbook(BytesIO(archive.read("Статистика.xlsx")),read_only=True)
-        assert len(book.sheetnames)==5
+        assert len(book.sheetnames)==4
         assert not any(row[0]=="Конфликтующих повторов снимков" for row in book["Клиенты"].values)
         book.close()
     clean(job)

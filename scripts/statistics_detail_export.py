@@ -230,9 +230,14 @@ def main(argv=None, *, control=None, output=None):
             if len(line) > MAX_REPORT_INPUT and snapshot.get("schema_version") != RESULT_SCHEMA:
                 raise ValueError
             detail = None
+            applied_filter = None
             if payload["command"] == "detail" and set(payload) == {"command", "snapshot", "filter"}:
                 detail = payload["filter"]
                 if not isinstance(detail, dict):
+                    raise ValueError
+            elif payload["command"] == "report" and set(payload) == {"command", "snapshot", "applied_filter"}:
+                applied_filter = payload["applied_filter"]
+                if snapshot.get("schema_version") != RESULT_SCHEMA or not isinstance(applied_filter, dict):
                     raise ValueError
             elif payload["command"] != "report" or set(payload) != {"command", "snapshot"}:
                 raise ValueError
@@ -249,7 +254,7 @@ def main(argv=None, *, control=None, output=None):
         with redirect_stdout(_Discard()),redirect_stderr(_Discard()):
             result=export_statistics_bundle(captured,destination,progress=reporter.progress,
                 cancelled=cancelled.is_set,reserve_bytes=args.reserve_bytes,max_temporary_bytes=args.max_temporary_bytes,
-                **options)
+                applied_filter=applied_filter, **options)
         reporter.timings(result.timings)
         reporter.terminal(dict(event="finished",files=len(result.files)))
         return 0

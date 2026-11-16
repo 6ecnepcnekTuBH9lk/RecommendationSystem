@@ -169,11 +169,11 @@ def test_full_canonical_sqlite_core_parity(dataset):
             assert key not in facts
             facts[key] = aligned
         assert facts.keys() == ref_facts.keys()
-        assert sum(fact.purchase.observed.value is True for fact in facts.values()) == 18
+        assert sum(fact.purchase.observed.value is True for fact in facts.values()) == 16
         assert facts["private-order-f"].money[0].recognized_purchase.value == Decimal("1234567890.123456789012345678901234")
-        assert facts["private-order-f-cp"].money[0].known_purchase_subtotal.value == 20
-        assert facts["private-order-f-cp"].money[0].recognized_purchase.reasons == ("CP_ALLOCATION_UNKNOWN",)
-        assert facts["private-order-transition"].purchase.positions.value == 1
+        assert facts["private-order-f-cp"].money[0].known_purchase_subtotal.value == 40
+        assert facts["private-order-f-cp"].money[0].recognized_purchase.value == 40
+        assert facts["private-order-transition"].purchase.positions.value == 0
         assert facts["private-order-transition"].state_quality is Quality.CONFLICT
         assert facts["private-order-only-return"].purchase.observed.value is False
         assert facts["private-order-duplicate"].snapshots.exact_duplicates == 1
@@ -304,6 +304,19 @@ def test_incompatible_projection_and_source_guard(dataset):
     assert (target / manifest["binding"]["generation"]).exists()
 
 
+def test_published_projection_accepts_reconciliation_changes_only():
+    saved = {"parts": ["orders"], "unified_components": dict(index._V1_PUBLISHED_COMPONENTS)}
+    current = {**saved, "unified_components": {
+        **saved["unified_components"], "statistics_unified_index.py": "new reader",
+        "statistics_unified_facts.py": index._V1_RECONCILIATION_HASHES[0],
+    }}
+    assert index._matches_projection(current, saved)
+    assert not index._matches_projection({**current, "parts": ["other source"]}, saved)
+    for component in ("statistics_unified_projection.py", "statistics_unified_policy.py", "statistics_unified_facts.py"):
+        assert not index._matches_projection(
+            {**current, "unified_components": {**current["unified_components"], component: "new projection"}}, saved)
+
+
 def test_missing_projection_column_is_rejected_even_with_updated_file_signature(dataset):
     manifest = _build(dataset)
     target = dataset[3]
@@ -362,8 +375,8 @@ def test_manual_and_api_sources_share_scoped_order_identity(dataset):
         assert len({row.observation.order_key.value for row in observations}) == 1
         assert len({row.observation.lines[0].stable_line_key.value for row in observations}) == 1
         fact, = reader.facts()
-        assert fact.purchase.observed.value is True
-        assert fact.purchase.positions.value == 1
+        assert fact.purchase.observed.value is False
+        assert fact.purchase.positions.value == 0
         assert fact.state_quality is Quality.CONFLICT
 
 
@@ -371,17 +384,18 @@ def test_foreign_staging_file_is_never_removed(dataset, monkeypatch):
     previous = _build(dataset)
     target = dataset[3]
     pointer = (target / index.POINTER_NAME).read_bytes()
-    protected = index.protect_directory
+    validate = index.validate_storage_root
     inserted = []
 
-    def insert_unexpected(folder):
-        protected(folder)
-        path = folder / "foreign.txt"
-        path.write_text("owned by someone else")
-        inserted.append(path)
-        raise StatisticsIndexError("SIMULATED_ACL_FAILURE")
+    def insert_unexpected(directory, *, children=()):
+        if len(children) == 1 and children[0].is_dir():
+            path = children[0] / "foreign.txt"
+            path.write_text("owned by someone else")
+            inserted.append(path)
+            raise StatisticsIndexError("SIMULATED_ACL_FAILURE")
+        return validate(directory, children=children)
 
-    monkeypatch.setattr(index, "protect_directory", insert_unexpected)
+    monkeypatch.setattr(index, "validate_storage_root", insert_unexpected)
     with pytest.raises(StatisticsIndexError, match="UNEXPECTED_STAGING_CONTENT"):
         _build(dataset)
     assert inserted[0].read_text() == "owned by someone else"

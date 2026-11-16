@@ -67,13 +67,13 @@ def test_restored_dimensions_parity_and_purchase_valuation(restored):
 
     order = indexed.orders["breakdowns"]
     assert order["observed_orders"] == 4
-    assert order["median_check"]["RUB"]["median"] == "35"
+    assert Decimal(order["median_check"]["RUB"]["median"]) == Decimal("767.500000000000000000000000005")
     assert order["median_check"]["KZT"]["median"] == "0"
     assert order["payment_types"] == [["card", 4, 100.0], ["cash", 1, 25.0]]
     assert order["delivery"]["RUB"]["evaluated"] == 3
     assert order["basket"]["evaluated"] == 4
-    assert order["currencies"]["RUB"]["valued_orders"] == 1
-    assert Decimal(order["currencies"]["RUB"]["known_subtotal"]) == Decimal("1035.00000000000000000000000001")
+    assert order["currencies"]["RUB"]["valued_orders"] == 2
+    assert Decimal(order["currencies"]["RUB"]["known_subtotal"]) == Decimal("1535.00000000000000000000000001")
     products = indexed.products["breakdowns"]
     assert products["viewers"]["000001"] == 2
     assert products["favorite_users"]["000001"] == 1
@@ -83,21 +83,21 @@ def test_restored_dimensions_parity_and_purchase_valuation(restored):
     assert client["customer_activity"]["repeat_buyers"] == 2
     assert client["customer_demography"]["mean_age"] == 36
     annual = next(row for row in client["buyer_breakdowns"]["annual"] if row["year"] == "2025")
-    assert annual["money"]["RUB"]["known_orders"] == 1
+    assert annual["money"]["RUB"]["known_orders"] == 2
     rfm = indexed.rfm["windows"]["LAST_12M"]["currencies"]["RUB"]
     assert "segment_business" in rfm
 
     model, tables = _model(indexed)
-    assert {"unified.actions.source_quality", "unified.orders.financials", "unified.products.namespaces",
+    assert {"unified.actions.source_quality", "unified.orders.financials", "unified.products.resolution",
             "unified.customers.activity", "unified.customers.item_order_distribution",
             "unified.customers.copurchase_base", "unified.customers.copurchase_pairs",
-            "unified.customers.money.annual.RUB", "unified.customers.money.quintiles.KZT",
-            "unified.rfm.LAST_12M.RUB.segment_money", "unified.cohorts.repeat", "unified.technical.metadata"} <= tables.keys()
+            "unified.customers.money.monthly.RUB", "unified.customers.money.quintiles.KZT",
+            "unified.rfm.LAST_12M.RUB.segment_money", "unified.cohorts.repeat"} <= tables.keys()
     assert "Путь" in tables["unified.products.group.category"].headers
     charts = [block.data for page in model.pages for group in page.groups for block in group.blocks if block.kind == "chart"]
     tips = {chart.title: chart.tooltips[0][0] for chart in charts if chart.title.startswith("Магазины и каналы")}
-    assert "1 035,00 RUB" in tips["Магазины и каналы — RUB"]
-    assert "35,00 RUB" in tips["Магазины и каналы — RUB"]
+    assert "1 535,00 RUB" in tips["Магазины и каналы — RUB"]
+    assert "767,50 RUB" in tips["Магазины и каналы — RUB"]
     assert "0,00 KZT" in tips["Магазины и каналы — KZT"]
 
 
@@ -135,13 +135,17 @@ def test_production_qprocess_exports_same_aggregate_dto(restored):
             assert archive.namelist() == ["Статистика.xlsx", "Статистика.html"]
             workbook = load_workbook(BytesIO(archive.read("Статистика.xlsx")))
             try:
-                assert workbook.sheetnames == ["Действия", "Заказы", "Товары", "Клиенты", "Техническая информация"]
-                assert any(row[0] == "Способ оплаты" for row in workbook["Заказы"].values)
-                assert any(cell.comment and "частичного выполнения" in cell.comment.text
-                           for row in workbook["Заказы"] for cell in row)
+                assert workbook.sheetnames == ["Действия", "Заказы", "Товары", "Клиенты"]
+                orders = workbook["Заказы"]
+                assert any(row[0] == "Способ оплаты" for row in orders.values)
+                subtotal = next(row[1] for row in orders.iter_rows() if row[0].value == "Сумма покупок")
+                assert subtotal.data_type == "n" and subtotal.value == pytest.approx(1535)
+                assert subtotal.comment is None
+                note = "При неполных денежных данных показан подтвержденный подытог покупок."
+                assert not any(row[0] == note for row in orders.values)
                 html = archive.read("Статистика.html").decode()
-                assert "Квантили оборота" in html
-                assert "частичного выполнения" in html
+                assert "Распределение покупателей по сумме покупок" in html
+                assert note not in html
             finally:
                 workbook.close()
     finally:

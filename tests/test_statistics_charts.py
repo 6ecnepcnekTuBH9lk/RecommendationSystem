@@ -133,7 +133,7 @@ def test_final_charts_pages_legends_and_repeated_render(window, sample_result, a
     tab.render(result)
     widgets = tab.findChildren(charts.StatisticsChart)
     assert len(widgets) == 19
-    assert [len(tab.sections.widget(i).findChildren(charts.StatisticsChart)) for i in range(5)] == [4, 7, 5, 3, 0]
+    assert [len(tab.sections.widget(i).findChildren(charts.StatisticsChart)) for i in range(tab.sections.count())] == [4, 7, 5, 3]
     for widget in widgets:
         assert widget.chart().legend().isVisible() == (widget.data.kind == 'donut')
         if widget.data.kind == 'donut':

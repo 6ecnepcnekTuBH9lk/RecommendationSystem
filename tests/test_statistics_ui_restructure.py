@@ -143,7 +143,8 @@ def test_saved_shared_visible_gui_html_xlsx_and_no_reads(window,rich_customer_re
     monkeypatch.setattr(ui.DatasetStatisticsTab,'start',forbidden)
     host,tab=window;apply_app_theme(QApplication.instance(),dark);tab.render(r)
     tab.sections.setCurrentIndex(3);host.resize(1100,850);host.show();QApplication.processEvents()
-    assert not tab.findChildren(StatisticsTableExplanation) and tab.sections.count()==tab.customer_sections.count()==5
+    assert not tab.findChildren(StatisticsTableExplanation)
+    assert tab.sections.count()==4 and tab.customer_sections.count()==5
     target=tmp_path/'report.zip';bundle.export_statistics_bundle(r,target)
     with ZipFile(target) as archive:
         assert archive.namelist()==['Статистика.xlsx','Статистика.html']

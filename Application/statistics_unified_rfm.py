@@ -17,7 +17,7 @@ from Application.product_resolution import ProductResolver
 from Application.statistics_detail_rfm import decimal_compare
 from Application.statistics_index import BuildGuard, GIB, manifest_digest
 from Application.statistics_rfm_core import (
-    SEGMENTS, _coverage, _histogram, empirical_ranks, rfm_score, rfm_segment, rfm_windows,
+    SEGMENTS, _coverage, _histogram, empirical_ranks, rfm_score, rfm_windows,
 )
 from Application.statistics_rfm_validation import rfm_cutoff
 from Application.statistics_storage_safety import StatisticsIndexError, reject_reparse, validate_storage_root
@@ -32,6 +32,7 @@ from Application.statistics_unified_policy import EvidenceQuality as Quality, Me
 
 
 _ZERO = Decimal(0)
+SEGMENTATION_POLICY = "UNIFIED_RFM_SEGMENTATION_V2"
 _SCOPES = (None, *CURRENCIES)
 _GAP = (Quality.INSUFFICIENT_COVERAGE, "COVERAGE_GAP_OR_TRUNCATION")
 _NO_PURCHASE = (Quality.UNKNOWN, "NO_OBSERVED_PURCHASE")
@@ -108,16 +109,14 @@ def _order_payload(fact, date, possible, windows):
     money = {}
     money_issues = _issues(fact.order_currency)
     for row in fact.money:
-        subtotal = row.known_purchase_subtotal.value
-        if subtotal == 0 and row.currency != currency and not row.valued_purchase_positions:
-            subtotal = None
+        subtotal = row.recognized_purchase.value if row.valued_purchase_positions else None
         nominal = row.partial_nominal.value
         if nominal is None:
             nominal = dict(row.known_nominals).get("partial_nominal")
         money[row.currency] = [None if amount is None else str(amount) for amount in (subtotal, nominal)]
         if currency in (None, row.currency):
             money_issues.extend(_issues(row.recognized_purchase))
-    valued = known and currency in CURRENCIES and not money_issues
+    valued = known and currency in CURRENCIES and money[currency][0] is not None
     return json.dumps(dict(
         occurred=date.isoformat() if date is not None and known else None,
         possible=possible.isoformat(), windows=windows, currency=currency,
@@ -228,6 +227,8 @@ class _Buyer:
         self.last = {}
         self.possible_last = defaultdict(dict)
         self.windows = {name: _Window() for name in windows}
+        self.starts = {name: start for name, (start, _) in windows.items()}
+        self.prior_orders = Counter()
 
     def add(self, order):
         currency = order["currency"]
@@ -235,6 +236,10 @@ class _Buyer:
         issues = _unpack(order["issues"])
         money_issues = _unpack(order["money_issues"])
         date = datetime.fromisoformat(order["possible"])
+        if order["occurred"] is not None and currency in CURRENCIES:
+            for name, start in self.starts.items():
+                if date < start:
+                    self.prior_orders[name, currency] += 1
         for scope in scopes:
             if order["occurred"] is not None:
                 self.last[scope] = max(self.last.get(scope, date), date)
@@ -259,9 +264,11 @@ class _Buyer:
         subtotal = state.subtotals.get(currency)
         money = None
         if currency is not None:
-            m_issues = state.money_issues | gap
+            m_issues = set(gap)
             if last is None:
-                m_issues = m_issues | {_OUTSIDE_CURRENCY}
+                m_issues.add(_OUTSIDE_CURRENCY)
+            if subtotal is None and (frequency or state.money_issues):
+                m_issues.add((Quality.UNKNOWN, "NO_ACCEPTED_PURCHASE_COST"))
             money = _result(subtotal if subtotal is not None else _ZERO, m_issues)
         return RfmFeatures(
             last is not None, last, _result(last, last_issues),
@@ -274,17 +281,19 @@ _SCHEMA = """
 CREATE TABLE rfm_population(customer TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE rfm_orders(customer TEXT, rank INTEGER, payload TEXT NOT NULL,
                         PRIMARY KEY(customer, rank)) WITHOUT ROWID;
-CREATE TABLE rfm_scoring(id INTEGER PRIMARY KEY, window TEXT, currency TEXT, r INTEGER, f INTEGER, m TEXT, observed INTEGER, valued INTEGER, subtotal TEXT, valued_amount TEXT);
+CREATE TABLE rfm_scoring(id INTEGER PRIMARY KEY, window TEXT, currency TEXT, r INTEGER, f INTEGER, m TEXT,
+                         prior_orders INTEGER NOT NULL, observed INTEGER, valued INTEGER, subtotal TEXT, valued_amount TEXT);
 CREATE TABLE rfm_histogram(window TEXT, currency TEXT, metric TEXT, value TEXT COLLATE RFM_DECIMAL,
                            n INTEGER NOT NULL, PRIMARY KEY(window, currency, metric, value)) WITHOUT ROWID;
 """
 
 
-def _add_scoring(db, name, currency, features, complete, valued_amount):
+def _add_scoring(db, name, currency, features, complete, valued_amount, prior_orders):
     values = _scorable(features, complete)
-    db.execute("INSERT INTO rfm_scoring(window,currency,r,f,m,observed,valued,subtotal,valued_amount) VALUES(?,?,?,?,?,?,?,?,?)",
+    db.execute("""INSERT INTO rfm_scoring(window,currency,r,f,m,prior_orders,observed,valued,subtotal,valued_amount)
+                  VALUES(?,?,?,?,?,?,?,?,?,?)""",
                (name, currency, values[0], values[1], None if values[2] is None else str(values[2]),
-                features.observed_frequency, features.valued_orders,
+                prior_orders, features.observed_frequency, features.valued_orders,
                 str(features.known_subtotal) if features.known_subtotal is not None else None,
                 str(valued_amount) if valued_amount is not None else None))
     for metric, value in zip("RFM", values, strict=True):
@@ -334,10 +343,26 @@ def _thresholds(db, window, currency, check):
     return thresholds, monetary
 
 
-def _score(r, f, m, thresholds):
+def _segment(r, f, m, frequency, prior_orders):
+    if None in (r, f, m):
+        return "UNSCORABLE"
+    if r >= 4 and f >= 4 and m == 5 and frequency >= 2:
+        return "CHAMPIONS"
+    if r >= 3 and f >= 3 and frequency >= 2:
+        return "LOYAL"
+    if r >= 4 and frequency == 1:
+        return "NEW_OR_RECENT"
+    if r <= 2 and (f >= 3 and frequency >= 2 or frequency <= 1 and prior_orders >= 2):
+        return "AT_RISK"
+    if r <= 2 and (f <= 2 or frequency <= 1):
+        return "HIBERNATING"
+    return "OTHER"
+
+
+def _score(r, f, m, thresholds, *, prior_orders):
     scores = (rfm_score(r, thresholds["R"]["values"], recency=True),
               rfm_score(f, thresholds["F"]["values"]), rfm_score(m, thresholds["M"]["values"]))
-    return scores, rfm_segment(*scores, f)
+    return scores, _segment(*scores, f, prior_orders)
 
 
 @dataclass(slots=True)
@@ -464,7 +489,7 @@ class _SegmentAmounts:
                     mean_complete_m=_ratio(self.complete_amount, self.complete))
 
 
-def _summarize(db, context, bounds, diagnostics, customer_key, check):
+def _summarize(db, context, bounds, diagnostics, customer_key, check, *, segment_observer=None):
     population = db.execute("SELECT COUNT(*) FROM rfm_population").fetchone()[0]
     if not bounds:
         return UnifiedRfmResult(context, population, 0, 0, 0, {}, {}, dict(sorted(diagnostics.items())), None)
@@ -477,6 +502,7 @@ def _summarize(db, context, bounds, diagnostics, customer_key, check):
     comparison = _Comparison()
     base = dual = unassigned = 0
     sample = None
+    sample_prior_orders = None
     # Only one buyer's window states live in Python. The join can stream
     # directly in primary-key order with both tables on disk.
     with closing(db.execute("""SELECT p.customer,o.payload FROM rfm_population p
@@ -511,7 +537,8 @@ def _summarize(db, context, bounds, diagnostics, customer_key, check):
                     accumulator.add(row, currency, context.as_of_date)
                     features[currency] = row
                     if currency is not None and row.in_base:
-                        _add_scoring(db, name, currency, row, complete[name], state.valued_amount.get(currency))
+                        _add_scoring(db, name, currency, row, complete[name], state.valued_amount.get(currency),
+                                     buyer.prior_orders[name, currency])
                 feature_rows[name] = features
             if in_base:
                 names = ("LAST_12M", "PREVIOUS_12M")
@@ -519,6 +546,7 @@ def _summarize(db, context, bounds, diagnostics, customer_key, check):
                 comparison.add(*(feature_rows[name] for name in names), money_unreliable)
             if owner == customer_key:
                 sample = feature_rows
+                sample_prior_orders = buyer.prior_orders
             if i % 1000 == 0:
                 db.commit()
     db.commit()
@@ -532,16 +560,20 @@ def _summarize(db, context, bounds, diagnostics, customer_key, check):
             windows[name]["currencies"][currency] = result
             if sample is not None and sample[name][currency].in_base:
                 row = sample[name][currency]
-                scores, segment = _score(*_scorable(row, complete[name]), result["thresholds"])
+                scores, segment = _score(*_scorable(row, complete[name]), result["thresholds"],
+                                         prior_orders=sample_prior_orders[name, currency])
                 sample[name][currency] = replace(row, scores=scores, segment=segment)
     segments, scores = defaultdict(Counter), defaultdict(Counter)
     business = defaultdict(lambda: defaultdict(_SegmentAmounts))
-    with closing(db.execute("SELECT window,currency,r,f,m,observed,valued,subtotal,valued_amount FROM rfm_scoring")) as rows:
-        for name, currency, r, f, m, observed, valued, subtotal, valued_amount in rows:
+    with closing(db.execute("""SELECT window,currency,r,f,m,prior_orders,observed,valued,subtotal,valued_amount
+                               FROM rfm_scoring""")) as rows:
+        for name, currency, r, f, m, prior_orders, observed, valued, subtotal, valued_amount in rows:
             check()
             key = name, currency
             cuts = windows[name]["currencies"][currency]["thresholds"]
-            values, segment = _score(r, f, None if m is None else Decimal(m), cuts)
+            values, segment = _score(r, f, None if m is None else Decimal(m), cuts, prior_orders=prior_orders)
+            if segment_observer is not None:
+                segment_observer(name, currency, values, f, prior_orders, segment)
             segments[key][segment] += 1
             scores[key][values] += 1
             business[key][segment].add(observed, valued, subtotal, valued_amount, m)

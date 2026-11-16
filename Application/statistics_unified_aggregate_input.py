@@ -135,12 +135,29 @@ def _reference_actions(root, provenance, identities, resolver, selection, check)
         yield _action_evidence(kind, occurred, owner, items, details=action, has_product=has_product, system_name=system_name)
 
 
-def _indexed_actions(reader, selection, check):
+def _indexed_actions(reader, selection, check, *, period=None, selected_items=None):
     rules = selection.interaction_rules()
-    with closing(reader.db.execute("""
+    where, values = "", ()
+    if period is not None:
+        from Application.statistics_facts import microseconds
+        where = "WHERE (a.event_us IS NULL OR (a.event_us>=? AND a.event_us<?))"
+        values = tuple(map(microseconds, period))
+    if selected_items is not None:
+        # Keep all positions of each matched event for availability and price
+        # evidence. Unresolved positions still affect product-scope quality.
+        where = (where + " AND " if where else "WHERE ") + """(
+            a.event_us IS NULL OR a.header_bad OR a.adapter_bad OR a.customer IS NULL OR EXISTS (
+                SELECT 1 FROM action_products candidate
+                WHERE candidate.event=a.id AND (candidate.item IS NULL OR candidate.item IN (
+                    SELECT value FROM json_each(?)
+                ))
+            )
+        )"""
+        values += (json.dumps(sorted(selected_items)),)
+    with closing(reader.db.execute(f"""
         SELECT a.id,a.event_us,a.name,a.customer,a.header_bad,a.adapter_bad,p.ordinal,p.item,a.details,p.namespace,a.has_product,p.value
-        FROM actions a LEFT JOIN action_products p ON a.id=p.event ORDER BY a.id,p.ordinal
-    """)) as rows:
+        FROM actions a LEFT JOIN action_products p ON a.id=p.event {where} ORDER BY a.id,p.ordinal
+    """, values)) as rows:
         for _, group in groupby(rows, key=lambda row: row[0]):
             check()
             first = next(group)
@@ -154,6 +171,10 @@ def _indexed_actions(reader, selection, check):
                 items.append(row[7])
                 keys.append((row[9], row[11]))
             invalid = bool(first[4] or (first[5] and owner is not None and kind is not None))
+            if invalid or kind is None or owner is None or not items or occurred is None:
+                yield _action_evidence(kind, occurred, owner, tuple(items), invalid=invalid,
+                                       has_product=None if first[4] else bool(first[10]), system_name=first[2])
+                continue
             details = json.loads(first[8])
             action = SimpleNamespace(event_datetime_utc=occurred, products=tuple(
                 SimpleNamespace(namespace=namespace, value=value) for namespace, value in keys),
@@ -162,6 +183,44 @@ def _indexed_actions(reader, selection, check):
                 product_view_price=Decimal(details["price"]) if details.get("price") is not None else None)
             yield _action_evidence(kind, occurred, owner, tuple(items), invalid=invalid, details=action,
                                    has_product=None if first[4] else bool(first[10]), system_name=first[2])
+
+
+def _indexed_action_headers(accumulator, reader, selection, *, period, customer_period, check):
+    """Populate exact source counts and population independently of product evidence."""
+    from Application.statistics_facts import microseconds
+
+    rules = selection.interaction_rules()
+    where, parameters = ("", ()) if period is None else (
+        "WHERE event_us>=? AND event_us<?", tuple(map(microseconds, period)))
+    for name, header_bad, has_product, count in reader.db.execute(f"""
+        SELECT name,header_bad,has_product,COUNT(*) FROM actions {where}
+        GROUP BY name,header_bad,has_product ORDER BY MIN(id)
+    """, parameters):
+        check()
+        kind = classify_action_system_name(name, rules) if name is not None else None
+        accumulator.source_actions["all"] += count
+        if name:
+            accumulator.event_names[kind.value if kind is not None else "UNMAPPED", name] += count
+        if kind is None:
+            accumulator.source_actions["classification_unknown" if header_bad else "unmapped"] += count
+        else:
+            accumulator.source_actions[kind.value] += count
+            if header_bad:
+                accumulator.source_actions["mapped_product_unknown"] += count
+            elif not has_product:
+                accumulator.source_actions["mapped_without_product"] += count
+
+    where, parameters = ("", ()) if customer_period is None else (
+        "AND event_us>=? AND event_us<?", tuple(map(microseconds, customer_period)))
+    with closing(reader.db.execute(
+            f"SELECT DISTINCT customer FROM actions WHERE customer IS NOT NULL {where}", parameters)) as owners:
+        for (owner,) in owners:
+            check()
+            accumulator.members.add("population", str(owner))
+    if customer_period is not None and reader.db.execute(
+            "SELECT 1 FROM actions WHERE event_us IS NULL AND customer IS NOT NULL LIMIT 1").fetchone():
+        from Application.statistics_unified_policy import EvidenceQuality
+        accumulator.population_issues.add((EvidenceQuality.INSUFFICIENT_COVERAGE, "ACTION_DATE_UNRESOLVED"))
 
 
 def _reference_profiles(root, identities, check):

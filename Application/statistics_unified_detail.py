@@ -16,9 +16,9 @@ from Application.statistics_detail_storage import DetailExportError
 from Application.statistics_index import BuildGuard, GIB, manifest_digest
 from Application.statistics_storage_safety import StatisticsIndexError, validate_storage_root
 from Application.statistics_unified_aggregate_input import _contexts, _indexed_metadata, _orders, _period
-from Application.statistics_unified_aggregates import _Money, _in_period, _valuation, order_in_detail_scope
+from Application.statistics_unified_aggregates import _Money, _in_period, order_in_detail_scope
 from Application.statistics_unified_dto import DETAIL_FORMAT, RESULT_SCHEMA, _wire
-from Application.statistics_unified_facts import _qualifies, _sum, evaluate_money
+from Application.statistics_unified_facts import _eligible, _sum, evaluate_money
 from Application.statistics_unified_index import open_unified_index
 from Application.statistics_unified_policy import StatusGroup
 from Application.statistics_unified_service import _binding, _index_integrity, algorithm_version
@@ -148,20 +148,14 @@ def _buyer_history(db, fact):
         return
     db.execute("INSERT OR IGNORE INTO clients(sid) VALUES (?)", (owner,))
     day = fact.order_created_at.value.isoformat()
-    valued = _valuation(True, fact.money, fact.order_currency.value)
-    subtotals = []
-    for row in fact.money:
-        subtotal = row.known_purchase_subtotal.value
-        if subtotal == 0 and not row.valued_purchase_positions and row.recognized_purchase.value is not None:
-            subtotal = None
-        subtotals.append(subtotal)
+    subtotals = [row.recognized_purchase.value if row.valued_purchase_positions else None for row in fact.money]
     db.execute("""UPDATE clients SET buys=buys+1,positions=positions+?,
                   first=MIN(COALESCE(first,?),?),last=MAX(COALESCE(last,?),?),
                   rub=amount_add(rub,?),kzt=amount_add(kzt,?),rub_valued=rub_valued+?,
                   kzt_valued=kzt_valued+?,unvalued=unvalued+? WHERE sid=?""",
                (fact.purchase.known_positions, day, day, day, day,
                 *(format(a, "f") if a is not None else None for a in subtotals),
-                int(valued == "RUB"), int(valued == "KZT"), int(valued is None), owner))
+                *(int(a is not None) for a in subtotals), int(all(a is None for a in subtotals)), owner))
 
 
 def _line_rows(db, key, fact, catalog, check):
@@ -174,7 +168,7 @@ def _line_rows(db, key, fact, catalog, check):
                         line.product_key.quality.value, "|".join(line.product_key.reasons),
                         *_measured(line.status_code)[:1], line.status_group.value, *_measured(line.status_code)[1:],
                         codes, StatusGroup.CANCELLED in history, StatusGroup.RETURNED in history,
-                        StatusGroup.PARTIALLY_COMPLETED in history, any(_qualifies(entry) for entry in versions),
+                        StatusGroup.PARTIALLY_COMPLETED in history, _eligible(line),
                         line.currency.value, line.currency.quality.value, *_measured(line.nominal_units),
                         *_measured(line.fulfilled_units), *_money_cells(evaluate_money((line,), (versions,), completeness=()))))
         db.execute("INSERT INTO lines(payload) VALUES (?)", (json.dumps(row, ensure_ascii=False),))
@@ -277,8 +271,7 @@ def _write(reader, archive, workspace, control, report, request, guard):
                     counts["cancelled"] += fact.has_cancelled
                     counts["returned"] += fact.has_returned
                     currency = fact.order_currency.value
-                    amounts.add(fact.money, purchase=purchase, currency=currency,
-                                fully_valued_currency=_valuation(purchase, fact.money, currency))
+                    amounts.add(fact.money, purchase=purchase, currency=currency)
                     owner = fact.customer_key.value
                     client = _client(db, owner)
                     if client is not None:
@@ -337,7 +330,8 @@ def _write(reader, archive, workspace, control, report, request, guard):
                     row = buyer.features(window, currency, cutoff, reliable_since, complete)
                     scores, segment = (None, None, None), None
                     if row.in_base:
-                        scores, segment = rfm._score(*rfm._scorable(row, complete), thresholds)
+                        scores, segment = rfm._score(*rfm._scorable(row, complete), thresholds,
+                                                     prior_orders=buyer.prior_orders[window, currency])
                     values.extend((row.in_base, *_measured(row.recency), row.observed_frequency,
                                    *_measured(row.frequency), *_measured(row.monetary),
                                    row.known_subtotal, *scores, segment))

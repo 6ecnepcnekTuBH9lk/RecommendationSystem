@@ -2,6 +2,7 @@
 
 import math
 import os
+from itertools import groupby
 
 from PyQt6.QtCore import QEvent, QMargins, QPoint, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
@@ -11,6 +12,8 @@ from PyQt6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QCategoryAxis,
 
 from Application.statistics_chart_data import ChartData as ChartData, exact_number as exact_number
 from Application.statistics_chart_data import (
+    SECONDARY_LIGHT,
+    distinct_chart_colors,
     activity_distribution_data as activity_distribution_data,
     distribution_data as distribution_data,
     gender_chart_data as gender_chart_data,
@@ -30,19 +33,20 @@ from Application.statistics_chart_data import (
 MONTHS = ('янв.', 'февр.', 'март', 'апр.', 'май', 'июнь', 'июль', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.')
 MONTHS_FULL = ('Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
 # Secondary series complements the existing Material accent, with two variants.
-SECONDARY = {False: '#227D91', True: '#72C4D1'}
+SECONDARY = {False: SECONDARY_LIGHT, True: '#72C4D1'}
 MAX_PRODUCT_LABEL_WIDTH = 420
 PRODUCT_LABEL_PADDING = 16
 NEUTRAL = {False: '#8A8F98', True: '#9BA3AD'}
 
 
-def style_chart(chart, secondary=False, section_title=False):
+def style_chart(chart, secondary=False, section_title=False, *, distinct_series=0):
     """Shared Material palette for native statistics and live training charts."""
     surface = QColor(os.environ.get('QTMATERIAL_SECONDARYCOLOR', '#f5f5f5'))
     background = QColor(os.environ.get('QTMATERIAL_SECONDARYDARKCOLOR', surface.name()))
     foreground = QColor(os.environ.get('QTMATERIAL_SECONDARYTEXTCOLOR', '#555555'))
     accent = QColor(os.environ.get('QTMATERIAL_PRIMARYCOLOR', '#A65CF2'))
     dark = surface.lightness() < 128
+    palette = distinct_chart_colors(distinct_series, dark=dark)
     chart.setBackgroundBrush(background)
     chart.setBackgroundPen(QPen(Qt.PenStyle.NoPen))
     chart.setPlotAreaBackgroundVisible(False)
@@ -66,12 +70,16 @@ def style_chart(chart, secondary=False, section_title=False):
         axis.setGridLinePen(QPen(grid, 1))
         axis.setMinorGridLineVisible(False)
     for i, series in enumerate(chart.series()):
-        color = accent if i == 0 and not secondary else QColor(SECONDARY[dark])
+        series_index = series.property("statisticsSeriesIndex")
+        index = i if series_index is None else series_index
+        color = QColor(palette[index]) if palette else accent if index == int(secondary) else QColor(SECONDARY[dark])
         if isinstance(series, QLineSeries):
             series.setPen(QPen(color, 2))
+            series.setMarkerSize(7)
         elif isinstance(series, QPieSeries):
-            for piece, fill in zip(series.slices(), (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]))):
-                piece.setBrush(fill)
+            colors = (accent, QColor(SECONDARY[dark]), QColor(NEUTRAL[dark]), QColor("#b3a2df"))
+            for index, piece in enumerate(series.slices()):
+                piece.setBrush(colors[index % len(colors)])
                 piece.setPen(QPen(background, 1))
         else:
             for index, bars in enumerate(series.barSets()):
@@ -145,7 +153,7 @@ class StatisticsChart(QChartView):
         self.data = data
         self.setObjectName('statisticsChart')
         self.setMinimumWidth(0)
-        self.setFixedHeight(320)
+        self.setFixedHeight(data.height or 320)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setFrameShape(QChartView.Shape.NoFrame)
         self.setStyleSheet('QGraphicsView#statisticsChart {border: none; border-radius: 0; padding: 0;}')
@@ -155,11 +163,12 @@ class StatisticsChart(QChartView):
         chart.setBackgroundRoundness(0)
         chart.setMargins(QMargins(8, 5, 30, 45 if data.kind == 'bar' else 5))
         chart.setTitle(data.title.upper() if data.inner_title else '')
-        chart.legend().setVisible(len(data.series) > 1 or data.kind == 'donut')
+        circular = data.kind in ('donut', 'pie')
+        chart.legend().setVisible(data.show_legend and (len(data.series) > 1 or circular))
         chart.legend().setAlignment(Qt.AlignmentFlag.AlignBottom)
         self.tooltip = QLabel(self.viewport())
         self.tooltip.setTextFormat(Qt.TextFormat.PlainText)
-        self.tooltip.setWordWrap(True)
+        self.tooltip.setWordWrap(data.show_legend or not data.money)
         self.tooltip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.tooltip.hide()
         self._theme_timer = QTimer(self)
@@ -170,17 +179,24 @@ class StatisticsChart(QChartView):
         self._value_labels = []
         self._point_labels = []
         self.count_axis = self.category_axis = None
-        if data.kind == 'donut':
+        if circular:
             series = QPieSeries()
-            series.setHoleSize(.5)
+            series.setHoleSize(.5 if data.kind == 'donut' else 0)
             for index, (name, value) in enumerate(zip(data.labels, data.series[0][1])):
+                if value is None:
+                    continue
                 piece = series.append(name, value)
                 piece.setLabelVisible(False)
                 piece.hovered.connect(lambda state, i=index: self.show_tooltip(0, i, state))
             chart.addSeries(series)
         else:
             maximum = float(max((value for _, values in data.series for value in values if value is not None), default=0))
-            self.count_axis = _percentage_axis() if data.percentage else _count_axis(maximum, data.money)
+            if data.percentage and not data.adaptive_percentage:
+                self.count_axis = _percentage_axis()
+            else:
+                self.count_axis = _count_axis(maximum, data.money or data.adaptive_percentage)
+                if data.adaptive_percentage and self.count_axis.max() > 100:
+                    self.count_axis = _percentage_axis()
             self.count_axis.setTitleText(data.value_axis_title)
             self.category_axis = QCategoryAxis() if data.kind == 'line' else QBarCategoryAxis()
             horizontal = data.kind == 'horizontal'
@@ -198,7 +214,8 @@ class StatisticsChart(QChartView):
                 chart.setMargins(margins)
                 chart.plotAreaChanged.connect(self._position_value_labels)
                 self.category_axis.setLabelsVisible(False)
-                self._product_labels = [QGraphicsSimpleTextItem(chart) for _ in data.labels]
+                item_type = QGraphicsTextItem if data.bar_width is not None else QGraphicsSimpleTextItem
+                self._product_labels = [item_type(chart) for _ in data.labels]
                 chart.plotAreaChanged.connect(self._position_product_labels)
             if data.kind == 'bar':
                 # Qt's bar axis truncates every label to the longest-label budget.
@@ -210,15 +227,28 @@ class StatisticsChart(QChartView):
                 self.category_axis.setLabelsPosition(QCategoryAxis.AxisLabelsPosition.AxisLabelsPositionOnValue)
                 self.category_axis.setRange(-.3, max(.3, len(data.labels) - .7))
                 for number, (name, values) in enumerate(data.series):
-                    series = QLineSeries()
-                    series.setName(name)
-                    series.setPointsVisible(True)
-                    for index, value in enumerate(values):
-                        series.append(index, value)
-                    chart.addSeries(series)
-                    series.attachAxis(self.category_axis)
-                    series.attachAxis(self.count_axis)
-                    series.hovered.connect(lambda point, state, n=number: self.show_tooltip(n, round(point.x()), state))
+                    first_segment = True
+                    for present, points in groupby(enumerate(values), key=lambda point: point[1] is not None):
+                        if not present:
+                            continue
+                        series = QLineSeries()
+                        series.setName(name)
+                        series.setProperty("statisticsSeriesIndex", number)
+                        series.setPointsVisible(True)
+                        for index, value in points:
+                            series.append(index, float(value))
+                        chart.addSeries(series)
+                        series.attachAxis(self.category_axis)
+                        series.attachAxis(self.count_axis)
+                        if not first_segment:
+                            for marker in chart.legend().markers(series):
+                                marker.setVisible(False)
+                        elif data.distinct_series:
+                            for marker in chart.legend().markers(series):
+                                marker.clicked.connect(lambda n=number: self._toggle_line(n))
+                        first_segment = False
+                        series.hovered.connect(
+                            lambda point, state, n=number: self.show_tooltip(n, round(point.x()), state))
             else:
                 series = QHorizontalBarSeries() if horizontal else QBarSeries()
                 for number, (name, values) in enumerate(data.series):
@@ -235,7 +265,7 @@ class StatisticsChart(QChartView):
                             label = "—" if value is None else ("0 %" if data.percentage else "0")
                             self._point_labels.append((index, QGraphicsSimpleTextItem(label, chart)))
                     chart.plotAreaChanged.connect(self._position_point_labels)
-                series.setBarWidth(.65)
+                series.setBarWidth(data.bar_width if data.bar_width is not None else .65)
                 chart.addSeries(series)
                 series.attachAxis(self.category_axis)
                 series.attachAxis(self.count_axis)
@@ -247,7 +277,7 @@ class StatisticsChart(QChartView):
         self.apply_theme()
 
     def _update_categories(self):
-        if self.data.kind == 'donut':
+        if self.data.kind in ('donut', 'pie'):
             return
         font = QFont(QApplication.font())
         font.setPointSizeF(9)
@@ -257,7 +287,8 @@ class StatisticsChart(QChartView):
             for label in axis.categoriesLabels():
                 axis.remove(label)
             axis.setStartValue(-.5)
-            capacity = max(2, (self.width() - 110) // 95)
+            spacing = max(metrics.horizontalAdvance(label) for label in self.data.labels) + 12 if self.data.adaptive_percentage else 95
+            capacity = max(2, (self.width() - 110) // spacing)
             stride = max(1, math.ceil(len(self.data.labels) / capacity))
             indices = list(range(0, len(self.data.labels), stride))
             for index in indices:
@@ -268,15 +299,26 @@ class StatisticsChart(QChartView):
                 # The rank also keeps repeated product names distinguishable.
                 full_labels = [f'{i + 1}. {text or ""}' if self.data.ranked else (text or '')
                                for i, text in enumerate(self.data.labels)]
+                if self.data.wide_labels and not metrics.inFont('→'):
+                    full_labels = [label.replace('→', '->') for label in full_labels]
                 desired = max(metrics.horizontalAdvance(text) for text in full_labels) + PRODUCT_LABEL_PADDING
                 available = max(70, int((self.viewport().width() - 80) * .4))
                 self.product_label_width = min(desired, MAX_PRODUCT_LABEL_WIDTH, available)
                 width = self.product_label_width - PRODUCT_LABEL_PADDING
-                labels = [text if metrics.horizontalAdvance(text) <= width else
-                          metrics.elidedText(text, Qt.TextElideMode.ElideRight, width) for text in full_labels]
+                labels = full_labels if self.data.bar_width is not None else [
+                    metrics.elidedText(text, Qt.TextElideMode.ElideRight, width) for text in full_labels]
                 for item, label in zip(self._product_labels, labels):
                     item.setFont(font)
-                    item.setText(label)
+                    if isinstance(item, QGraphicsTextItem):
+                        document = item.document()
+                        document.setDocumentMargin(0)
+                        option = document.defaultTextOption()
+                        option.setAlignment(Qt.AlignmentFlag.AlignRight)
+                        document.setDefaultTextOption(option)
+                        item.setTextWidth(width)
+                        item.setPlainText(label)
+                    else:
+                        item.setText(label)
                 margins = self.chart().margins()
                 margins.setLeft(self.product_label_width + 8)
                 self.chart().setMargins(margins)
@@ -352,11 +394,18 @@ class StatisticsChart(QChartView):
 
     def apply_theme(self):
         chart = self.chart()
-        background, foreground, accent = style_chart(chart, self.data.secondary)
+        background, foreground, accent = style_chart(chart, self.data.secondary,
+            distinct_series=len(self.data.series) if self.data.distinct_series else 0)
         if self.data.kind == 'horizontal':
             self._update_categories()
+            if self.data.bar_width is not None and len(self.data.series) > 1:
+                for bars in chart.series()[0].barSets():
+                    bars.setPen(QPen(background, 2))
         for item in self._product_labels:
-            item.setBrush(foreground)
+            if isinstance(item, QGraphicsTextItem):
+                item.setDefaultTextColor(foreground)
+            else:
+                item.setBrush(foreground)
         for _, item in self._value_labels:
             item.setBrush(foreground)
         for item in self._bar_labels:
@@ -367,12 +416,27 @@ class StatisticsChart(QChartView):
         self.tooltip.setStyleSheet(f'QLabel {{background: {background.name()}; color: {foreground.name()}; '
                                   f'border: 1px solid {accent.name()}; border-radius: 5px; padding: 7px;}}')
 
+    def _toggle_line(self, index):
+        chart = self.chart()
+        segments = [line for line in chart.series() if line.property("statisticsSeriesIndex") == index]
+        visible = not segments[0].isVisible()
+        for i, line in enumerate(segments):
+            line.setVisible(visible)
+            for marker in chart.legend().markers(line):
+                marker.setVisible(i == 0)
+                color = QColor(chart.legend().labelColor())
+                color.setAlphaF(1 if visible else .45)
+                marker.setLabelBrush(color)
+
     def show_tooltip(self, series, index, state):
         if not state or not 0 <= index < len(self.data.labels):
             self.tooltip.hide()
             return
         self.tooltip.setMaximumWidth(max(80, min(350, self.viewport().width() - 16)))
-        self.tooltip.setText(self.data.tooltips[series][index])
+        text = self.data.tooltips[series][index]
+        if self.data.wide_labels and not self.tooltip.fontMetrics().inFont('→'):
+            text = text.replace('→', '->')
+        self.tooltip.setText(text)
         self.tooltip.adjustSize()
         from PyQt6.QtGui import QCursor
         point = self.viewport().mapFromGlobal(QCursor.pos()) + QPoint(12, 12)

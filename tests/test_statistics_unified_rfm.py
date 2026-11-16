@@ -69,10 +69,48 @@ def _feature(result, currency="RUB", window="LAST_12M"):
     return result.customer[window][currency]
 
 
+@pytest.mark.parametrize(("scores", "frequency", "prior", "segment"), [
+    ((4, 4, 5), 2, 0, "CHAMPIONS"),
+    ((4, 4, 4), 2, 0, "LOYAL"),
+    ((3, 3, 1), 2, 0, "LOYAL"),
+    ((4, 4, 5), 1, 3, "NEW_OR_RECENT"),
+    ((2, 1, 1), 0, 2, "AT_RISK"),
+    ((2, 2, 2), 1, 2, "AT_RISK"),
+    ((2, 3, 5), 2, 0, "AT_RISK"),
+    ((2, 1, 1), 0, 1, "HIBERNATING"),
+    ((2, 1, 1), 1, 0, "HIBERNATING"),
+    ((3, 1, 1), 0, 5, "OTHER"),
+    ((4, 5, None), 3, 1, "UNSCORABLE"),
+])
+def test_segmentation_order_and_boundaries(scores, frequency, prior, segment):
+    assert rfm._segment(*scores, frequency, prior) == segment
+
+
+def test_earlier_repeat_history_is_currency_specific_in_all_windows(source):
+    orders = [_order("old-rub-1", stamp="2022-10-01T00:00:00Z"),
+              _order("old-rub-2", stamp="2022-11-01T00:00:00Z", status="CP"),
+              _order("old-kzt", stamp="2022-11-01T00:00:00Z", namespace="kanzlerKz")]
+    for i in range(6):
+        for currency in ("offline1C", "kanzlerKz"):
+            orders.append(_order(f"recent-{currency}-{i}", owner=f"recent-{i}", namespace=currency))
+    result = _reference(source, orders)
+    reordered = _reference(source, list(reversed(orders)))
+    assert reordered.windows == result.windows and reordered.customer == result.customer
+    assert result.dual_currency_buyers == 7
+    for window, payload in result.windows.items():
+        rub, kzt = (_feature(result, currency, window) for currency in ("RUB", "KZT"))
+        assert (rub.segment, kzt.segment) == ("AT_RISK", "HIBERNATING")
+        assert (rub.observed_frequency, kzt.observed_frequency) == ((2, 1) if window == "LAST_48M" else (0, 0))
+        assert (rub.monetary.value, kzt.monetary.value) == ((40, 20) if window == "LAST_48M" else (0, 0))
+        for facts in payload["currencies"].values():
+            assert sum(row[1] for row in facts["segments"]) == facts["buyers"] == 7
+            assert sum(row[2] for row in facts["segments"]) == pytest.approx(100)
+
+
 @pytest.mark.parametrize(("status", "is_buyer", "amount", "reason"), [
     ("F", True, Decimal(20), None),
     ("sold", True, Decimal(20), None),
-    ("CP", True, None, "CP_ALLOCATION_UNKNOWN"),
+    ("CP", True, Decimal(20), None),
     ("delivering", False, None, "NOT_IN_CURRENCY_BASE"),
     ("Return", False, None, "NOT_IN_CURRENCY_BASE"),
 ])
@@ -90,9 +128,8 @@ def test_unified_evidence_changes_population_and_monetary(source, status, is_buy
         assert reason in feature.monetary.reasons
     if status == "CP":
         assert feature.partial_nominal == Decimal(20)
-        assert feature.known_subtotal is None
-        assert feature.scores == (5, 1, None)
-        assert feature.segment == "UNSCORABLE"
+        assert feature.known_subtotal == 20
+        assert feature.scores[2] == 1
 
 
 @pytest.mark.parametrize("transitions", [("CP", "F"), ("F", "Return")])
@@ -102,13 +139,12 @@ def test_changed_and_duplicate_snapshots_keep_one_order(source, transitions):
     b = _reference(source, [second, first, first])
     assert a.customer == b.customer and a.windows == b.windows and a.diagnostics == b.diagnostics
     feature = _feature(a)
-    assert feature.frequency.value == 1 and feature.recency.value == 1
-    assert feature.monetary.value is None and feature.segment == "UNSCORABLE"
-    assert "STATUS_CONFLICT" in feature.monetary.reasons
     if transitions[-1] == "Return":
-        assert feature.known_subtotal == 100
+        assert feature.frequency.value == 0 and feature.recency.value is None
+        assert feature.monetary.value is None and not feature.in_base
     else:
-        assert "CP_ALLOCATION_UNKNOWN" in feature.monetary.reasons
+        assert feature.frequency.value == 1 and feature.recency.value == 1
+        assert feature.monetary.value == feature.known_subtotal == 100
 
 
 def test_real_zero_missing_price_and_exact_decimal_subtotal(source):
@@ -119,15 +155,15 @@ def test_real_zero_missing_price_and_exact_decimal_subtotal(source):
     del missing["lines"][0]["priceOfLine"]
     feature = _feature(_reference(source, [zero, missing]))
     assert feature.frequency.value == 2 and feature.known_subtotal == 0
-    assert feature.monetary.reasons == ("PRICE_MISSING",)
+    assert feature.monetary.value == 0
     amount = Decimal("10000.00000000000000000000000001")
     paid = _order("paid", amount=amount)
     cp = _order("cp", "CP", amount=5000)
     feature = _feature(_reference(source, [paid, cp, cp]))
     assert feature.frequency.value == 2
-    assert feature.known_subtotal == amount and feature.partial_nominal == 5000
-    assert feature.monetary.quality is Quality.UNKNOWN and feature.scores[2] is None
-    assert feature.valued_orders == 1
+    assert feature.known_subtotal == Decimal("15000.00000000000000000000000001") and feature.partial_nominal == 5000
+    assert feature.monetary.value == feature.known_subtotal and feature.scores[2] is not None
+    assert feature.valued_orders == 2
 
 
 def test_windows_comparison_and_cutoff_use_creation_date(source):
@@ -138,7 +174,7 @@ def test_windows_comparison_and_cutoff_use_creation_date(source):
     orders[0]["dateTimeUtc"] = "2027-02-01T00:00:00Z"
     result = _reference(source, orders, selected_end=None)
     assert result.context.as_of_date == date.fromisoformat(_AS_OF)
-    assert result.context.policy.policy_id == "UNIFIED_PURCHASE_V1"
+    assert result.context.policy.policy_id == "UNIFIED_PURCHASE_V2"
     assert result.context.policy.time_basis_id == "ORDER_CREATED_PURCHASE_PROXY_V1"
     assert not result.context.created_history_verified and not result.context.status_history_verified
     assert result.context.product_filter_key is None
@@ -168,9 +204,7 @@ def test_two_currencies_and_mixed_order_keep_subtotals(source):
         feature = _feature(result, currency)
         assert feature.frequency.value == 1
         assert feature.known_subtotal == subtotal
-        assert feature.monetary.quality is Quality.CONFLICT
-        assert "MIXED_ORDER_CURRENCY" in feature.monetary.reasons
-        assert feature.segment == "UNSCORABLE"
+        assert feature.monetary.value == subtotal
     result = _reference(source, [mixed])
     assert result.unassigned_currency_buyers == 1
     assert result.windows["LAST_12M"]["currencies"]["KZT"]["known_subtotal"] == 30
@@ -188,10 +222,9 @@ def test_conflicting_snapshot_currency_and_owner(source):
     assert result.base_buyers == 1 and result.population == 3
     assert result.diagnostics["unattributed_purchase_orders"] == 2
     assert result.diagnostics["OWNER_CONFLICT"] == 1
-    assert _feature(result, None).frequency.value == 2
+    assert _feature(result, None).frequency.value == 1
     assert _feature(result).frequency.value == 1
-    assert _feature(result).monetary.value is None
-    assert "CURRENCY_CONFLICT" in _feature(result).monetary.reasons
+    assert _feature(result).monetary.value == 20
 
 
 def test_conflicting_dates_preserve_observed_rf_and_independent_windows(source):
@@ -201,7 +234,8 @@ def test_conflicting_dates_preserve_observed_rf_and_independent_windows(source):
     result = _reference(source, [paid, a, b])
     feature = _feature(result)
     assert feature.observed_frequency == 1 and feature.known_subtotal == 100
-    assert feature.frequency.quality is feature.recency.quality is feature.monetary.quality is Quality.CONFLICT
+    assert feature.frequency.quality is feature.recency.quality is Quality.CONFLICT
+    assert feature.monetary.value == 100
     assert feature.observed_last_order == datetime(2026, 8, 1, tzinfo=timezone.utc)
     assert feature.last_order.reasons == ("CREATED_TIME_CONFLICT",)
     assert result.diagnostics["purchase_date_unresolved"] == 1
@@ -329,8 +363,7 @@ def test_unknown_currency_keeps_behavior_and_blocks_full_money(source):
     assert _feature(result, None).frequency.value == 2
     rub = _feature(result)
     assert rub.frequency.value == 1 and rub.known_subtotal == 35
-    assert rub.monetary.value is None and "CURRENCY_UNKNOWN" in rub.monetary.reasons
-    assert rub.segment == "UNSCORABLE"
+    assert rub.monetary.value == 35
     assert result.windows["LAST_12M"]["quality"]["unvalued_orders"] == 1
 
 

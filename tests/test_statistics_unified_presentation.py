@@ -94,7 +94,7 @@ def test_shared_gui_html_xlsx_all_tables_kpi_order_values_and_header(
                 expected_html.add(identifier)
                 assert parsed.tables[identifier]==expected if expected else parsed.tables[identifier]==[["Нет данных для таблицы."]]
         sheet=book[page.title]
-        expected_tables=[(tuple(("Параметр отчёта","Значение")),tuple(
+        expected_tables=[(tuple(("Параметр отчета","Значение")),tuple(
             (model.cell_presentation(a),model.cell_presentation(b)) for a,b in report.header)),
             (tuple(("Показатель","Значение")),tuple(
              (model.cell_presentation(label),cell) for label,cell in model.kpi_cells(model.ReportBlock("cards",values=report.global_cards))))]
@@ -152,7 +152,7 @@ def test_html_has_all_shared_charts_rfm_variants_zero_none_partial_and_no_dto(ri
     document=html.build_statistics_html(result)
     assert "SYNTH_DO_NOT_SERIALIZE" not in document
     assert document.count('role="tablist"')==2
-    assert all('id="section-'+str(i)+'"' in document for i in range(5))
+    assert all('id="section-'+str(i)+'"' in document for i in range(4))
     assert all('id="customer-section-'+str(i)+'"' in document for i in range(5))
     assert "connect-src 'none'" in document and '<script src=' not in document
     assert "repeating-linear-gradient" in html.heatmap_style(type("Cell",(),dict(value=50.,status="PARTIAL"))())

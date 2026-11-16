@@ -8,7 +8,9 @@ import re
 from types import SimpleNamespace
 
 from Application import statistics_report_presentation as report
+from Application.statistics_chart_data import distinct_chart_colors
 from Application.analysis_filter import AnalysisFilter
+from Application.statistics_rfm_presentation import WINDOW_LABELS
 from Application.statistics_table_explanations import table_explanation, explanation_html
 
 SECTIONS = report.PAGE_LABELS
@@ -55,7 +57,7 @@ def _cell(value, *, identifier=False, percentage=False):
             percentage = percentage or "%" in value.number_format
             value = value.value
         cell = report.cell_presentation(value, percentage=percentage)
-    sort = (format(Decimal(str(cell.value)), "f") if cell.kind == "number" else
+    sort = (format(Decimal(str(cell.displayed_value)), "f") if cell.kind == "number" else
             cell.value.isoformat() if cell.kind == "date" else "" if cell.value is None else str(cell.value))
     data = dict(text=cell.text, sort=sort, kind=cell.kind)
     if cell.tooltip:
@@ -90,14 +92,19 @@ def presentation(result):
 
 def _chart_spec(data, *, section, group, block):
     traces = []
+    palette = distinct_chart_colors(len(data.series)) if data.distinct_series else ()
     if not data.empty:
         for number, (name, values) in enumerate(data.series):
             trace = dict(name=name, exact=[None if value is None else str(value) for value in values],
                          hovertext=[escape(t).replace("\n", "<br>") for t in data.tooltips[number]],
-                         hovertemplate="%{hovertext}<extra>%{fullData.name}</extra>")
-            if data.kind == "donut":
-                trace.update(type="pie", labels=[escape(label) for label in data.labels], values=trace["exact"],
-                             hole=.5, textinfo="none", sort=False)
+                         hovertemplate="%{hovertext}<extra>%{fullData.name}</extra>" if data.show_legend
+                         else "%{hovertext}<extra></extra>")
+            if data.kind in ("donut", "pie"):
+                present = [i for i, value in enumerate(values) if value is not None]
+                trace.update(type="pie", labels=[escape(data.labels[i]) for i in present],
+                             values=[trace["exact"][i] for i in present],
+                             hovertext=[trace["hovertext"][i] for i in present],
+                             hole=.5 if data.kind == "donut" else 0, textinfo="none", sort=False)
             elif data.kind == "horizontal":
                 trace.update(type="bar", orientation="h", x=trace["exact"], y=[str(i) for i in range(len(data.labels))])
             else:
@@ -105,11 +112,19 @@ def _chart_spec(data, *, section, group, block):
                              x=[escape(label) for label in data.labels], y=trace["exact"])
                 if data.kind == "line":
                     trace.update(mode="lines+markers")
+                    if palette:
+                        trace.update(line={"color": palette[number]}, connectgaps=False,
+                                     showlegend=any(value is not None for value in values))
+                    elif data.html_line_color is not None:
+                        trace["line"] = {"color": data.html_line_color}
             traces.append(trace)
     return dict(section=section, group=group, block=block, title=data.title, data=traces,
                 labels=[escape(label) for label in data.display_labels], horizontal=data.kind == "horizontal",
                 money=data.money, percentage=data.percentage, secondary=data.secondary,
-                zero_is_data=data.zero_is_data, monthly=False)
+                zero_is_data=data.zero_is_data, monthly=False,
+                show_legend=data.show_legend, height=data.height, bar_width=data.bar_width,
+                adaptive_percentage=data.adaptive_percentage, wide_labels=data.wide_labels,
+                value_axis_title=data.value_axis_title if data.adaptive_percentage or data.inner_title else "")
 
 
 def _specs(model):
@@ -119,6 +134,8 @@ def _specs(model):
             for index, block in enumerate(group.blocks):
                 if block.kind == "chart":
                     specs.append(_chart_spec(block.data, section=section, group=group.key, block=index))
+                elif block.kind == "chart_row":
+                    specs.extend(_chart_spec(data, section=section, group=group.key, block=index) for data in block.data)
                 elif block.kind == "rfm":
                     choices = {window+"|"+currency: _chart_spec(data, section=section, group=group.key, block=index)
                                for window, currency, data in block.choices}
@@ -166,26 +183,30 @@ def heatmap_style(cell):
     return "background:"+background+";color:#202124;text-align:center;white-space:nowrap"
 
 
-def _heatmap_html(data):
+def _heatmap_html(data, *, compact=False):
 
-    head = "".join("<th>"+escape(label)+"</th>" for label in ("Когорта","Покупателей",*data.columns))
+    head = "".join("<th>"+escape(label)+"</th>" for label in (
+        "Когорта", "Покупатели (M0)" if compact else "Покупателей", *data.columns))
     rows = []
     for row in data.rows:
         cells = ["<td>"+escape(row.month)+"</td>", "<td>"+str(row.buyers)+"</td>"]
         for cell in row.cells:
             text = "—" if cell.value is None else report.cell_presentation(cell.value,percentage=True).text
-            if cell.value is not None and cell.status != "FULL":
+            if not compact and cell.value is not None and cell.status != "FULL":
                 text += " (частично)"
             cells.append('<td style="'+heatmap_style(cell)+'">'+escape(text)+"</td>")
         rows.append("<tr>"+"".join(cells)+"</tr>")
     if not rows:
         rows.append('<tr><td colspan="14">Нет данных для отображения.</td></tr>')
-    return '<div class="table-card"><div class="table-scroll heatmap"><table><thead><tr>'+head+'</tr></thead><tbody>'+"".join(rows)+"</tbody></table></div></div>"
+    style = " heatmap-compact" if compact else ""
+    return '<div class="table-card"><div class="table-scroll heatmap'+style+'"><table><thead><tr>'+head+'</tr></thead><tbody>'+"".join(rows)+"</tbody></table></div></div>"
 
 
 def _cards_html(values):
     return '<div class="kpis" data-count="'+str(len(values))+'">'+"".join(
-        '<article class="kpi"><span>'+escape(label)+'</span><strong>'+escape(cell.text)+"</strong></article>"
+        '<article class="kpi"><span>'+escape(label)+'</span><strong'
+        + (f' title="{escape(cell.tooltip, quote=True)}"' if cell.tooltip else "")
+        + '>'+escape(cell.text)+"</strong></article>"
         for label,cell in values)+"</div>"
 
 
@@ -195,7 +216,15 @@ def build_statistics_html(result, *, snapshot_diagnostics=None, presentation=Non
     check()
     model = presentation if presentation is not None else report.report_presentation(result,snapshot_diagnostics=snapshot_diagnostics)
     specs = _specs(model)
-    chart_indices = {(s["section"],s["group"],s["block"]):i for i,s in enumerate(specs)}
+    chart_indices = {}
+    for i, spec in enumerate(specs):
+        chart_indices.setdefault((spec["section"], spec["group"], spec["block"]), []).append(i)
+
+    def chart_card(index, inner_title="", controls=""):
+        title = f'<h3>{escape(inner_title)}</h3>' if inner_title else ""
+        return (f'<article class="chart-card">{title}{controls}<div id="chart-{index}" class="chart" '
+                f'data-chart="{index}" aria-label="{escape(specs[index]["title"], quote=True)}"></div></article>')
+
     def blocks_html(page_index,group):
         content = []
         for index,block in enumerate(group.blocks):
@@ -204,29 +233,38 @@ def build_statistics_html(result, *, snapshot_diagnostics=None, presentation=Non
             if block.kind == "heading":
                 content.append('<h3 class="section-title">'+escape(block.title)+"</h3>")
             elif block.kind == "text":
-                if not block.options.get("xlsx_only"):
-                    css="report-context" if block.options.get("context") else "report-note"
-                    content.append('<p class="'+css+'">'+escape(block.title)+"</p>")
+                css="report-context" if block.options.get("context") else "report-note"
+                content.append('<p class="'+css+'">'+escape(block.title)+"</p>")
             elif block.kind == "cards":
                 content.append(_cards_html(report.kpi_cells(block)))
             elif block.kind == "table":
+                details = block.options.get("details")
+                if details:
+                    content.append('<details class="report-details"><summary>'+escape(details)+'</summary>')
                 content.append(_table_html(_project_block(block),identifier))
                 explanation = table_explanation(block.table_id)
                 if explanation is not None:
                     content.append(explanation_html(block.table_id, explanation))
+                if details:
+                    content.append("</details>")
             elif block.kind in ("chart","rfm"):
-                n=chart_indices[page_index,group.key,index]
+                n, = chart_indices[page_index, group.key, index]
                 controls=""
                 if block.kind == "rfm":
+                    windows = dict.fromkeys(window for window, _, _ in block.choices)
+                    options = "".join(f'<option value="{escape(window)}">{escape(WINDOW_LABELS[window])}</option>'
+                                      for window in windows)
                     controls=('<div class="rfm-controls"><label>Период <select data-rfm-window="'+str(n)+'">'
-                              '<option value="LAST_12M">12 месяцев</option><option value="LAST_24M">24 месяца</option>'
-                              '<option value="LAST_48M">48 месяцев</option></select></label>'
+                              +options+'</select></label>'
                               '<label>Валюта <select data-rfm-currency="'+str(n)+'"><option>RUB</option><option>KZT</option></select></label></div>')
-                inner_title = ('<h3>'+escape(block.data.title)+'</h3>') if block.kind=="chart" and block.data.inner_title else ""
-                content.append('<article class="chart-card">'+inner_title+controls+f'<div id="chart-{n}" class="chart" data-chart="{n}" '
-                               f'aria-label="{escape(specs[n]["title"],quote=True)}"></div></article>')
+                inner_title = block.data.title if block.kind == "chart" and block.data.inner_title else ""
+                content.append(chart_card(n, inner_title, controls))
+            elif block.kind == "chart_row":
+                indices = chart_indices[page_index, group.key, index]
+                content.append(f'<div class="rfm-chart-row" data-count="{len(indices)}">' +
+                               "".join(chart_card(n, data.title) for n, data in zip(indices, block.data)) + '</div>')
             elif block.kind == "heatmap":
-                content.append(_heatmap_html(block.data))
+                content.append(_heatmap_html(block.data, compact=block.options.get("compact", False)))
         return "".join(content)
     navigation = "".join(f'<button role="tab" id="tab-{i}" aria-controls="section-{i}" '
                          f'aria-selected="{str(i==0).lower()}" tabindex="{0 if i==0 else -1}">'
@@ -246,8 +284,12 @@ def build_statistics_html(result, *, snapshot_diagnostics=None, presentation=Non
         else:
             content.append(blocks_html(i,page.groups[0]))
         content.append("</section>");panels.append("".join(content))
-    metadata="<dl>"+"".join("<div><dt>"+escape(label)+"</dt><dd>"+escape(report.cell_presentation(value).text)+"</dd></div>"
-                           for label,value in model.header)+"</dl>"
+    if model.summary:
+        header = '<header><div class="brand">KANZLER AI</div><p class="report-summary">'+escape(model.summary)+'</p>'
+    else:
+        metadata="<dl>"+"".join("<div><dt>"+escape(label)+"</dt><dd>"+escape(report.cell_presentation(value).text)+"</dd></div>"
+                               for label,value in model.header)+"</dl>"
+        header = '<header><div class="brand">KANZLER AI</div><h1>Статистика</h1>'+metadata
     payload=json.dumps(specs,ensure_ascii=False,allow_nan=False).replace("&",r"\u0026").replace("<",r"\u003c").replace(">",r"\u003e")
     payload=payload.replace("\u2028",r"\u2028").replace("\u2029",r"\u2029")
     library=re.sub(r"</script",r"<\/script",get_plotlyjs(),flags=re.IGNORECASE)
@@ -258,11 +300,12 @@ def build_statistics_html(result, *, snapshot_diagnostics=None, presentation=Non
             '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; '
             'style-src \'unsafe-inline\'; img-src data: blob:; font-src data:; connect-src \'none\'; object-src \'none\'; '
             'base-uri \'none\'; form-action \'none\'"><title>KANZLER AI — Статистика</title><style>'+css+"</style></head><body>"
-            '<header><div class="brand">KANZLER AI</div><h1>Статистика</h1>'+metadata+_cards_html(global_cards)+"</header>"
-            '<nav role="tablist" aria-label="Разделы отчёта">'+navigation+"</nav><main>"+"".join(panels)+"</main>"
+            +header+_cards_html(global_cards)+"</header>"
+            '<nav role="tablist" aria-label="Разделы отчета">'+navigation+"</nav><main>"+"".join(panels)+"</main>"
             '<noscript>Для переключения вкладок и графиков включите JavaScript.</noscript>'
             '<script>window.PlotlyConfig={MathJaxConfig:"local"};</script><script id="plotly-library">'+library+"</script>"
-            '<script type="application/json" id="chart-data">'+payload+"</script><script>"+js+"</script></body></html>")
+            '<script type="application/json" id="chart-data">'+payload+"</script>"
+            "<script>"+js+"</script></body></html>")
 
 
 def export_statistics_html(result,path):

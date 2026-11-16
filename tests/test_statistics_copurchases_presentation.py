@@ -93,7 +93,7 @@ def test_copurchase_kpis_three_tables_conditional_rates_and_missing_states_match
             assert all(table.item(0,0).text()=='Нет данных' for table in widgets)
             if scenario=='legacy':assert COPURCHASE_LEGACY_TEXT in str(expected)
         assert book.sheetnames==list(report.PAGE_LABELS)
-        assert tab.sections.count()==tab.customer_sections.count()==5
+        assert tab.sections.count()==4 and tab.customer_sections.count()==5
         assert result==before and path.read_bytes()==original
     finally:
         book.close()

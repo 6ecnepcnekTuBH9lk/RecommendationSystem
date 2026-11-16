@@ -10,8 +10,10 @@ function selectedSpec(node) {
   return base.variants[windowSelect.value+'|'+currency.value];
 }
 async function drawChart(node,force=false) {
-  if(node.closest('[hidden]')||node.dataset.ready&&!force)return;
+  if(node.closest('[hidden]'))return;
   const spec=selectedSpec(node);
+  const width=String(node.clientWidth);
+  if(node.dataset.ready&&!force&&(!spec.wide_labels||node.dataset.labelWidth===width))return;
   if(!spec.data.length) {
     if(node.classList.contains('js-plotly-plot'))Plotly.purge(node);
     node.textContent='Нет данных для диаграммы.';node.dataset.ready='empty';return;
@@ -21,11 +23,11 @@ async function drawChart(node,force=false) {
     const copy={...trace};delete copy.exact;
     const coordinate=copy.type==='pie'?'values':spec.horizontal?'x':'y';
     copy[coordinate]=copy[coordinate].map(v=>v===null?null:Number(v));
-    if(copy.type!=='pie')copy.marker={color:colors[spec.secondary&&index===0?1:index%colors.length]};
+    if(copy.type!=='pie')copy.marker={color:copy.line?.color??colors[spec.secondary&&index<2?1-index:index%colors.length]};
     else copy.marker={colors};
     return copy;
   });
-  const legend=data.length>1||data[0].type==='pie';
+  const legend=spec.show_legend&&(data.length>1||data[0].type==='pie');
   const layout={autosize:true,separators:', ',barmode:'group',
     margin:{t:12,r:24,b:legend?105:65,l:68},paper_bgcolor:'#fff',plot_bgcolor:'#fff',
     colorway:spec.secondary?[colors[1],colors[0]]:colors,
@@ -33,19 +35,48 @@ async function drawChart(node,force=false) {
     legend:{orientation:'h',y:-.32,x:0},hoverlabel:{align:'left',font:{size:12}},
     xaxis:{gridcolor:'#edf1f5',zeroline:false,automargin:true},
     yaxis:{gridcolor:'#edf1f5',zeroline:false,rangemode:'tozero',automargin:true}};
+  if(spec.height)node.style.height=spec.height+'px';
+  if(node.closest('.rfm-chart-row')){
+    layout.margin={t:8,r:12,b:legend?64:42,l:64};
+    layout.xaxis.tickfont={size:11};
+    layout.yaxis.title={text:spec.value_axis_title,font:{size:11}};
+  }
+  if(spec.bar_width){
+    layout.bargap=1-spec.bar_width;
+    layout.bargroupgap=.08;
+    layout.legend.y=-.16;
+  }
   if(spec.horizontal){
     layout.yaxis={type:'category',autorange:'reversed',tickvals:spec.labels.map((_,i)=>String(i)),
       ticktext:spec.labels,automargin:true};
     layout.margin.l=120;
+    if(spec.wide_labels){
+      node.dataset.labelWidth=width;
+      layout.margin.l=Math.min(420,Math.floor(node.clientWidth*.42));
+      const context=document.createElement('canvas').getContext('2d');
+      context.font='12px Arial';
+      layout.yaxis.ticktext=spec.labels.map(label=>{
+        const decoded=new DOMParser().parseFromString(label,'text/html').body.textContent;
+        if(context.measureText(decoded).width<=layout.margin.l-16)return label;
+        const chars=Array.from(decoded);
+        while(context.measureText(chars.join('')+'…').width>layout.margin.l-16&&chars.length)chars.pop();
+        return chars.join('').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')+'…';
+      });
+    }
   } else layout.xaxis.type='category';
   if(data[0].type!=='pie'){
     const axis=spec.horizontal?layout.xaxis:layout.yaxis;
     const values=data.flatMap(t=>t[spec.horizontal?'x':'y']).filter(v=>v!==null);
     const maximum=Math.max(0,...values);
     axis.tickformat=maximum>=1000?'.3~s':spec.money?',.2~f':',d';
-    if(spec.percentage){axis.range=[0,100];axis.dtick=25;axis.title={text:'Повторная доля, %'};}
+    if(spec.adaptive_percentage){
+      axis.range=[0,Math.min(100,Math.max(1,maximum*1.12))];
+      axis.tickformat='.1~f';axis.title={text:spec.value_axis_title};
+      layout.legend.y=-.22;
+    }
+    else if(spec.percentage){axis.range=[0,100];axis.dtick=25;axis.title={text:'Повторная доля, %'};}
     else if(!spec.money&&maximum<=5)axis.dtick=1;
-    if(spec.zero_is_data&&!spec.horizontal){
+    if(spec.zero_is_data&&!spec.horizontal&&data[0].type!=='scatter'){
       layout.annotations=spec.data[0].exact.flatMap((value,i)=>value===null||Number(value)===0?
         [{x:spec.labels[i],y:0,text:value===null?'—':spec.percentage?'0 %':'0',showarrow:false,yshift:12}]:[]);
     }

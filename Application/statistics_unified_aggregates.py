@@ -10,14 +10,14 @@ import json
 from types import SimpleNamespace
 
 from Application.action_statistics import ActionAggregates
-from Application.statistics_unified_breakdowns import BuyerBreakdowns, OrderBreakdowns, product_breakdowns
+from Application.statistics_unified_breakdowns import BuyerBreakdowns, OrderBreakdowns, add_exact_decimal, product_breakdowns
 
 from Application.dataset_statistics import _bucket as activity_bucket, _distribution, _histogram_median
 from Application.interactions import InteractionType
 from Application.product_resolution import SUPPORTED_NAMESPACES
 from Application.order_statistics import CURRENCIES
 from Application.statistics_copurchases import MAX_DISTINCT_PAIRS, MAX_PAIRS_PER_ORDER
-from Application.statistics_unified_facts import AnalyticsContext, OrderBusinessFact, OrderKind, OrderObservation, _issues, _result, _sum
+from Application.statistics_unified_facts import AnalyticsContext, OrderBusinessFact, OrderKind, OrderObservation, _issues, _result
 from Application.statistics_unified_policy import EvidenceQuality as Quality, Measured, STATUS_CATALOG, StatusGroup
 
 _ZERO = Decimal(0)
@@ -132,10 +132,6 @@ class ActionEvidence:
     system_name: str | None = None
 
 
-def _add_decimal(left, right):
-    return _sum([left, right])
-
-
 def _count(known, issues=()):
     return AggregateMetric(known, _result(known, issues))
 
@@ -189,7 +185,7 @@ class _Money:
         self.valued_positions, self.unvalued_positions = Counter(), Counter()
         self.cheque = defaultdict(lambda: _ZERO)
 
-    def add(self, money, *, purchase, currency, fully_valued_currency):
+    def add(self, money, *, purchase, currency):
         for value in money:
             unit = value.currency
             known = dict(value.known_nominals)
@@ -204,13 +200,13 @@ class _Money:
                             and value.recognized_purchase.value is not None):
                         continue
                 if observed is not None:
-                    self.amounts[unit][name] = _add_decimal(self.amounts[unit].get(name, _ZERO), observed)
+                    self.amounts[unit][name] = add_exact_decimal(self.amounts[unit].get(name, _ZERO), observed)
             self.valued_positions[unit] += value.valued_purchase_positions
             self.unvalued_positions[unit] += value.unvalued_purchase_positions
-            if purchase and unit == fully_valued_currency:
+            if purchase and value.valued_purchase_positions:
                 self.valued[unit] += 1
-                self.cheque[unit] = _add_decimal(self.cheque[unit], value.recognized_purchase.value)
-            elif purchase and currency in (None, unit) and fully_valued_currency is None:
+                self.cheque[unit] = add_exact_decimal(self.cheque[unit], value.recognized_purchase.value)
+            elif purchase and currency in (None, unit):
                 self.unvalued[unit] += 1
 
     def result(self, issues, buyer_bases=None):
@@ -220,8 +216,7 @@ class _Money:
             for name in _AMOUNT_FIELDS:
                 failures = set(issues) | self.issues[unit, name]
                 known = self.amounts[unit].get(name)
-                # A subtotal remains a subtotal even when only some inputs were valued.
-                if name == "known_purchase_subtotal" and known is not None:
+                if name in ("known_purchase_subtotal", "recognized_purchase") and known is not None:
                     total = _result(known, ())
                 else:
                     total = _result(known if known is not None else _ZERO, failures)
@@ -233,17 +228,9 @@ class _Money:
                 unit, amounts, self.valued[unit], self.unvalued[unit], self.valued_positions[unit],
                 self.unvalued_positions[unit], _mean(self.cheque[unit], self.valued[unit]),
                 n, incomplete, None if buyer_bases is None else (
-                    _result(_ZERO, issues) if issues else _mean(amount, n)),
+                    _mean(amount, n)),
             ))
         return tuple(rows)
-
-
-def _valuation(purchase, money, currency):
-    if purchase and currency in CURRENCIES:
-        row = next(row for row in money if row.currency == currency)
-        if row.recognized_purchase.value is not None:
-            return currency
-    return None
 
 
 @dataclass(slots=True)
@@ -253,33 +240,35 @@ class _Item:
     issues: dict = field(default_factory=lambda: defaultdict(set))
     money: _Money = field(default_factory=_Money)
 
-    def add(self, evidence):
+    def add(self, evidence, owner):
         purchase = evidence.purchase
         self.counts["purchase_orders"] += purchase.observed.value is True
         self.counts["purchase_positions"] += purchase.known_positions
-        self.units = _add_decimal(self.units, purchase.known_nominal_units)
+        self.units = add_exact_decimal(self.units, purchase.known_nominal_units)
         self.issues["purchase_orders"].update(_issues(purchase.observed))
+        if purchase.observed.value is True and owner is None:
+            self.issues["buyers"].add(_OWNER)
         self.issues["purchase_positions"].update(_issues(purchase.positions))
         self.issues["nominal_units"].update(_issues(purchase.nominal_units))
+        groups = dict(evidence.current_groups)
+        issues = _issues(evidence.positions)
         for key, group in (("partial_positions", StatusGroup.PARTIALLY_COMPLETED),
                            ("cancelled_positions", StatusGroup.CANCELLED), ("returned_positions", StatusGroup.RETURNED)):
-            self.counts[key] += dict(evidence.current_groups).get(group, 0)
-            self.issues[key].update(_issues(evidence.positions))
-            if dict(evidence.current_groups).get(StatusGroup.UNKNOWN):
+            self.counts[key] += groups.get(group, 0)
+            self.issues[key].update(issues)
+            if groups.get(StatusGroup.UNKNOWN):
                 self.issues[key].add(_STATE)
         currency = evidence.order_currency.value
-        valued = _valuation(purchase.observed.value is True, evidence.money, currency)
-        self.money.add(evidence.money, purchase=purchase.observed.value is True,
-                       currency=currency, fully_valued_currency=valued)
+        self.money.add(evidence.money, purchase=purchase.observed.value is True, currency=currency)
 
-    def result(self, code, buyers, issues, buyer_issues):
+    def result(self, code, buyers, issues):
         def measure(name):
             return _count(self.counts[name], set(issues) | self.issues[name])
         units = AggregateMetric(self.units, _result(self.units, set(issues) | self.issues["nominal_units"]))
         fulfilled = AggregateMetric(None, _result(_ZERO, ((Quality.UNKNOWN, "FULFILLMENT_UNVERIFIED"),)))
         return ProductAggregate(
             code, measure("purchase_orders"), measure("purchase_positions"),
-            _count(buyers, set(issues) | buyer_issues), units, fulfilled,
+            _count(buyers, set(issues) | self.issues["purchase_orders"] | self.issues["buyers"]), units, fulfilled,
             measure("partial_positions"), measure("cancelled_positions"), measure("returned_positions"),
             self.counts["VIEW"], self.counts["FAVORITE"], self.money.result(issues),
         )
@@ -305,7 +294,7 @@ class _Members:
     def __init__(self, db, check):
         self.db, self.check = db, check
         db.executescript(_MEMBERSHIP)
-        db.create_function("decimal_add", 2, lambda a, b: str(_add_decimal(Decimal(a), Decimal(b))))
+        db.create_function("decimal_add", 2, lambda a, b: str(add_exact_decimal(Decimal(a), Decimal(b))))
 
     def add(self, kind, customer, bucket=""):
         if customer is not None:
@@ -349,7 +338,7 @@ class _Members:
                     orders=distribution(orders, (1, 2, 5, 10),
                                         ("1 заказ", "2 заказа", "3–5 заказов", "6–10 заказов", "11+ заказов")))
 
-    def buy(self, fact, codes, unknown, valued):
+    def buy(self, fact, codes, unknown):
         owner = fact.customer_key.value
         self.db.execute("INSERT INTO buyers VALUES(?,1) ON CONFLICT(customer) DO UPDATE SET frequency=frequency+1",
                         (owner,))
@@ -359,14 +348,14 @@ class _Members:
         self.db.execute("DELETE FROM chronology WHERE customer=? AND (stamp,rank) IN ("
                         "SELECT stamp,rank FROM chronology WHERE customer=? ORDER BY stamp,rank LIMIT -1 OFFSET 2)",
                         (owner, owner))
-        self.cash(fact, valued, "buyer")
+        self.cash(fact, "buyer")
 
-    def cash(self, fact, valued, scope):
+    def cash(self, fact, scope):
         owner = fact.customer_key.value
         for row in fact.money:
-            n = int(valued == row.currency)
+            n = int(bool(row.valued_purchase_positions))
             amount = row.recognized_purchase.value if n else _ZERO
-            bad = int(valued is None)
+            bad = int(not n and fact.order_currency.value in (None, row.currency))
             self.db.execute("INSERT INTO cash VALUES(?,?,?,?,?,?) ON CONFLICT(scope,currency,customer) DO UPDATE SET "
                             "amount=decimal_add(amount,excluded.amount),n=n+excluded.n,bad=bad|excluded.bad",
                             (scope, row.currency, owner, str(amount), n, bad))
@@ -378,11 +367,11 @@ class _Members:
             amount = _ZERO
             for value, n, bad in self.db.execute("SELECT amount,n,bad FROM cash WHERE scope=? AND currency=?", (scope, currency)):
                 self.check()
-                if bad:
-                    unvalued += 1
-                elif n:
+                if n:
                     count += 1
-                    amount = _add_decimal(amount, Decimal(value))
+                    amount = add_exact_decimal(amount, Decimal(value))
+                elif bad:
+                    unvalued += 1
             bases[currency] = (count, unvalued, amount)
         return bases
 
@@ -458,7 +447,7 @@ class _Aggregate:
             self.check()
             self.raw_status[_bucket(line.status_code)] += 1
 
-    def order(self, entry):
+    def order(self, entry, *, count_history=True):
         for observation in entry.observations:
             self.check()
             self._raw(observation)
@@ -472,13 +461,15 @@ class _Aggregate:
         db = self.members.db
         if not db.execute("INSERT OR IGNORE INTO seen VALUES(?)", (whole.order_key,)).rowcount:
             raise ValueError("Unified order groups must be unique")
-        self.diagnostics.update(whole.diagnostics)
-        for field_name in ("exact_duplicates", "business_equivalent", "conflicting_snapshots"):
-            self.diagnostics[field_name] += getattr(whole.snapshots, field_name)
-        self.history["purchase_orders"] += whole.purchase.observed.value is True
-        self.history["purchase_positions"] += whole.purchase.known_positions
-        self.history_issues.update(_issues(whole.purchase.observed))
-        self.history_position_issues.update(_issues(whole.purchase.positions))
+        if count_history:
+            self.diagnostics.update(whole.diagnostics)
+            self.diagnostics["excluded_conflicting_positions"] += whole.purchase.excluded_positions
+            for field_name in ("exact_duplicates", "business_equivalent", "conflicting_snapshots"):
+                self.diagnostics[field_name] += getattr(whole.snapshots, field_name)
+            self.history["purchase_orders"] += whole.purchase.observed.value is True
+            self.history["purchase_positions"] += whole.purchase.known_positions
+            self.history_issues.update(_issues(whole.purchase.observed))
+            self.history_position_issues.update(_issues(whole.purchase.positions))
         date = whole.order_created_at.value
         if date is None:
             if self.customer_scope.period is None:
@@ -489,12 +480,14 @@ class _Aggregate:
             if self.customer_scope.period is not None:
                 self.population_issues.add(_DATE)
             return
-        if not any(start <= date < end for start, end in self.contexts[0].orders_intervals):
+        if count_history and not any(start <= date < end for start, end in self.contexts[0].orders_intervals):
             self.diagnostics["orders_outside_coverage"] += 1
         if self.customer_scope.period is None or _inside_period(date, self.customer_scope.period):
             self._population_order(whole)
         if _in_period(date, self.buyer_scope.orders_intervals, self.buyer_scope.period):
             self._buyer(whole)
+        if selected is None:
+            return
         if order_in_detail_scope(whole, selected, self.order_scope):
             self._selected(whole, selected)
         elif (_in_period(date, self.order_scope.orders_intervals, self.order_scope.period)
@@ -527,9 +520,7 @@ class _Aggregate:
         if owner is None:
             self.diagnostics["unattributed_orders"] += 1
             self.diagnostics["owner_conflict_orders"] += fact.customer_key.quality is Quality.CONFLICT
-        valued = _valuation(evidence.value is True, fact.money, fact.order_currency.value)
-        self.buyer_money.add(fact.money, purchase=evidence.value is True, currency=fact.order_currency.value,
-                             fully_valued_currency=valued)
+        self.buyer_money.add(fact.money, purchase=evidence.value is True, currency=fact.order_currency.value)
         if evidence.value is not True:
             return
         self.history["buyer_period_purchase_orders"] += 1
@@ -565,8 +556,8 @@ class _Aggregate:
             self.pairs[pair] += 1
             self.members.add("pair", owner, json.dumps(pair, ensure_ascii=False))
         if owner is not None:
-            self.members.buy(fact, codes, incomplete, valued)
-            self.buyer_breakdowns.add(fact, valued)
+            self.members.buy(fact, codes, incomplete)
+            self.buyer_breakdowns.add(fact)
 
     def _namespace(self, token, resolved):
         namespace = token[0][0] if token and len(token) == 1 else None
@@ -640,7 +631,6 @@ class _Aggregate:
         self.status_orders.update(statuses)
         for status, positions in fact.historical_statuses:
             self.historical_status[_bucket(status)] += positions
-        valued = _valuation(evidence.value is True, fact.money, fact.order_currency.value)
         for name, observed in (("buyers", evidence.value is True),
                                ("cancelled_customers", fact.has_cancelled), ("returned_customers", fact.has_returned)):
             if observed:
@@ -650,33 +640,33 @@ class _Aggregate:
         if evidence.value is True:
             count["unassigned_currency_orders"] += fact.order_currency.value is None
             if owner is not None:
-                self.members.cash(fact, valued, "order")
-        self.order_money.add(fact.money, purchase=evidence.value is True, currency=fact.order_currency.value,
-                             fully_valued_currency=valued)
+                self.members.cash(fact, "order")
+        self.order_money.add(fact.money, purchase=evidence.value is True, currency=fact.order_currency.value)
         self.action_counts["PURCHASE"] += fact.purchase.known_positions
         self.action_issues["PURCHASE"].update(_issues(fact.purchase.positions))
-        if fact.purchase.known_positions:
-            self.members.activity(owner, 4, fact.purchase.known_positions, int(evidence.value is True))
+        self.action_issues["PURCHASE_OWNER"].update(_issues(evidence))
+        if evidence.value is True:
+            self.members.activity(owner, 4, fact.purchase.known_positions, 1)
             if owner is None:
                 self.action_issues["PURCHASE_OWNER"].add(_OWNER)
         for item in fact.products:
             self.check()
-            self._item(item.item_id).add(item)
+            self._item(item.item_id).add(item, owner)
             if item.purchase.observed.value is True:
                 self.members.add("item", owner, item.item_id)
         attributed = sum(item.purchase.known_positions for item in fact.products)
-        if attributed != fact.purchase.known_positions or "PRODUCT_SCOPE_UNRESOLVED" in fact.diagnostics:
-            self.product_issues.add(_PRODUCT)
+        if attributed != fact.purchase.known_positions:
             self.diagnostics["unresolved_purchase_items"] += fact.purchase.known_positions - attributed
-        self.product_issues.update(_issues(fact.positions))
+        self.product_issues.update(fact.unassigned_product_issues)
 
-    def action(self, event, predicate):
+    def action(self, event, predicate, *, count_diagnostics=True, count_headers=True):
         occurred, owner = event.occurred, event.customer_key
-        if self.customer_scope.period is None or _inside_period(occurred, self.customer_scope.period):
-            self.members.add("population", owner)
-        elif occurred is None and owner is not None:
-            self.population_issues.add((Quality.INSUFFICIENT_COVERAGE, "ACTION_DATE_UNRESOLVED"))
-        if self.action_period is None or _inside_period(occurred, self.action_period):
+        if count_headers:
+            if self.customer_scope.period is None or _inside_period(occurred, self.customer_scope.period):
+                self.members.add("population", owner)
+            elif occurred is None and owner is not None:
+                self.population_issues.add((Quality.INSUFFICIENT_COVERAGE, "ACTION_DATE_UNRESOLVED"))
+        if count_headers and (self.action_period is None or _inside_period(occurred, self.action_period)):
             self.source_actions["all"] += 1
             if event.system_name:
                 category = event.kind.value if event.kind is not None else "UNMAPPED"
@@ -691,7 +681,7 @@ class _Aggregate:
                 self.source_actions["unmapped"] += 1
             else:
                 self.source_actions["classification_unknown"] += 1
-        if event.reason:
+        if event.reason and count_diagnostics:
             self.diagnostics[event.reason] += 1
         if event.kind is None:
             if event.reason == "ACTION_INVALID":
@@ -739,7 +729,7 @@ class _Aggregate:
             issues = self.action_issues[name] | (self.order_issues if bit == 4 else set())
             rows[name] = _count(self.action_counts[name], issues)
             if bit == 4:
-                issues |= self.action_issues["PURCHASE_OWNER"]
+                issues = self.order_issues | self.action_issues["PURCHASE_OWNER"]
             rows[name + "_users"] = _count(sum(n for mask, n in masks.items() if mask & bit), issues)
         for name, bits in (("VIEW_PURCHASE", 5), ("FAVORITE_PURCHASE", 6),
                            ("VIEW_FAVORITE", 3), ("VIEW_FAVORITE_PURCHASE", 7)):
@@ -816,8 +806,7 @@ class _Aggregate:
                  for name in ("completed", "partial", "cancelled", "returned", "in_progress", "unknown")}
         item_buyers = self.members.counts("item")
         products = tuple(item.result(code, item_buyers.get(code, 0),
-                                     self.order_issues | self.product_issues,
-                                     self.action_issues["PURCHASE_OWNER"])
+                                     self.order_issues | self.product_issues)
                          for code, item in sorted(self.items.items()))
         frequency = tuple(db.execute("SELECT frequency,COUNT(*) FROM buyers GROUP BY frequency ORDER BY frequency"))
         buyers = sum(n for _, n in frequency)
@@ -847,7 +836,8 @@ class _Aggregate:
                       for key, n in sorted(self.pairs.items()))
         chronology = self._chronology()
         namespaces = self._namespaces()
-        customer_breakdowns = self.buyer_breakdowns.result(self._buyer_coverage, self.profiles_available)
+        customer_breakdowns = self.buyer_breakdowns.result(self._buyer_coverage, self.profiles_available,
+                                                         period=self.buyer_scope.period)
         customer_breakdowns["copurchases"] = dict(
             orders=_count(self.history["buyer_period_purchase_orders"], buyer_scope_issues),
             multicategory_orders=_count(self.history["multicategory_orders"], category_issues),
@@ -890,7 +880,8 @@ def accumulate_aggregates(
     db, *, contexts: tuple[AnalyticsContext, ...], orders: Iterable[AggregateOrder],
     actions: Iterable[ActionEvidence], profile_keys: Iterable[str], metadata,
     product_predicate=None, action_period=None, profile_details=(), profiles_available=False,
-    category_reference=None, check=lambda: None,
+    category_reference=None, check=lambda: None, raw_summary=None, action_diagnostics=None, order_history=None,
+    action_headers=None,
 ) -> AggregateResult:
     """Consume a pinned source once. The caller owns the disposable SQLite workspace."""
     expected = ("raw_orders", "order_product_slice", "item_interactions", "buyer_period", "customer_population")
@@ -901,6 +892,23 @@ def accumulate_aggregates(
     if (contexts[1].product_filter_key is None) != (product_predicate is None):
         raise ValueError("Unified product predicate does not match its declared scope")
     accumulator = _Aggregate(contexts, db, metadata, check, category_reference)
+    if raw_summary is not None:
+        orders_count, lines_count, status_counts, issues = raw_summary
+        accumulator.diagnostics.update(raw_orders=orders_count, raw_lines=lines_count)
+        accumulator.raw_status.update(dict(status_counts))
+        accumulator.raw_issues.update(issues)
+    if action_diagnostics is not None:
+        counts, invalid_unclassified = action_diagnostics
+        accumulator.diagnostics.update(dict(counts))
+        if invalid_unclassified:
+            for kind in ("VIEW", "FAVORITE"):
+                accumulator.action_issues[kind].add((Quality.INSUFFICIENT_COVERAGE, "ACTION_INVALID"))
+    if order_history is not None:
+        diagnostics, history, order_issues, position_issues = order_history
+        accumulator.diagnostics.update(dict(diagnostics))
+        accumulator.history.update(dict(history))
+        accumulator.history_issues.update(order_issues)
+        accumulator.history_position_issues.update(position_issues)
     accumulator.action_period = action_period
     if contexts[4].period is None:
         for key in profile_keys:
@@ -908,12 +916,15 @@ def accumulate_aggregates(
             accumulator.members.add("population", key)
     for i, entry in enumerate(orders, 1):
         check()
-        accumulator.order(entry)
+        accumulator.order(entry, count_history=order_history is None)
         if i % 1000 == 0:
             db.commit()
+    if action_headers is not None:
+        action_headers(accumulator)
     for i, event in enumerate(actions, 1):
         check()
-        accumulator.action(event, product_predicate)
+        accumulator.action(event, product_predicate, count_diagnostics=action_diagnostics is None,
+                           count_headers=action_headers is None)
         if i % 1000 == 0:
             db.commit()
     db.commit()

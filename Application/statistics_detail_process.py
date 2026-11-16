@@ -33,7 +33,7 @@ class DetailExportProcess(QObject):
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.stalled)
 
-    def start(self, options, *, report_result=None, detail=None):
+    def start(self, options, *, report_result=None, detail=None, applied_filter=None):
         if self.process is not None:
             return
         self.options = dict(options)
@@ -53,6 +53,8 @@ class DetailExportProcess(QObject):
                 message = {"command": "report", "snapshot": snapshot}
                 if detail is not None:
                     message.update(command="detail", filter=detail)
+                elif applied_filter is not None:
+                    message["applied_filter"] = applied_filter
                 payload = json.dumps(message,
                                      ensure_ascii=not unified,allow_nan=False,separators=(",",":")).encode()+b"\n"
                 limit = MAX_UNIFIED_REPORT_INPUT if unified else MAX_REPORT_INPUT

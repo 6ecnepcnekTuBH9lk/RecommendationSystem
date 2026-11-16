@@ -42,6 +42,26 @@ _COMPATIBILITY = {
 }
 _COMPONENTS = ("statistics.sqlite", "demographics.sqlite")
 _CAPABILITIES = ("orders", "actions", "catalog", "profile_links")
+# The published V1 generation predates the reconciliation-only quality changes.
+# Its normalizer, stored observations and SQLite layout are compatible.
+_V1_PUBLISHED_COMPONENTS = {
+    "statistics_unified_index.py": "6752e41b18a202a8856204a24ef5af903a6ab8048102005624fb7bb082f988df",
+    "statistics_unified_projection.py": "4cec7cdcf7d99761e9f1415309c4095e850519d56c53ed78fd3234fcc00c2ff5",
+    "statistics_unified_facts.py": "cb406c4e3100fb356f9075e74bb1a765ca178c7df6ed23c1cc51460f1845ca18",
+    "statistics_unified_policy.py": "8c19109d63e24bf3da5cd40fe5d945c5f9da1aad1ea4b5f80e74658b72aa5c3d",
+}
+_V1_RECONCILIATION_HASHES = (
+    "282973ad6f39b646ee0f42ae0483f0edb30a50fa452711e05f17de4bd44eedec",
+    "0e0822af000d6bae293cf5c4a043e6745ca9ac69bd9559c79c66bdad8c051b8b",
+    "f107e004e9ad3247bd89c010593bdd457b41da15162cf5eb27301ec712ebd404",
+    "fa84ba198e4e2bf91c694147f1c3e0d062349adde7127141488ee63fa0441871",
+)
+# Schema 4 stores normalized observations, before reconciliation and pricing.
+# These reviewed V2 files leave normalization and the observation layout intact.
+_V2_OBSERVATION_COMPATIBILITY = (
+    "b99ccfc3cfc130d4a0e1cbc25a97d2aaf706359e5589a4b798bc41b131b4bf0a",
+    "93cf12a2ac638aaeacdc0ca8d289d0bc9aeb3b247189e3f52e416a80464221f4",
+)
 
 
 def _noop():
@@ -73,6 +93,24 @@ def _capture(root, catalog):
         if isinstance(exc, StatisticsIndexError):
             raise
         raise StatisticsIndexError("SOURCE_UNAVAILABLE") from None
+
+
+def _matches_projection(current, saved):
+    if current == saved:
+        return True
+    components = current["unified_components"]
+    facts = "statistics_unified_facts.py"
+    policy = "statistics_unified_policy.py"
+    compatible = (
+        components[facts] in _V1_RECONCILIATION_HASHES and components[policy] == _V1_PUBLISHED_COMPONENTS[policy]
+        or (components[facts], components[policy]) == _V2_OBSERVATION_COMPATIBILITY
+    )
+    return (
+        saved.get("unified_components") == _V1_PUBLISHED_COMPONENTS
+        and compatible
+        and components["statistics_unified_projection.py"] == _V1_PUBLISHED_COMPONENTS["statistics_unified_projection.py"]
+        and {**current, "unified_components": _V1_PUBLISHED_COMPONENTS} == saved
+    )
 
 
 def _records(root, provenance, name, check):
@@ -255,7 +293,10 @@ def _staging(directory, root_id):
         kept = True
 
     try:
-        protect_directory(folder)
+        # An owned staging child can inherit the already private root ACL.
+        # Admission below checks its effective grants before writing any data.
+        if os.name != "nt":
+            protect_directory(folder)
         validate_storage_root(directory, children=(folder,))
         yield folder, folder_id, retain
     finally:
@@ -403,7 +444,7 @@ def _readonly(path):
         raise
 
 
-def _open_manifest(directory, check):
+def _open_manifest(directory, check, *, verify_profile_digest=True):
     pointer_path = directory / POINTER_NAME
     if not os.path.lexists(pointer_path):
         raise StatisticsIndexError("INDEX_MISSING")
@@ -434,7 +475,7 @@ def _open_manifest(directory, check):
         raise StatisticsIndexError("INCOMPATIBLE_SCHEMA")
     _check_files(components, manifest)
     profile = components[1]
-    if component_digest(profile, check) != manifest["files"][profile.name]["sha256"]:
+    if verify_profile_digest and component_digest(profile, check) != manifest["files"][profile.name]["sha256"]:
         raise StatisticsIndexError("INVALID_DEMOGRAPHICS")
     identities = path_identity(directory), path_identity(folder)
     return manifest, components, identities
@@ -464,7 +505,7 @@ def _check_open_generation(directory, components, manifest, path_ids):
 
 def _read_profile_values(root, catalog_path, provenance, links, check):
     with storage_lock(root):
-        if _capture(root, catalog_path) != provenance:
+        if not _matches_projection(_capture(root, catalog_path), provenance):
             raise StatisticsIndexError("STALE_SOURCE")
         if not provenance["customers"]["present"]:
             if next(iter(links), None) is not None:
@@ -488,20 +529,20 @@ def _read_profile_values(root, catalog_path, provenance, links, check):
             if isinstance(exc, StatisticsIndexError):
                 raise
             raise StatisticsIndexError("INVALID_PROFILE_SOURCE") from None
-        if _capture(root, catalog_path) != provenance:
+        if not _matches_projection(_capture(root, catalog_path), provenance):
             raise StatisticsIndexError("STALE_SOURCE")
 
 
 @contextmanager
-def open_unified_index(*, raw_root, catalog_path, index_dir, check=_noop):
+def open_unified_index(*, raw_root, catalog_path, index_dir, check=_noop, verify_profile_digest=True):
     """Open only schema 4. The caller consumes facts before publishing its result."""
     root, catalog_path = _inputs(raw_root, catalog_path)
     directory = reject_reparse(index_dir)
     try:
-        manifest, components, path_ids = _open_manifest(directory, check)
+        manifest, components, path_ids = _open_manifest(directory, check, verify_profile_digest=verify_profile_digest)
         binding = manifest["binding"]
         with storage_lock(root):
-            if _capture(root, catalog_path) != binding["provenance"]:
+            if not _matches_projection(_capture(root, catalog_path), binding["provenance"]):
                 raise StatisticsIndexError("STALE_SOURCE")
         with closing(_readonly(components[0])) as db, closing(_readonly(components[1])) as profiles:
             validate_layout(db)
@@ -518,7 +559,7 @@ def open_unified_index(*, raw_root, catalog_path, index_dir, check=_noop):
             check()
             _check_open_generation(directory, components, manifest, path_ids)
             with storage_lock(root):
-                if _capture(root, catalog_path) != binding["provenance"]:
+                if not _matches_projection(_capture(root, catalog_path), binding["provenance"]):
                     raise StatisticsIndexError("STALE_SOURCE")
     except (StatisticsIndexError, InterruptedError):
         raise

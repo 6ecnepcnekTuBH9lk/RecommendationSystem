@@ -25,6 +25,10 @@ QLabel[class="statisticsNumber"] {{
 QLabel[class="statisticsInfo"] {{
     font-style: italic;
 }}
+QLabel#statisticsSummary {{
+    font-size: 11pt;
+    font-style: normal;
+}}
 QLabel[class="statisticsSection"] {{
     font-size: 12pt;
     font-style: italic;
@@ -139,7 +143,7 @@ QTabBar::tab:top:selected {{
 }}
 
 /* Tables: retain column sizing; a subtle grid and selection. */
-QTableWidget {{
+QTableWidget, QTableView#statisticsLargeTable {{
     border: 1px solid rgba({APP_TEXT_RGB}, 55);
     border-radius: 2px;
     gridline-color: rgba({APP_TEXT_RGB}, 55);
@@ -155,6 +159,7 @@ QHeaderView::section {{
     padding: 0px 8px;
 }}
 QTableWidget::item:selected, QTableWidget::item:selected:focus,
+QTableView#statisticsLargeTable::item:selected,
 QListWidget::item:selected, QListWidget::item:selected:focus {{
     color: {QTMATERIAL_SECONDARYTEXTCOLOR};
     background-color: rgba({APP_PRIMARY_RGB}, 32);
@@ -182,6 +187,14 @@ QProgressBar {{
     font-weight: 600;
 }}
 QProgressBar::chunk {{ background-color: {QTMATERIAL_PRIMARYCOLOR}; border-radius: 6px; }}
+
+QProgressBar#statisticsProgress {{ min-height: 26px; max-height: 26px; }}
+QProgressBar#statisticsProgress::chunk {{ background-color: {QTMATERIAL_PRIMARYCOLOR}; }}
+QLabel#statisticsProgressStatus {{
+    background: transparent;
+    color: {QTMATERIAL_SECONDARYTEXTCOLOR};
+    font-weight: 600;
+}}
 
 /* Disabled states: keep neutral text readable in both palettes. */
 QLineEdit:disabled, QComboBox:disabled, QListWidget:disabled,

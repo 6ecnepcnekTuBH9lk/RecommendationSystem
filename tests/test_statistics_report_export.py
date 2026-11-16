@@ -14,12 +14,12 @@ def assert_archive(path):
         assert archive.namelist()==["Статистика.xlsx","Статистика.html"]
         assert archive.testzip() is None
         book=load_workbook(BytesIO(archive.read("Статистика.xlsx")),read_only=True)
-        assert book.sheetnames==["Действия","Заказы","Товары","Клиенты","Техническая информация"]
+        assert book.sheetnames==["Действия","Заказы","Товары","Клиенты"]
         rows=list(book["Клиенты"].values)
         assert all(any(r[0]==title for r in rows) for title in ("Обзор","Покупки","Денежные показатели","RFM-анализ","Когорты"))
         book.close()
         document=archive.read("Статистика.html").decode()
-        assert all('id="section-'+str(i)+'"' in document for i in range(5))
+        assert all('id="section-'+str(i)+'"' in document for i in range(4))
         assert all('id="customer-section-'+str(i)+'"' in document for i in range(5))
         assert 'data-rfm-window=' in document and 'data-rfm-currency=' in document
         assert "connect-src 'none'" in document and '<script src=' not in document

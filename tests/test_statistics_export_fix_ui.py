@@ -68,7 +68,7 @@ def test_rerender_and_navigation_keep_fitting_table_edges(window,rich_customer_r
     host,tab=window;host.resize(1450,1000)
     for _ in range(2):
         tab.render(rich_customer_result)
-        for outer in range(5):
+        for outer in range(tab.sections.count()):
             tab.sections.setCurrentIndex(outer);QTest.qWait(20)
             for inner in range(5) if outer==3 else (None,):
                 if inner is not None:tab.customer_sections.setCurrentIndex(inner)

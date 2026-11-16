@@ -95,10 +95,7 @@ def test_workbook_snapshot_metadata_types_and_sections(sample_result, tmp_path):
     assert find(book['Товары'], '000001')[0].data_type == 's'
     assert find(book['Клиенты'], 'Средний возраст')[1].value == '—'
     assert find(book['Клиенты'], 'Доля активных клиентов, совершивших покупку, %')[1].value == 50
-    assert any(tuple(row[:3])==("Источник","Период / состояние","Источник данных")
-               for row in book["Техническая информация"].values)
-    assert find(book['Техническая информация'], 'Заказы вне периода статистики')[1].data_type == 'n'
-    assert all(cell.value != 'Проверка предупреждения' for row in book['Техническая информация'] for cell in row)
+    assert "Техническая информация" not in book.sheetnames
     book.close()
 
 
@@ -144,10 +141,9 @@ def test_no_raw_or_qt_dependency(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_raw_actions_in_technical_and_filter_independent(sample_result, tmp_path):
+def test_raw_actions_excluded_from_workbook_with_or_without_filter(sample_result, tmp_path):
     sample_result['source_actions'] = 100
     sample_result['action_types'] = (('ProsmotrProdukta', 90), ('ProsmotrKategoriiProduktov', 10))
-    raw_rows = []
     for filtered in (False, True):
         sample_result['analysis_filter'] = AnalysisFilter(nomenclature_types=('Рубашки',) if filtered else None).to_dict()
         path = tmp_path / f'raw-{filtered}.xlsx'
@@ -156,16 +152,10 @@ def test_raw_actions_in_technical_and_filter_independent(sample_result, tmp_path
         assert kpi(book['Действия'], 'Количество взаимодействий').value == sample_result['total_interactions']
         business = {cell.value for row in book['Действия'] for cell in row}
         assert 'Системное название' not in business and 'Классификация событий' not in business
-        technical = book['Техническая информация']
-        assert find(technical, 'Исходные действия')[1].value == 100
-        raw = [find(technical, name) for name, _ in sample_result['action_types']]
-        assert all(cell.data_type == 'n' for row in raw for cell in row[1:3])
-        values = [(row[1].value, row[2].value) for row in raw]
-        assert sum(v[1] for v in values) == pytest.approx(100)
-        assert all(v[1] <= 100 for v in values)
-        raw_rows.append(values)
+        assert 'Техническая информация' not in book.sheetnames
+        assert all(name not in business for name, _ in sample_result['action_types'])
         book.close()
-    assert raw_rows[0] == raw_rows[1]
+
 
 
 def assert_minimal_tables(book):

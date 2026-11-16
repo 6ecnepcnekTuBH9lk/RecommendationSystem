@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QEvent, QTimer
 from PyQt6.QtGui import QColor, QBrush
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QComboBox, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QSizePolicy,
     QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
 )
 
@@ -20,7 +20,7 @@ from Application.theme.layout_metrics import BLOCK_SPACING
 def analytics_chart(data):
     widget = charts.create_chart(data)
     widget.setProperty("buyerAnalyticsChart", True)
-    if isinstance(widget, charts.StatisticsChart) and not data.percentage:
+    if isinstance(widget, charts.StatisticsChart) and widget.count_axis is not None and not data.percentage:
         widget.count_axis.setTitleText("")
         if len(data.series) > 1:
             # Native legend layout reserves space below our category labels.
@@ -28,6 +28,36 @@ def analytics_chart(data):
             legend.setContentsMargins(0, 16, 0, 0)
             legend.layout().setContentsMargins(0, 16, 0, 0)
     return widget
+
+
+class StatisticsChartRow(QWidget):
+    def __init__(self, data, parent=None):
+        super().__init__(parent)
+        self.setObjectName("statisticsChartRow")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(BLOCK_SPACING)
+        self.plots = tuple(charts.create_chart(plot) for plot in data)
+        self.minimum_plot_width = 445 if len(data) == 2 else 315
+        self.columns = 0
+        self._arrange(len(data))
+
+    def _arrange(self, columns):
+        if columns == self.columns:
+            return
+        self.columns = columns
+        for index, plot in enumerate(self.plots):
+            self.grid.removeWidget(plot)
+            self.grid.setColumnStretch(index, int(index < columns))
+        for index, plot in enumerate(self.plots):
+            self.grid.addWidget(plot, *divmod(index, columns))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        spacing = self.grid.spacing()
+        capacity = (event.size().width() + spacing) // (self.minimum_plot_width + spacing)
+        self._arrange(min(len(self.plots), max(1, capacity)))
 
 
 class RfmSegmentsWidget(QWidget):
@@ -45,7 +75,8 @@ class RfmSegmentsWidget(QWidget):
         controls.addWidget(QLabel("Период"))
         self.window_selector = QComboBox()
         self.window_selector.setObjectName("rfmChartWindow")
-        for code in RFM_WINDOWS:
+        windows = dict.fromkeys(window for window, _ in choices) if choices is not None else RFM_WINDOWS
+        for code in windows:
             self.window_selector.addItem(WINDOW_LABELS[code], code)
         controls.addWidget(self.window_selector)
         controls.addWidget(QLabel("Валюта"))
@@ -92,9 +123,10 @@ def _background(cell):
 
 
 class _RetentionModel(QAbstractTableModel):
-    def __init__(self, data, parent):
+    def __init__(self, data, parent, *, compact=False):
         super().__init__(parent)
         self.snapshot = data
+        self.compact = compact
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.snapshot.rows)
@@ -104,7 +136,7 @@ class _RetentionModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return ("Когорта", "Покупателей", *self.snapshot.columns)[section]
+            return ("Когорта", "Покупатели (M0)" if self.compact else "Покупателей", *self.snapshot.columns)[section]
         return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -122,7 +154,7 @@ class _RetentionModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             if cell.value is None:
                 return "—"
-            return _percent(cell.value) + (" (частично)" if cell.status != "FULL" else "")
+            return _percent(cell.value) + (" (частично)" if not self.compact and cell.status != "FULL" else "")
         if role == Qt.ItemDataRole.UserRole:
             return cell
         if role == Qt.ItemDataRole.BackgroundRole:
@@ -154,12 +186,13 @@ class CohortRetentionHeatmap(QTableView):
     A small read-only model keeps long cohort lists bounded in widget count.
     Partial observations are labelled explicitly, not presented as full cohorts.
     """
-    def __init__(self, result=None, parent=None, *, data=None):
+    def __init__(self, result=None, parent=None, *, data=None, compact=False):
         super().__init__(parent)
+        self._compact = compact
         self.setObjectName("cohortRetentionHeatmap")
         self.setProperty("buyerAnalyticsChart", True)
         self.snapshot = data if data is not None else cohort_retention_heatmap_data(result)
-        self.setModel(_RetentionModel(self.snapshot, self))
+        self.setModel(_RetentionModel(self.snapshot, self, compact=compact))
         delegate = _RetentionDelegate(self)
         for column in range(2, 14):
             self.setItemDelegateForColumn(column, delegate)
@@ -170,8 +203,12 @@ class CohortRetentionHeatmap(QTableView):
         self.setWordWrap(False)
         self.verticalHeader().hide()
         self.verticalHeader().setDefaultSectionSize(36)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.horizontalHeader().setDefaultSectionSize(174)
+        header = self.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setDefaultSectionSize(78 if compact else 174)
+        if compact:
+            header.setMinimumSectionSize(78)
+            header.setSectionResizeMode(13, QHeaderView.ResizeMode.Stretch)
         self.setColumnWidth(0, 110)
         self.setColumnWidth(1, 140)
         self.setFixedHeight(min(420, max(180, len(self.snapshot.rows)*36 + 60)))
@@ -182,6 +219,21 @@ class CohortRetentionHeatmap(QTableView):
         self._theme_timer = QTimer(self)
         self._theme_timer.setSingleShot(True)
         self._theme_timer.timeout.connect(self._refresh_colors)
+        self._fit_retention_columns()
+
+    def _fit_retention_columns(self):
+        if not self._compact:
+            return
+        remaining = self.viewport().width() - self.columnWidth(0) - self.columnWidth(1)
+        width, extra = divmod(max(12 * 78, remaining), 12)
+        for index in range(11):
+            self.setColumnWidth(index + 2, width + (index < extra))
+
+    def viewportEvent(self, event):
+        handled = super().viewportEvent(event)
+        if event.type() == QEvent.Type.Resize and getattr(self, "_compact", False):
+            self._fit_retention_columns()
+        return handled
 
     def _refresh_colors(self):
         model = self.model()

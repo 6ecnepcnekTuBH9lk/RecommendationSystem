@@ -1,4 +1,4 @@
-"""Normalize and reconcile one order for UNIFIED_PURCHASE_V1.
+"""Normalize and reconcile one order for UNIFIED_PURCHASE_V2.
 
 Readers supply all observations of one scoped order. This module has no I/O,
 source ordering rules, persistent caches or statistics/ML entry points.
@@ -89,6 +89,7 @@ class PurchaseEvidence:
     nominal_units: Measured[Decimal]
     fulfilled_units: Measured[Decimal]
     executed_at: Measured[datetime]
+    excluded_positions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +153,7 @@ class OrderBusinessFact:
     historical_statuses: tuple[tuple[Measured[str], int], ...] = ()
     positions: Measured[int] | None = None
     line_history: tuple[tuple[OrderLineState, ...], ...] = ()
+    unassigned_product_issues: tuple[Issue, ...] = ()
 
     @property
     def has_completed(self) -> bool:
@@ -399,13 +401,19 @@ class _BusinessSnapshot:
 
 def _signature(observation: OrderObservation) -> _BusinessSnapshot:
     # Ordinal matters only if a line has no unambiguous stable key in this snapshot.
-    counts = Counter(line.stable_line_key.value for line in observation.lines)
+    by_key = {}
+    for line in observation.lines:
+        if line.stable_line_key.value is not None:
+            by_key.setdefault(line.stable_line_key.value, set()).add(replace(line, ordinal=None))
     stable = []
     local = []
+    seen = set()
     for line in observation.lines:
         key = line.stable_line_key.value
-        if key is not None and counts[key] == 1:
-            stable.append(replace(line, ordinal=None))
+        if key is not None and len(by_key[key]) == 1:
+            if key not in seen:
+                stable.append(replace(line, ordinal=None))
+                seen.add(key)
         else:
             local.append(line)
     ordered = tuple(sorted(stable, key=lambda line: line.stable_line_key.value)) + tuple(local)
@@ -448,6 +456,10 @@ def _resolve_line(lines: tuple[OrderLineState, ...]) -> OrderLineState:
     if len(lines) == 1:
         return first
     status = _merge((line.status_code for line in lines), "STATUS_CONFLICT")
+    if status.quality is Quality.CONFLICT and all(
+            line.status_code.value in ("F", "sold", "CP") for line in lines):
+        codes = {line.status_code.value for line in lines}
+        status = _known(next(code for code in ("F", "sold", "CP") if code in codes))
     product = _merge((line.product_key for line in lines), "PRODUCT_CONFLICT")
     tokens = {line.product_token for line in lines}
     if product.value is None and len(tokens - {None}) > 1:
@@ -496,21 +508,24 @@ def _qualifies(line: OrderLineState) -> bool:
     return is_purchase_candidate(line.status_code.value, line.nominal_units.value)
 
 
-def _purchase(sources, eligible, completeness, evidence_issues):
-    units = []
-    quantity_issues = []
-    for lines in eligible:
-        quantity = _merge((line.nominal_units for line in lines), "QUANTITY_CONFLICT")
-        if quantity.value is not None:
-            units.append(quantity.value)
-        quantity_issues.extend(_issues(quantity))
+def _conflicting(line):
+    return any(reading.quality is Quality.CONFLICT for reading in (
+        line.status_code, line.nominal_units, line.source_price, line.currency, line.product_key))
+
+
+def _eligible(line):
+    return _qualifies(line) and not _conflicting(line)
+
+
+def _purchase(sources, eligible, completeness, evidence_issues, excluded_positions=0):
+    units = [line.nominal_units.value for line in eligible]
     count = len(eligible)
     subtotal = _sum(units)
-    observed = _known(True) if sources else _result(False, evidence_issues)
+    observed = _known(True) if eligible else _result(False, evidence_issues)
     return PurchaseEvidence(
         observed, tuple(sorted(sources)), count, _result(count, completeness), subtotal,
-        _result(subtotal, (*completeness, *quantity_issues)), _unknown("FULFILLMENT_UNVERIFIED"),
-        _unknown("EXECUTION_TIME_UNVERIFIED"),
+        _result(subtotal, completeness), _unknown("FULFILLMENT_UNVERIFIED"),
+        _unknown("EXECUTION_TIME_UNVERIFIED"), excluded_positions,
     )
 
 
@@ -522,25 +537,6 @@ def _order_currency(positive, completeness):
     if len(currencies) > 1:
         issues.append((Quality.CONFLICT, "MIXED_ORDER_CURRENCY"))
     return _result(next(iter(currencies), None), issues)
-
-
-def _purchase_line_value(group, eligible):
-    currency = _merge((line.currency for line in eligible), "CURRENCY_CONFLICT")
-    issues = _issues(currency)
-    price = _merge((line.source_price for line in eligible), "PRICE_CONFLICT")
-    issues.extend(_issues(price))
-    has_cp = any(line.status_group is StatusGroup.PARTIALLY_COMPLETED for line in eligible)
-    if has_cp:
-        issues.append((Quality.UNKNOWN, "CP_ALLOCATION_UNKNOWN"))
-    subtotal = price.value if not has_cp and currency.value is not None else None
-    if len(eligible) != len(group) or len({line.status_group for line in eligible}) > 1:
-        reason = "STATUS_CONFLICT" if len({line.status_code for line in group}) > 1 else "QUANTITY_CONFLICT"
-        issues.append((Quality.CONFLICT, reason))
-    issues.extend(_issues(_merge((line.nominal_units for line in eligible), "QUANTITY_CONFLICT")))
-    issues.extend(issue for line in group
-                  if line.status_group in (StatusGroup.COMPLETED, StatusGroup.PARTIALLY_COMPLETED)
-                  for issue in _issues(line.nominal_units))
-    return currency, subtotal, issues
 
 
 _NOMINALS = (
@@ -581,27 +577,23 @@ def evaluate_money(
     qualifying_evidence: tuple[tuple[OrderLineState, ...], ...],
     *,
     completeness: tuple[Issue, ...],
+    composition_currencies: frozenset[str] = frozenset(CURRENCIES),
 ) -> tuple[MonetaryEvidence, MonetaryEvidence]:
     """Evaluate each agreed line and its aligned versions, one contribution per line."""
     valuations = []
-    bad_quantity = []
-    for line, group in zip(agreed_lines, qualifying_evidence, strict=True):
-        eligible = tuple(version for version in group if _qualifies(version))
-        if eligible:
-            valuations.append(_purchase_line_value(group, eligible))
-        else:
-            for version in group:
-                if version.status_group in (StatusGroup.COMPLETED, StatusGroup.PARTIALLY_COMPLETED):
-                    bad_quantity.extend((line.currency, issue) for issue in _issues(version.nominal_units))
-                    if version.nominal_units.value == 0:
-                        bad_quantity.append((line.currency, (Quality.INSUFFICIENT_COVERAGE, "ZERO_QUANTITY")))
+    for line in agreed_lines:
+        if _eligible(line):
+            valuations.append((line.currency, line.source_price.value,
+                               [*_issues(line.currency), *_issues(line.source_price)]))
 
     result = []
     ledger = _unknown("LEDGER_UNAVAILABLE")
     for currency in CURRENCIES:
-        issues = list(completeness)
-        if valuations:
-            issues.extend(issue for unit, issue in bad_quantity if unit.value in (None, currency))
+        currency_completeness = tuple(
+            issue for issue in completeness
+            if currency in composition_currencies or issue[1] in ("LINES_INCOMPLETE", "PRODUCT_SCOPE_UNRESOLVED")
+        )
+        issues = list(currency_completeness)
         subtotal = []
         valued = unvalued = 0
         for unit, amount, line_issues in valuations:
@@ -613,50 +605,64 @@ def evaluate_money(
                 unvalued += bool(line_issues)
                 if amount is not None:
                     subtotal.append(amount)
-        nominal, known_nominals = _nominals(currency, agreed_lines, qualifying_evidence, completeness)
+        nominal, known_nominals = _nominals(currency, agreed_lines, qualifying_evidence, currency_completeness)
         source, partial, cancelled, returned = nominal
         amount = _sum(subtotal)
-        recognized = _result(amount, issues)
-        known_subtotal = _known(amount) if subtotal else recognized
+        # The V2 amount is the sum of admissible costs. An admitted zero
+        # price supplies a monetary observation, unlike a missing price.
+        recognized = _known(amount) if subtotal else _result(amount, issues)
+        known_subtotal = recognized
         result.append(MonetaryEvidence(currency, source, known_subtotal, recognized, partial, cancelled, returned,
                                        ledger, ledger, known_nominals, valued, unvalued))
     return result[0], result[1]
 
 
-def _eligible_groups(groups):
-    return tuple(eligible for group in groups
-                 if (eligible := tuple(line for line in group if _qualifies(line))))
-
-
-def _product_evidence(pairs, sources, completeness, check):
+def _product_evidence(pairs, sources, omitted, completeness, check):
     products = {}
-    unresolved = set()
+    issues_by_item = {}
+    unassigned = set()
+    if any(reason == "LINES_INCOMPLETE" for _, reason in completeness):
+        unassigned.update(completeness)
+    for version in omitted:
+        check()
+        item = version.product_key.value
+        if item is None:
+            unassigned.update(completeness)
+        else:
+            issues_by_item.setdefault(item, set()).update(completeness)
     for line, group in pairs:
         check()
         item = line.product_key.value
         if item is not None:
             products.setdefault(item, []).append((line, group))
         else:
-            possible = {version.product_key.value for version in group}
-            unresolved.update(possible)
+            issue = (Quality.INSUFFICIENT_COVERAGE, "PRODUCT_SCOPE_UNRESOLVED")
+            for version in group:
+                item = version.product_key.value
+                if item is None:
+                    unassigned.add(issue)
+                else:
+                    issues_by_item.setdefault(item, set()).add(issue)
     result = []
-    for item in sorted(products.keys() | sources.keys()):
+    for item in sorted(products.keys() | sources.keys() | issues_by_item.keys()):
         check()
         selected = products.get(item, ())
         lines = tuple(line for line, _ in selected)
         groups = tuple(group for _, group in selected)
-        issues = list(completeness)
-        if item in unresolved or None in unresolved:
-            issues.append((Quality.INSUFFICIENT_COVERAGE, "PRODUCT_SCOPE_UNRESOLVED"))
-        eligible = _eligible_groups(groups)
-        purchase = _purchase(sources.get(item, ()), eligible, issues, issues)
+        issues = unassigned | issues_by_item.get(item, set())
+        eligible = tuple(line for line in lines if _eligible(line))
+        evidence_issues = [
+            issue for issue in unassigned
+            if issue[1] == "LINES_INCOMPLETE" or issue[1] == "PRODUCT_SCOPE_UNRESOLVED"
+        ]
+        purchase = _purchase(sources.get(item, ()), eligible, issues, evidence_issues)
         result.append(ProductOrderEvidence(
             item, purchase, _result(len(lines), issues),
             tuple(sorted(Counter(line.status_group for line in lines).items())),
             evaluate_money(lines, groups, completeness=tuple(issues)), len(lines),
-            _order_currency({version.currency for group in eligible for version in group}, issues),
+            _order_currency({line.currency for line in eligible}, issues),
         ))
-    return tuple(result)
+    return tuple(result), tuple(sorted(unassigned))
 
 
 def _no_check() -> None:
@@ -671,29 +677,41 @@ def reconcile_order(
     check: Callable[[], None] = _no_check,
 ) -> OrderBusinessFact:
     """Reconcile one pre-grouped order. Product predicates operate on resolved item keys."""
+    prepared = prepare_order(observations, order_sort_rank=order_sort_rank, check=check)
+    return scope_order(prepared, product_predicate=product_predicate, include_products=include_products,
+                       include_line_history=include_line_history, check=check)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class PreparedOrder:
+    order_key: str
+    rank: int
+    pairs: tuple
+    composition: tuple[Issue, ...]
+    omitted: tuple[OrderLineState, ...]
+    positives: tuple
+    owner: Measured
+    created: Measured
+    channel: Measured
+    attrs: OrderAttributes
+    diagnostics: tuple[str, ...]
+    dates: tuple[datetime, ...]
+    provenance: tuple
+    snapshots: SnapshotCounts
+    whole_kind: OrderKind
+
+
+def prepare_order(observations, *, order_sort_rank, check=_no_check):
+    """Materialize the common reconciliation before evaluating any product predicate."""
     if type(order_sort_rank) is not int or order_sort_rank < 1:
         raise ValueError("Invalid order sort rank")
 
     versions: dict[_BusinessSnapshot, list[SourceRef]] = {}
     fingerprints = set()
-    sources = set()
-    product_sources = {}
-    positive = set()
-    uncertain_membership = False
+    positives = set()
     diagnostics = set()
     order_key = None
     raw_orders = raw_lines = exact = equivalent = 0
-    matches = {}
-
-    def membership(line: OrderLineState) -> bool | None:
-        if product_predicate is None:
-            return True
-        key = line.product_key.value
-        if key is None:
-            return None
-        if key not in matches:
-            matches[key] = product_predicate(key)
-        return matches[key]
 
     for observation in observations:
         check()
@@ -718,16 +736,6 @@ def reconcile_order(
             for reading in (line.status_code, line.stable_line_key, line.nominal_units, line.source_price,
                             line.currency, line.product_key):
                 diagnostics.update(reading.reasons)
-            if not _qualifies(line):
-                continue
-            included = membership(line)
-            if included is True:
-                sources.add(observation.source_ref)
-                positive.add(line.currency)
-                if include_products and line.product_key.value is not None:
-                    product_sources.setdefault(line.product_key.value, set()).add(observation.source_ref)
-            elif included is None:
-                uncertain_membership = True
 
     if order_key is None:
         raise ValueError("Order group is empty")
@@ -738,11 +746,69 @@ def reconcile_order(
     for group in groups:
         check()
         pairs.append((_resolve_line(group), group))
+    accepted = {id(version): line for line, group in pairs if _eligible(line) for version in group}
+    for signature, refs in versions.items():
+        for version in signature.lines:
+            line = accepted.get(id(version))
+            if line is not None:
+                positives.update((ref, line.product_key.value, line.currency) for ref in refs)
     full_lines = tuple(line for line, _ in pairs)
-    full_pairs = pairs
     whole_kind = _state(full_lines, composition)[0]
-    scope_issues = list(composition)
-    purchase_issues = list(composition)
+    omitted = ()
+    if composition:
+        retained = {id(line) for group in groups for line in group}
+        omitted = tuple(line for snapshot in signatures for line in snapshot.lines if id(line) not in retained)
+    owner = _merge((signature.owner for signature in signatures), "OWNER_CONFLICT")
+    created = _merge((signature.created for signature in signatures), "CREATED_TIME_CONFLICT")
+    channel = _merge((signature.channel for signature in signatures), "CHANNEL_CONFLICT")
+    attrs = tuple(
+        (name, _merge((dict(signature.attributes)[name] for signature in signatures), "ATTRIBUTE_CONFLICT"))
+        for name, _ in signatures[0].attributes
+    )
+    for line in full_lines:
+        for reading in (line.status_code, line.nominal_units, line.source_price, line.currency, line.product_key):
+            diagnostics.update(reading.reasons)
+    dates = tuple(sorted({snapshot.created.value for snapshot in signatures if snapshot.created.value is not None}))
+    provenance = tuple(sorted(tuple(sorted(refs)) for refs in versions.values()))
+    return PreparedOrder(order_key, order_sort_rank, tuple(pairs), composition, omitted, tuple(positives),
+                         owner, created, channel, attrs, tuple(sorted(diagnostics)), dates, provenance,
+                         SnapshotCounts(raw_orders, raw_lines, exact, equivalent, len(signatures) - 1), whole_kind)
+
+
+def scope_order(prepared, *, product_predicate=None, include_products=True, include_line_history=False, check=_no_check):
+    full_pairs = pairs = prepared.pairs
+    composition, omitted = prepared.composition, prepared.omitted
+    diagnostics = set(prepared.diagnostics)
+    owner, created, channel, attrs = prepared.owner, prepared.created, prepared.channel, prepared.attrs
+    sources, positive, product_sources, matches = set(), set(), {}, {}
+    uncertain_membership = False
+
+    def contains(key):
+        if product_predicate is None:
+            return True
+        if key is None:
+            return None
+        if key not in matches:
+            matches[key] = product_predicate(key)
+        return matches[key]
+
+    def membership(line):
+        return contains(line.product_key.value)
+
+    for source, item, currency in prepared.positives:
+        included = contains(item)
+        if included is True:
+            sources.add(source)
+            positive.add(currency)
+            if include_products and item is not None:
+                product_sources.setdefault(item, set()).add(source)
+        elif included is None:
+            uncertain_membership = True
+    scoped_composition = composition
+    if product_predicate is not None and all(membership(line) is False for line in omitted):
+        scoped_composition = tuple(issue for issue in composition if issue[1] == "LINES_INCOMPLETE")
+    scope_issues = list(scoped_composition)
+    purchase_issues = list(scoped_composition)
     evidence_issues = [(q, reason) for q, reason in composition if reason == "LINES_INCOMPLETE"]
     if uncertain_membership:
         evidence_issues.append((Quality.INSUFFICIENT_COVERAGE, "PRODUCT_SCOPE_UNRESOLVED"))
@@ -756,50 +822,47 @@ def reconcile_order(
             elif any(membership(version) is not False for version in group):
                 issue = (Quality.INSUFFICIENT_COVERAGE, "PRODUCT_SCOPE_UNRESOLVED")
                 scope_issues.append(issue)
-                if any(_qualifies(version) and membership(version) is not False for version in group):
+                if _eligible(line):
                     purchase_issues.append(issue)
         pairs = selected
     resolved_lines = tuple(line for line, _ in pairs)
     scoped_groups = tuple(group for _, group in pairs)
-    eligible = _eligible_groups(scoped_groups)
+    eligible = tuple(line for line in resolved_lines if _eligible(line))
     current_kind, state_quality, state_groups = _state(resolved_lines, scope_issues)
-    purchase = _purchase(sources, eligible, purchase_issues, evidence_issues)
-    owner = _merge((signature.owner for signature in signatures), "OWNER_CONFLICT")
-    created = _merge((signature.created for signature in signatures), "CREATED_TIME_CONFLICT")
-    channel = _merge((signature.channel for signature in signatures), "CHANNEL_CONFLICT")
-    attrs = tuple(
-        (name, _merge((dict(signature.attributes)[name] for signature in signatures), "ATTRIBUTE_CONFLICT"))
-        for name, _ in signatures[0].attributes
+    excluded = sum(_conflicting(line) for line in resolved_lines) + len({
+        line.stable_line_key.value for line in omitted
+        if line.stable_line_key.value is not None and membership(line) is not False})
+    purchase = _purchase(sources, eligible, purchase_issues, evidence_issues, excluded)
+    order_currency = _order_currency(positive, evidence_issues)
+    omitted_currencies = {line.currency.value for line in omitted if membership(line) is not False}
+    money = evaluate_money(
+        resolved_lines, scoped_groups, completeness=tuple(scope_issues),
+        composition_currencies=frozenset(CURRENCIES if None in omitted_currencies else omitted_currencies),
     )
-    order_currency = _order_currency(positive, purchase_issues)
-    money = evaluate_money(resolved_lines, scoped_groups, completeness=tuple(scope_issues))
-    for line in full_lines:
-        for reading in (line.status_code, line.nominal_units, line.source_price, line.currency, line.product_key):
-            diagnostics.update(reading.reasons)
     diagnostics.update(reason for _, reason in (*scope_issues, *purchase_issues))
     for reading in (owner, created, channel, order_currency, purchase.observed, purchase.positions, purchase.nominal_units):
         diagnostics.update(reading.reasons)
     for entry in money:
         diagnostics.update(entry.recognized_purchase.reasons)
     diagnostics.update(reason for _, attribute in attrs for reason in attribute.reasons)
-    dates = tuple(sorted({snapshot.created.value for snapshot in signatures if snapshot.created.value is not None}))
-    provenance = tuple(sorted(tuple(sorted(refs)) for refs in versions.values()))
     products = ()
+    unassigned_product_issues = ()
     historical = ()
     positions = None
     if include_products:
-        products = _product_evidence(full_pairs, product_sources, composition, check)
+        products, unassigned_product_issues = _product_evidence(full_pairs, product_sources, omitted, composition, check)
         if product_predicate is not None:
             products = tuple(item for item in products if matches.get(item.item_id, False))
-        statuses = Counter(_merge((line.status_code for line in group), "STATUS_CONFLICT") for group in eligible)
+        statuses = Counter(line.status_code for line in eligible)
         historical = tuple(sorted(statuses.items(), key=lambda item: (
             item[0].value or "", item[0].quality.value, item[0].reasons)))
         positions = _result(len(resolved_lines), scope_issues)
     check()
     return OrderBusinessFact(
-        order_key, owner, order_sort_rank, created, current_kind, state_quality, state_groups,
+        prepared.order_key, owner, prepared.rank, created, current_kind, state_quality, state_groups,
         resolved_lines, purchase, money, order_currency, channel, attrs, tuple(sorted(diagnostics)),
-        SnapshotCounts(raw_orders, raw_lines, exact, equivalent, len(signatures) - 1), whole_kind, dates, provenance,
+        prepared.snapshots, prepared.whole_kind, prepared.dates, prepared.provenance,
         products=products, historical_statuses=historical, positions=positions,
         line_history=scoped_groups if include_line_history else (),
+        unassigned_product_issues=unassigned_product_issues,
     )

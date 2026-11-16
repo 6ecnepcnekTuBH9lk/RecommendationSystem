@@ -82,20 +82,18 @@ def _unpacked(issues):
 
 
 def _money_payload(fact):
-    currency = fact.order_currency.value
     currency_issues = _issues(fact.order_currency)
-    rows = {}
+    rows, priced = {}, []
     for row in fact.money:
-        subtotal = row.known_purchase_subtotal.value
-        if subtotal == 0 and row.currency != currency and not row.valued_purchase_positions:
-            subtotal = None
+        subtotal = row.recognized_purchase.value if row.valued_purchase_positions else None
+        if subtotal is not None:
+            priced.append(row.currency)
         nominal = dict(row.known_nominals).get("partial_nominal")
         rows[row.currency] = (
             None if subtotal is None else str(subtotal), None if nominal is None else str(nominal),
             _packed([*currency_issues, *_issues(row.recognized_purchase)]), _packed(_issues(row.partial_nominal)),
         )
-    valued = currency if currency in CURRENCIES and not rows[currency][2] else None
-    return valued, rows
+    return priced, rows
 
 
 def _categories(fact, item_categories, categories, check):
@@ -193,6 +191,7 @@ def _mean(amount, count, *, percent=False):
 @dataclass(slots=True)
 class _Cash:
     orders: int = 0
+    priced_orders: int = 0
     valued: Counter = field(default_factory=Counter)
     valued_amount: dict = field(default_factory=dict)
     subtotal: dict = field(default_factory=dict)
@@ -203,13 +202,14 @@ class _Cash:
     def add(self, payload):
         self.orders += 1
         valued, rows = payload
+        self.priced_orders += bool(valued)
         for currency, (subtotal, nominal, issues, nominal_issues) in rows.items():
             self.issues[currency].update(_unpacked(issues))
             self.nominal_issues[currency].update(_unpacked(nominal_issues))
             if subtotal is not None:
                 amount = Decimal(subtotal)
                 self.subtotal[currency] = _sum_optional(self.subtotal.get(currency), amount)
-                if valued == currency:
+                if currency in valued:
                     self.valued[currency] += 1
                     self.valued_amount[currency] = _sum_optional(self.valued_amount.get(currency), amount)
             if nominal is not None:
@@ -222,6 +222,7 @@ class _Cash:
 
     def merge(self, other):
         self.orders += other.orders
+        self.priced_orders += other.priced_orders
         self.valued.update(other.valued)
         for currency in CURRENCIES:
             for name in ("valued_amount", "subtotal", "nominal"):
@@ -232,7 +233,9 @@ class _Cash:
 
     def currency(self, currency, extra):
         subtotal, nominal = self.subtotal.get(currency), self.nominal.get(currency)
-        recognized = _result(subtotal or _ZERO, self.issues[currency] | extra)
+        recognized = _result(subtotal or _ZERO, extra if subtotal is not None else
+                             self.issues[currency] | extra | ({(Quality.UNKNOWN, "NO_ACCEPTED_PURCHASE_COST")}
+                                                            if self.orders else set()))
         partial = _result(nominal or _ZERO, self.nominal_issues[currency] | extra)
         return dict(recognized=AggregateMetric(recognized.value if subtotal is None else subtotal, recognized),
                     partial_nominal=AggregateMetric(partial.value if nominal is None else nominal, partial),
@@ -252,11 +255,12 @@ class _MoneyGroup:
     def add(self, cash):
         self.buyers += 1
         self.cash.merge(cash)
-        if cash.orders and not any(cash.issues.values()) and cash.orders == sum(cash.valued.values()):
+        if cash.priced_orders:
             self.fully_valued += 1
             for currency, amount in cash.valued_amount.items():
-                self.currency_buyers[currency] += 1
-                self.currency_amount[currency] = _sum_optional(self.currency_amount.get(currency), amount)
+                if amount is not None:
+                    self.currency_buyers[currency] += 1
+                    self.currency_amount[currency] = _sum_optional(self.currency_amount.get(currency), amount)
 
     def result(self, eligible):
         extra = set() if eligible else {_NO_ELIGIBLE}
@@ -268,7 +272,7 @@ class _MoneyGroup:
                                   mean_per_valued_buyer=_mean(self.currency_amount.get(currency), n))
         return dict(eligible=eligible, buyers=self.buyers, fully_valued_buyers=self.fully_valued,
                     unvalued_buyers=self.buyers-self.fully_valued, orders=self.cash.orders,
-                    unvalued_orders=self.cash.orders-sum(self.cash.valued.values()), currencies=rows)
+                    unvalued_orders=self.cash.orders-self.cash.priced_orders, currencies=rows)
 
 
 @dataclass(slots=True)
@@ -408,9 +412,10 @@ class _Risks:
 class _Buyers:
     """Single-pass buyer source for the legacy cohort formulas and unified sidecars."""
 
-    def __init__(self, db, core, reference, diagnostics, customer_key, check):
+    def __init__(self, db, core, reference, diagnostics, customer_key, check, source_db=None):
         self.db, self.core, self.reference, self.check = db, core, reference, check
         self.diagnostics, self.customer_key = diagnostics, customer_key
+        self.source_db = db if source_db is None else source_db
         self.base_buyers = 0
         self.customer = None
         self.channels = ChannelCounts()
@@ -426,7 +431,7 @@ class _Buyers:
         return self.base_buyers
 
     def values(self):
-        with closing(self.db.execute("""SELECT customer,uncertain,stamp,rank,payload FROM cohort_orders
+        with closing(self.source_db.execute("""SELECT customer,uncertain,stamp,rank,payload FROM cohort_orders
                                        ORDER BY customer,uncertain,stamp,rank""")) as rows:
             for customer, group in groupby(rows, key=lambda row: row[0]):
                 self.check()
@@ -453,7 +458,7 @@ class _Buyers:
                     self._collect(sequence, result, month)
                 yield sequence.dated
         if self.customer is None and self.customer_key is not None:
-            member = self.db.execute("SELECT 1 FROM cohort_population WHERE customer=?", (self.customer_key,)).fetchone()
+            member = self.source_db.execute("SELECT 1 FROM cohort_population WHERE customer=?", (self.customer_key,)).fetchone()
             if member is not None:
                 self.customer = _Sequence().result()
 
@@ -578,14 +583,15 @@ def _context(reader, calculated_at, selected_start, selected_end, check):
     return context, core
 
 
-def _summarize(db, context, core, categories, diagnostics, customer_key, check):
+def _summarize(db, context, core, categories, diagnostics, customer_key, check, *, source_db=None):
     start_month = None if core is None or core.cohort_start is None else _month_key(core.cohort_start)
     end_month = None if core is None or core.cohort_end is None else _month_key(core.cohort_end)
-    population = db.execute("SELECT COUNT(*) FROM cohort_population").fetchone()[0]
+    source = db if source_db is None else source_db
+    population = source.execute("SELECT COUNT(*) FROM cohort_population").fetchone()[0]
     if core is None:
         check()
         return UnifiedCohortsResult(context, population, {}, {}, {}, {}, {"availability": "NO_ORDERS_COVERAGE"}, None)
-    buyers = _Buyers(db, core, categories, diagnostics, customer_key, check)
+    buyers = _Buyers(db, core, categories, diagnostics, customer_key, check, source_db=source_db)
     behavior = core._policy_result(buyers)
     monetary = buyers.result(behavior)
     channels = buyers.channels.result(check)

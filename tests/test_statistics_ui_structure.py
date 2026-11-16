@@ -120,7 +120,7 @@ def test_current_saved_pages_have_no_panels_preserve_notes_tables_and_no_recalcu
     stream=BytesIO();xlsx.write_statistics_xlsx(result,stream)
     book=load_workbook(BytesIO(stream.getvalue()))
     try:
-        assert len(book.sheetnames)==5 and 'Как читать таблицу' not in str(list(book['Заказы'].values))
+        assert len(book.sheetnames)==4 and 'Как читать таблицу' not in str(list(book['Заказы'].values))
         for name in ['Определения сегментов и возможные бизнес-действия','Денежная ценность месячных когорт']:
             assert name in document  # Independent business sections/warnings remain.
         assert result==original and path.read_bytes()==payload

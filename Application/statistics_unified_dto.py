@@ -1,4 +1,4 @@
-"""Schema 11 statistics report and explicit dispatch for saved report versions."""
+"""Versioned statistics report and explicit dispatch for saved report versions."""
 
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -16,12 +16,13 @@ from Application.statistics_index import manifest_digest
 from Application.statistics_rfm_core import SEGMENTS, WINDOWS, rfm_windows
 from Application.statistics_rfm_validation import rfm_cutoff
 from Application.statistics_unified_aggregates import AggregateMetric
-from Application.statistics_unified_facts import OrderKind
+from Application.statistics_unified_facts import OrderKind, _sum
 from Application.statistics_unified_policy import EvidenceQuality, Measured, PurchasePolicy, STATUS_CATALOG, StatusGroup
 from Application.statistics_unified_projection import OBSERVATION_VERSION, PROJECTION_ID, SCHEMA_VERSION as INDEX_SCHEMA
+from Application.statistics_unified_rfm import SEGMENTATION_POLICY
 
 
-RESULT_SCHEMA = CACHE_SCHEMA = 11
+RESULT_SCHEMA = CACHE_SCHEMA = 13
 SLICE_SCHEMA = DETAIL_FORMAT = 2
 POLICY = asdict(PurchasePolicy())
 CAPABILITIES = dict(order_created_proxy=True, execution_time=False, historical_as_of=False,
@@ -31,7 +32,7 @@ CONTEXTS = ("raw_orders", "order_product_slice", "item_interactions", "customer_
 DETAIL_CONTEXTS = ("order_product_slice", "buyer_period", "rfm_48m")
 PARAMETERS = ("order_period", "buyer_period", "customer_period", "product_filter_key", "selected_start", "selected_end")
 VERSIONS = dict(quantity_policy_version=1, projection_version=PROJECTION_ID, observation_version=OBSERVATION_VERSION,
-                cache_schema=CACHE_SCHEMA, slice_schema=SLICE_SCHEMA)
+                cache_schema=CACHE_SCHEMA, slice_schema=SLICE_SCHEMA, rfm_segmentation=SEGMENTATION_POLICY)
 _AMOUNT_FIELDS = {"source_nominal", "known_purchase_subtotal", "recognized_purchase", "partial_nominal",
                   "cancelled_nominal", "returned_nominal", "confirmed_refund", "net_after_refunds"}
 _COUNTERS = ("raw_orders", "raw_lines", "exact_duplicates", "business_equivalent", "snapshot_conflicts",
@@ -365,7 +366,6 @@ def _currencies(rows):
 
 def _money(rows, *, orders=None):
     _currencies(rows)
-    valued = 0
     for currency, row in rows.items():
         _keys(row, "currency amounts valued_orders unvalued_orders valued_positions unvalued_positions mean_order "
                    "fully_valued_buyers unvalued_buyers mean_per_valued_buyer")
@@ -377,7 +377,6 @@ def _money(rows, *, orders=None):
                      reasons=["LEDGER_UNAVAILABLE"]), "INVALID_REFUND_VALUE")
         _require(all(_count(row[name]) for name in ("valued_orders", "unvalued_orders", "valued_positions",
                  "unvalued_positions", "fully_valued_buyers", "unvalued_buyers")), "INVALID_MONEY_DENOMINATOR")
-        valued += row["valued_orders"]
         if orders is not None:
             _require(row["valued_orders"] + row["unvalued_orders"] <= orders, "INVALID_MONEY_DENOMINATOR")
         _measure(row["mean_order"], _decimal)
@@ -386,7 +385,6 @@ def _money(rows, *, orders=None):
             _measure(row["mean_per_valued_buyer"], _decimal)
             _require(row["mean_per_valued_buyer"]["value"] is None or row["fully_valued_buyers"] > 0,
                      "INVALID_MEAN_DENOMINATOR")
-    _require(orders is None or valued <= orders, "INVALID_MONEY_DENOMINATOR")
 
 
 def _orders_and_catalog(result, check):
@@ -521,6 +519,34 @@ def _actions_products_customers(result, check):
              sum(n for f, n in frequency if f == 1) == purchase_counts["single_buyers"] and
              sum(n for f, n in frequency if f > 1) == purchase_counts["repeat_buyers"], "INVALID_BUYER_DENOMINATOR")
     _money(purchases["buyer_money"])
+    breakdown = customer["buyer_breakdowns"]
+    _currencies(breakdown["monthly_money"])
+    _currencies(breakdown["money"])
+    for currency in CURRENCIES:
+        months = breakdown["monthly_money"][currency]
+        finance = breakdown["money"][currency]
+        _require(isinstance(months, list) and all(
+            isinstance(row, list) and len(row) == 4 and isinstance(row[0], str)
+            and re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", row[0])
+            and _count(row[1]) and _count(row[2]) and row[1] <= row[2]
+            and (_decimal(row[3]) and row[1] > 0 if row[2] else row[3] is None)
+            for row in months), "INVALID_MONTHLY_MONEY")
+        keys = [row[0] for row in months]
+        _require(keys == sorted(set(keys)) and sum(row[2] for row in months) == finance["known_orders"]
+                 and _decimal(finance["amount"])
+                 and _sum([Decimal(row[3]) for row in months if row[3] is not None]) == Decimal(finance["amount"]),
+                 "INVALID_MONTHLY_MONEY")
+        groups = finance["quintiles"]
+        _require(isinstance(groups, list) and len(groups) <= 5 and all(
+            len(row) == 9 and all(_decimal(row[i]) or isinstance(row[i], str)
+                                  and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?E[+-][0-9]{1,3}", row[i])
+                                  for i in (0, 1, 4, 7))
+            and Decimal(row[0]) <= Decimal(row[1]) and _count(row[2]) and row[2] > 0
+            and _count(row[5]) and row[5] <= row[2] for row in groups), "INVALID_PURCHASE_QUINTILES")
+        _require(all(Decimal(a[1]) < Decimal(b[0]) for a, b in zip(groups, groups[1:]))
+                 and sum(row[2] for row in groups) == finance["known_buyers"]
+                 and _sum([Decimal(row[4]) for row in groups]) == Decimal(finance["amount"]),
+                 "INVALID_PURCHASE_QUINTILES")
 
 
 def _rfm(result, cutoff, check):
@@ -613,7 +639,6 @@ def _cohort_money(row, eligible):
         row["fully_valued_buyers"] + row["unvalued_buyers"] == row["buyers"] <= eligible and
         row["unvalued_orders"] <= row["orders"], "INVALID_COHORT_MONEY_BASE")
     _currencies(row["currencies"])
-    valued = 0
     for currency in row["currencies"].values():
         for name in ("recognized", "partial_nominal"):
             _amount_cell(currency[name])
@@ -622,9 +647,8 @@ def _cohort_money(row, eligible):
                 continue
             _require(currency[metric] is None or _decimal(currency[metric]), "INVALID_COHORT_DECIMAL")
         _require(_count(currency["valued_orders"]) and _count(currency["fully_valued_buyers"]) and
-                 currency["fully_valued_buyers"] <= row["fully_valued_buyers"], "INVALID_COHORT_MONEY_BASE")
-        valued += currency["valued_orders"]
-    _require(valued + row["unvalued_orders"] == row["orders"], "INVALID_COHORT_MONEY_ORDERS")
+                 currency["fully_valued_buyers"] <= row["fully_valued_buyers"] and
+                 currency["valued_orders"] <= row["orders"] - row["unvalued_orders"], "INVALID_COHORT_MONEY_BASE")
 
 
 def _cohorts(result, cutoff, check):
@@ -689,7 +713,7 @@ def validate_unified(result, *, check=lambda: None):
         _require(kind in ("REFERENCE", "INDEXED") and _digest(digest) and
                  (type(source["projection_schema"]) is int and source["projection_schema"] == INDEX_SCHEMA
                   if kind == "INDEXED" else source["projection_schema"] is None), "INCOMPATIBLE_PROJECTION")
-        _keys(meta, "quantity_policy_version projection_version observation_version cache_schema slice_schema "
+        _keys(meta, "quantity_policy_version projection_version observation_version cache_schema slice_schema rfm_segmentation "
                     "calculation_algorithm source_binding parameters fingerprint detail content_digest")
         _require(all(type(meta[key]) is type(value) and meta[key] == value for key, value in VERSIONS.items())
                  and _digest(meta["calculation_algorithm"]) and _digest(meta["fingerprint"])

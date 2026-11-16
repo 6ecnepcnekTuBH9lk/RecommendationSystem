@@ -107,8 +107,9 @@ def test_saved_snapshot_gui_xlsx_html_agree_without_sources_or_recalculation(
         book=load_workbook(BytesIO(archive.read("Статистика.xlsx")))
         document=archive.read("Статистика.html").decode("utf-8")
     assert book.sheetnames==list(report.PAGE_LABELS)
-    assert tab.sections.count()==tab.customer_sections.count()==5
-    assert all(f'id="section-{i}"' in document and f'id="customer-section-{i}"' in document for i in range(5))
+    assert tab.sections.count()==4 and tab.customer_sections.count()==5
+    assert all(f'id="section-{i}"' in document for i in range(4))
+    assert all(f'id="customer-section-{i}"' in document for i in range(5))
     assert "data-rfm-window=" in document and "data-rfm-currency=" in document
     assert "heatmap" in document
     assert dict(tab.report.header)["Дата расчёта"]=="31.08.2026"
@@ -138,7 +139,7 @@ def test_saved_snapshot_gui_xlsx_html_agree_without_sources_or_recalculation(
                         assert raw[1] in ("RUB","KZT") and raw[2] in ("R","F","M")
                         assert all("%" not in c.text and "%" not in c.number_format for c in row[4:])
             assert next(gui_tables,None) is None
-    assert table_count==86
+    assert table_count==81
     # Workbook tables retain values/types/units, independent of rendered text.
     for sheet in book:
         for table in sheet.tables.values():

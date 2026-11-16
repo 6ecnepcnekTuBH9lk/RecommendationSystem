@@ -53,7 +53,7 @@ def test_unified_archive_five_sheets_privacy_types_links_and_source_immutability
         assert len(archive.namelist())==5
         assert archive.namelist()[:2]==["Статистика.xlsx","Статистика.html"]
         book=load_workbook(BytesIO(archive.read("Статистика.xlsx")),read_only=True)
-        assert book.sheetnames==["Действия","Заказы","Товары","Клиенты","Техническая информация"]
+        assert book.sheetnames==["Действия","Заказы","Товары","Клиенты"]
         book.close()
         html=archive.read("Статистика.html").decode()
         assert "data-rfm-window=" in html and "customer-section-4" in html

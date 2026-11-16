@@ -1,10 +1,22 @@
 """Qt-free chart projections over saved aggregates; no source IO or calculations."""
 from dataclasses import dataclass
 from decimal import Decimal
+from colorsys import hls_to_rgb
 
 from Application.statistics_purchase_policy import STRICT_COMPLETED, EXTENDED_COMPLETED
 from Application.statistics_rfm_presentation import SEGMENT_LABELS, WINDOW_LABELS
 from Application.statistics_cohorts_core import HORIZONS
+
+
+SECONDARY_LIGHT = "#227d91"
+
+
+def distinct_chart_colors(count, *, dark=False):
+    palette = ("#b7abfa", "#72c4d1", "#f4ac6d", "#b1cf79", "#eb91b4", "#96aef7", "#e3cd7e", "#89d5b4") if dark else (
+        "#a65cf2", SECONDARY_LIGHT, "#a55519", "#577b27", "#b54072", "#4b64ae", "#826417", "#236c55")
+    extra = tuple("#%02x%02x%02x" % tuple(round(channel * 255) for channel in hls_to_rgb(
+        (i * .61803398875) % 1, .68 if dark else .36, .66)) for i in range(max(0, count - len(palette))))
+    return palette[:count] + extra
 
 
 @dataclass(frozen=True)
@@ -23,6 +35,13 @@ class ChartData:
     value_axis_title: str = ""
     ranges: tuple[tuple[Decimal, Decimal], ...] = ()
     bases: tuple[tuple[int, int], ...] = ()
+    show_legend: bool = True
+    height: int | None = None
+    bar_width: float | None = None
+    html_line_color: str | None = None
+    distinct_series: bool = False
+    adaptive_percentage: bool = False
+    wide_labels: bool = False
 
     @property
     def display_labels(self):

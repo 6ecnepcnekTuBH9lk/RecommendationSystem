@@ -238,7 +238,7 @@ def test_success_theme_switch_and_error_preserves_previous_result(window, monkey
     assert tab.export_button.isEnabled()
     assert tab.card_labels[0].text() == "0"
     assert tab.card_labels[3].text() == "—"
-    assert tab.sections.count() == 5
+    assert tab.sections.count() == 4
     saved = tab.cache_path.read_bytes()
     assert cache.load_result(tab.cache_path)["total_interactions"] == 0
     from Application.dataset_statistics import calculate_statistics
@@ -246,8 +246,7 @@ def test_success_theme_switch_and_error_preserves_previous_result(window, monkey
     result = asdict(calculate_statistics(raw_root=tmp_path, catalog_path=catalog))
     result["resolution_rate"] = 99.99834283990839
     tab.render(result)
-    table = tab.sections.widget(4).findChildren(QTableWidget)[1]
-    assert table.item(table.rowCount() - 1, 1).text() == "99,9983 %"
+    assert tab.displayed_result["resolution_rate"] == 99.99834283990839
     for dark in (False, True):
         apply_app_theme(QApplication.instance(), dark)
         QApplication.processEvents()
@@ -293,7 +292,7 @@ def test_cancel_and_close_reap_child_without_blocking_event_loop(window, monkeyp
     wait_until(lambda: tab.process is None)
     wait_until(lambda: not window.isVisible() if close else tab.refresh.isEnabled())
     assert ticks
-    assert "отменён" in tab.status.text()
+    assert "отменен" in tab.status.text()
     assert not tab.kill_timer.isActive()
     assert tab.cache_path.read_bytes() == saved
     assert tab.card_labels[0].text() == "3"
@@ -324,10 +323,12 @@ def test_initial_page_has_no_internal_heading_or_cache(window):
     assert card_titles(tab)[:4] == ["Количество взаимодействий", "Количество заказов",
                                    "Количество позиций в заказах", "Профили текущего среза"]
     controls = tab.layout().itemAt(2).layout()
-    assert controls.count() == 5
-    assert [controls.itemAt(i).widget() for i in range(5)] == [
-        tab.refresh, tab.export_button, tab.cancel_button, tab.status, tab.progress_container]
-    assert controls.stretch(4) == 1
+    assert controls.count() == 4
+    assert [controls.itemAt(i).widget() for i in range(4)] == [
+        tab.refresh, tab.export_button, tab.cancel_button, tab.progress_container]
+    assert controls.stretch(3) == 1
+    assert tab.status.parentWidget() is tab.progress.parentWidget() is tab.progress_container
+    assert not tab.progress.isTextVisible()
     assert not tab.export_button.isEnabled()
 
 
@@ -338,75 +339,39 @@ def card_titles(page):
 
 def assert_section_names(tab):
     assert [tab.sections.tabText(i) for i in range(tab.sections.count())] == [
-        "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация"]
+        "Действия", "Заказы", "Товары", "Клиенты"]
 
 
 @pytest.mark.parametrize("outside,fractional", [(0, 0), (7, 13)])
-def test_technical_information_renders_order_filter_diagnostics(window, sample_result, outside, fractional):
+def test_technical_information_hidden_with_order_filter_diagnostics_retained(window, sample_result, outside, fractional):
     _, tab = window
     values = dict(sample_result["diagnostics"])
     values.update(orders_outside_statistics_period=outside, fractional_quantity_order_lines=fractional)
     sample_result["diagnostics"] = tuple(values.items())
     tab.render(sample_result)
-    tab.sections.setCurrentIndex(4)
-    QApplication.processEvents()
-    assert tab.sections.tabText(4) == "Техническая информация"
-    diagnostics = next(table for table in tab.sections.widget(4).findChildren(QTableWidget)
-                       if table.horizontalHeaderItem(0).text() == "Диагностика")
-    rows = {diagnostics.item(row, 0).text(): diagnostics.item(row, 1).text()
-            for row in range(diagnostics.rowCount())}
-    assert rows["Заказы вне периода статистики"] == str(outside)
-    assert rows["Позиции с нецелым количеством"] == str(fractional)
-    assert not diagnostics.isHidden()
+    assert_section_names(tab)
+    saved = dict(tab.displayed_result["diagnostics"])
+    assert saved["orders_outside_statistics_period"] == outside
+    assert saved["fractional_quantity_order_lines"] == fractional
 
 
-def test_five_pages_technical_content_scroll_and_no_tooltips(window, sample_result):
+def test_four_pages_keep_content_and_no_tooltips(window, sample_result):
     _, tab = window
     assert_section_names(tab)
     for _ in range(2):
         tab.render(sample_result)
         assert_section_names(tab)
-        technical = tab.sections.widget(4)
-        assert isinstance(technical, QScrollArea)
-        assert technical.widgetResizable()
-        layout = technical.widget().layout()
-        assert layout.spacing() == ui.SECTION_SPACING
-        assert layout.count() == 5
-        coverage, summary, raw, quality, diagnostics = technical.findChildren(QTableWidget)
-        assert technical.findChildren(QTableWidget) == [coverage, summary, raw, quality, diagnostics]
-        assert [coverage.horizontalHeaderItem(i).text() for i in range(3)] == [
-            "Источник", "Период / состояние", "Источник данных"]
-        assert [coverage.item(i, 0).text() for i in range(4)] == [
-            "Действия", "Заказы", "Объединения клиентов", "Клиенты"]
-        assert summary.rowCount() == 13
-        assert summary.item(0, 1).text() == "3"
-        assert summary.item(12, 1).text() == "100,0000 %"
-        assert diagnostics.horizontalHeaderItem(0).text() == "Диагностика"
-        assert diagnostics.rowCount() == len(sample_result["diagnostics"]) + 5
-        assert [diagnostics.item(i, 0).text() for i in range(len(sample_result["diagnostics"]))] == [
-            ui.DIAGNOSTIC_LABELS[key] for key, _ in sample_result["diagnostics"]]
         for index, counts in enumerate((8, 7, 9, 31)):
             assert len(tab.sections.widget(index).findChildren(QTableWidget)) == counts
         customers = next(table for table in tab.sections.widget(3).findChildren(QTableWidget)
                          if table.horizontalHeaderItem(0).text() == 'Пол')
         assert customers.rowCount() == 3
         assert customers.item(2, 1).text() == "2"
-        for index in range(5):
+        for index in range(tab.sections.count()):
             for table in tab.sections.widget(index).findChildren(QTableWidget):
                 for row in range(table.rowCount()):
                     for column in range(table.columnCount()):
                         assert table.item(row, column).toolTip() == ""
-    tab.sections.setCurrentIndex(4)
-    QApplication.processEvents()
-    scrollbar = technical.verticalScrollBar()
-    assert scrollbar.maximum() > 0
-    blocks = [coverage, summary, diagnostics]
-    assert all(a.geometry().bottom() < b.geometry().top() for a, b in zip(blocks, blocks[1:]))
-    scrollbar.setValue(scrollbar.maximum())
-    QApplication.processEvents()
-    # The last table's bottom is reachable, independent of theme/font pixel sizes.
-    bottom = diagnostics.mapTo(technical.viewport(), diagnostics.rect().bottomLeft())
-    assert technical.viewport().rect().contains(bottom)
 
 
 def test_russian_presentation_dates_spacing_and_original_values(window, sample_result):
@@ -419,14 +384,11 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert re.fullmatch(r"Исходные данные Mindbox\. Отбор не установлен\. Дата расчета: "
                         r"\d{2}\.\d{2}\.\d{4}", tab.description.text())
     assert tab.status.text().splitlines()[0] == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
-    coverage = tab.sections.widget(4).findChildren(QTableWidget)[0]
-    assert coverage.item(0, 1).text() == "01.01.2025 — 31.12.2025"
-    assert coverage.item(3, 1).text().startswith("Снимок данных от ")
     assert card_titles(tab.sections.widget(0)) == ["Просмотры товаров", "Добавления в избранное", "Клиенты с просмотрами", "Клиенты с избранным"]
     assert card_titles(tab.sections.widget(1))[:4] == ["Заказы с покупкой", "Невыкупленные заказы", "Позиции покупок", "Покупатели"]
     assert card_titles(tab.sections.widget(2)) == ["Товары с взаимодействиями", "Товары с просмотрами",
                                                 "Товары в избранном", "Купленные товары"]
-    for index in (0, 1, 2, 4):
+    for index in (0, 1, 2):
         assert tab.sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
     for index in range(5):
         assert tab.customer_sections.widget(index).widget().layout().spacing() == ui.SECTION_SPACING
@@ -435,10 +397,9 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     for table in tab.findChildren(QTableWidget):
         labels.extend(table.horizontalHeaderItem(i).text() for i in range(table.columnCount()))
         cells.extend(table.item(r, c).text() for r in range(table.rowCount()) for c in range(table.columnCount()))
-    for value in ("ProsmotrProduktaVApiMethod", "offline1C", "Выполнен частично (CP)"):
-        assert value in cells  # Technical source values are deliberately preserved.
-    technical_values = {"ProsmotrProduktaVApiMethod", "offline1C", "CP"}
-    presentation = "\n".join(labels + [value for value in cells if value not in technical_values])
+    assert "Выполнен частично (CP)" in cells
+    source_values = {"ProsmotrProduktaVApiMethod", "offline1C", "CP"}
+    presentation = "\n".join(labels + [value for value in cells if value not in source_values])
     for phrase in ("Canonical", "canonical", "Snapshot", "item interactions",
                    "Raw events", "System name", "PURCHASE", "Resolution", "Namespace",
                    "Unique", "Resolved", "Unresolved", "Active users", "unsupported"):
@@ -448,7 +409,7 @@ def test_russian_presentation_dates_spacing_and_original_values(window, sample_r
     assert sample_result["resolution_rate"] == 100.
 
 
-def test_conflicting_order_warning_is_hidden_only_from_top_status(window, sample_result):
+def test_conflicting_order_warning_is_hidden_and_retained_in_result(window, sample_result):
     _, tab = window
     warning = 'Есть конфликтующие снимки заказов: item interactions рассчитаны по первому снимку.'
     sample_result['warnings'] = (warning,)
@@ -457,9 +418,7 @@ def test_conflicting_order_warning_is_hidden_only_from_top_status(window, sample
     tab.render(sample_result)
     assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
     assert sample_result == original and tab.displayed_result['warnings'] == (warning,)
-    tables = tab.sections.widget(4).findChildren(QTableWidget)
-    assert any(table.item(row, 0).text() == ui.DIAGNOSTIC_LABELS['orders_duplicate_conflicting']
-               and table.item(row, 1).text() == '7' for table in tables for row in range(table.rowCount()))
+    assert dict(tab.displayed_result["diagnostics"])["orders_duplicate_conflicting"] == 7
 
 
 def test_saved_result_loads_automatically_without_process(app, sample_result, monkeypatch):
@@ -474,7 +433,7 @@ def test_saved_result_loads_automatically_without_process(app, sample_result, mo
         assert tab.description.text() == "Исходные данные Mindbox. Отбор не установлен. Дата расчета: " + expected
         assert tab.status.text() == 'Статистика рассчитана за период: 01.01.2025 — 31.12.2025.'
         assert_section_names(tab)
-        assert len(tab.sections.widget(4).findChildren(QTableWidget)) == 5
+        assert dict(tab.displayed_result["diagnostics"]) == dict(sample_result["diagnostics"])
     finally:
         window.deleteLater()
         app.processEvents()
@@ -603,12 +562,12 @@ def test_information_style_and_existing_icons_in_both_themes(window):
     for dark in (False, True):
         apply_app_theme(QApplication.instance(), dark)
         QApplication.processEvents()
-        for label in (tab.description, tab.status):
-            assert label.property("class") == "statisticsInfo"
-            alignment = Qt.AlignmentFlag.AlignHCenter if label is tab.description else Qt.AlignmentFlag.AlignLeft
-            assert label.alignment() & alignment
-            assert label.font().italic()
-            assert label.font().pointSize() == 10
+        assert tab.description.property("class") == "statisticsInfo"
+        assert tab.description.alignment() & Qt.AlignmentFlag.AlignHCenter
+        assert tab.description.font().italic()
+        assert tab.description.font().pointSize() == 10
+        assert tab.status.font().weight() >= 600
+        assert tab.progress.accessibleDescription() == tab.status.text()
         for button, filename in ((tab.refresh, "statistic.png"), (tab.export_button, "export.png"),
                                  (tab.cancel_button, "failure.png")):
             expected = QIcon(str(ui.ICONS_DIR / filename))
@@ -850,10 +809,6 @@ def test_action_analytics_headers_themes_scroll_and_immutable_display(window, sa
             page.verticalScrollBar().setValue(page.verticalScrollBar().maximum())
             QApplication.processEvents()
             assert page.viewport().rect().contains(tables[-1].mapTo(page.viewport(), tables[-1].rect().bottomLeft()))
-            diagnostics = tab.sections.widget(4).findChildren(QTableWidget)[-1]
-            names = [diagnostics.item(i, 0).text() for i in range(diagnostics.rowCount())]
-            assert "Просмотры с неоднозначным набором товаров" in names
-            assert "Просмотры с ценой без определённой валюты" in names
     assert sample_result == original
 
 
@@ -912,7 +867,7 @@ def test_ui_cleanup_preserves_diagnostics_and_styles_sections(window, sample_res
         apply_app_theme(QApplication.instance(), dark)
         tab.render(sample_result)
         assert tab.status.text() == ui._calculation_message(sample_result) + "\nДругое предупреждение."
-        for index in range(5):
+        for index in range(tab.sections.count()):
             tab.sections.setCurrentIndex(index)
             QApplication.processEvents()
             page = tab.sections.widget(index)
@@ -928,9 +883,7 @@ def test_ui_cleanup_preserves_diagnostics_and_styles_sections(window, sample_res
                     assert label.text() == label.text().upper()
             for table in page.findChildren(QTableWidget):
                 assert table.height() <= 450
-        diagnostics = tab.sections.widget(4).findChildren(QTableWidget)[-1]
-        rows = {diagnostics.item(r, 0).text(): diagnostics.item(r, 1).text() for r in range(diagnostics.rowCount())}
-        assert rows["Позиции с нецелым количеством"] == "7"
+        assert dict(tab.displayed_result["diagnostics"])["fractional_quantity_order_lines"] == 7
     assert sample_result == original
 
 
@@ -1105,12 +1058,8 @@ def test_system_action_types_stay_technical_and_total_card_is_unchanged(window, 
     actions = tab.sections.widget(0)
     assert not any(t.horizontalHeaderItem(0).text() in ('Системное название', 'Классификация событий')
                    for t in actions.findChildren(QTableWidget))
-    technical = tab.sections.widget(4)
-    table = next(t for t in technical.findChildren(QTableWidget) if t.horizontalHeaderItem(0).text() == 'Системное название')
-    assert [table.item(i, 2).text() for i in range(2)] == ["90,00 %", "10,00 %"]
-    quality = next(t for t in technical.findChildren(QTableWidget) if t.horizontalHeaderItem(0).text() == 'Классификация событий')
-    rows = {quality.item(i, 0).text(): quality.item(i, 1).text() for i in range(quality.rowCount())}
-    assert rows[ui.DIAGNOSTIC_LABELS['mapped_without_product']] == '88'
+    assert tab.displayed_result["action_types"] == sample_result["action_types"]
+    assert dict(tab.displayed_result["diagnostics"])["mapped_without_product"] == 88
     assert tab.export_button.isEnabled()
 
 
@@ -1293,8 +1242,8 @@ def test_final_chart_set_preserves_tables_and_section_titles(window, sample_resu
         tab.render(result)
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         QApplication.processEvents()
-        assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(5)] == [4, 7, 5, 3, 0]
-        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(5)] == [8, 7, 9, 31, 5]
+        assert [len(tab.sections.widget(i).findChildren(StatisticsChart)) for i in range(tab.sections.count())] == [4, 7, 5, 3]
+        assert [len(tab.sections.widget(i).findChildren(QTableWidget)) for i in range(tab.sections.count())] == [8, 7, 9, 31]
         chart_widgets = tab.findChildren(StatisticsChart)
         assert len(chart_widgets) == 19
         actions = _visual_items(tab.sections.widget(0).widget().layout())
@@ -1410,9 +1359,9 @@ def test_customer_nested_navigation_exact_sections_values_charts_and_no_duplicat
     QApplication.processEvents()
     nested = tab.sections.widget(3)
     assert nested is tab.customer_sections and isinstance(nested, QTabWidget)
-    assert tab.sections.count() == 5
-    assert [tab.sections.tabText(i) for i in range(5)] == [
-        "Действия", "Заказы", "Товары", "Клиенты", "Техническая информация"]
+    assert tab.sections.count() == 4
+    assert [tab.sections.tabText(i) for i in range(tab.sections.count())] == [
+        "Действия", "Заказы", "Товары", "Клиенты"]
     assert nested.count() == 5 and nested.currentIndex() == 0
     assert [nested.tabText(i) for i in range(5)] == [
         "Обзор", "Покупки", "Денежные показатели", "RFM-анализ", "Когорты"]
@@ -1526,16 +1475,16 @@ def test_customer_repeated_render_preserves_selection_and_deletes_old_pages(wind
     for selected in (4, 3, 2, 1):
         tab.sections.setCurrentIndex(3)
         tab.customer_sections.setCurrentIndex(selected)
-        old_main_pages = [tab.sections.widget(i) for i in range(5)]
+        old_main_pages = [tab.sections.widget(i) for i in range(tab.sections.count())]
         old_inner_pages = [tab.customer_sections.widget(i) for i in range(5)]
         tab.render(rich_customer_result)
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         QApplication.processEvents()
         assert tab.sections.currentIndex() == 3
         assert tab.customer_sections.currentIndex() == selected
-        assert tab.sections.count() == tab.customer_sections.count() == 5
+        assert tab.sections.count() == 4 and tab.customer_sections.count() == 5
         assert len(tab.findChildren(QTabWidget)) == 2
-        assert len(tab.findChildren(QScrollArea)) == 9  # Four main + five inner.
+        assert len(tab.findChildren(QScrollArea)) == 8  # Three main scroll areas and five inner.
         assert all(sip.isdeleted(widget) for widget in old_main_pages + old_inner_pages)
 
 
@@ -1562,7 +1511,7 @@ def test_analytics_charts_are_immediately_before_original_tables(window, rich_cu
     before = deepcopy(rich_customer_result)
     apply_app_theme(QApplication.instance(), dark)
     tab.render(rich_customer_result)
-    assert tab.sections.count() == tab.customer_sections.count() == 5
+    assert tab.sections.count() == 4 and tab.customer_sections.count() == 5
     def preceding(group, predicate):
         page = tab.customer_sections.widget(group)
         table = next(t for t in page.findChildren(QTableWidget) if predicate(

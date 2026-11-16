@@ -74,13 +74,13 @@ def _item(result, code):
 @pytest.mark.parametrize("statuses,purchases,positions,nominal,recognized", [
     (["F"], 1, 1, 0, 20),
     (["sold"], 1, 1, 0, 20),
-    (["CP"], 1, 1, 20, None),
+    (["CP"], 1, 1, 20, 20),
     (["delivering"], 0, 0, 0, 0),
     (["Return"], 0, 0, 0, 0),
-    (["F", "CP"], 1, 2, 20, None),
+    (["F", "CP"], 1, 2, 20, 40),
     (["F", "CD"], 1, 1, 0, 20),
     (["F", "Return"], 1, 1, 0, 20),
-    (["CP", "Return"], 1, 1, 20, None),
+    (["CP", "Return"], 1, 1, 20, 20),
 ])
 def test_order_status_purchase_and_amounts(source, statuses, purchases, positions, nominal, recognized):
     result = _reference(source, [order(statuses)])
@@ -97,10 +97,8 @@ def test_order_status_purchase_and_amounts(source, statuses, purchases, position
     assert rub.amounts["recognized_purchase"].total.value == recognized
     assert rub.amounts["confirmed_refund"].total.reasons == ("LEDGER_UNAVAILABLE",)
     assert rub.amounts["net_after_refunds"].total.value is None
-    if "CP" in statuses:
-        assert "CP_ALLOCATION_UNKNOWN" in rub.amounts["recognized_purchase"].total.reasons
-    assert rub.valued_orders == int(recognized == 20)
-    assert rub.unvalued_orders == int(recognized is None)
+    assert rub.valued_orders == purchases
+    assert rub.unvalued_orders == 0
 
 
 def test_exact_duplicates_and_historical_sale_conflict_are_distinct(source):
@@ -109,23 +107,23 @@ def test_exact_duplicates_and_historical_sale_conflict_are_distinct(source):
     returned["lines"][0]["status"]["ids"]["externalId"] = "Return"
     returned["lines"][0]["priceOfLine"] = 900
     result = _reference(source, [paid, paid, returned])
-    assert result.orders["purchase_orders"].total.value == 1
-    assert result.orders["purchase_positions"].total.value == 1
+    assert result.orders["purchase_orders"].total.value == 0
+    assert result.orders["purchase_positions"].total.value == 0
     assert result.orders["conflicting_orders"].total.value == 1
     assert result.orders["returned_units"].total.reasons == ("RETURNED_QUANTITY_UNVERIFIED",)
     assert result.customers["population"].total.value == 3
-    assert result.customers["population_buyers"].total.value == 1
+    assert result.customers["population_buyers"].total.value == 0
     assert result.customers["returned_clients"].total.value is None
     assert result.diagnostics["exact_duplicates"] == 1
     assert result.diagnostics["raw_orders"] == 3
     assert _by_code(result, "F").raw_occurrences == 2
     assert _by_code(result, "F").positions.total.value is None
-    assert _by_code(result, "F").historical_positions.total.value == 1
-    assert _money(result.order_money).amounts["known_purchase_subtotal"].total.value == 20
-    assert _money(result.order_money).amounts["recognized_purchase"].total.quality is Quality.CONFLICT
+    assert _by_code(result, "F").historical_positions.total.value == 0
+    assert _money(result.order_money).amounts["known_purchase_subtotal"].total.value == 0
+    assert _money(result.order_money).amounts["recognized_purchase"].total.value == 0
     assert _money(result.order_money).amounts["returned_nominal"].total.value is None
-    assert _item(result, "000001").purchase_positions.total.value == 1
-    assert result.actions["PURCHASE"].total.value == 1
+    assert _item(result, "000001").purchase_positions.total.value == 0
+    assert result.actions["PURCHASE"].total.value == 0
     again = _reference(source, [returned, paid, paid])
     assert replace(again, contexts=()) == replace(result, contexts=())
 
@@ -163,7 +161,7 @@ def test_fiscal_amounts_decimals_and_valued_denominators(source):
     d["lines"][0]["priceOfLine"] = Decimal("77.10")
     result = _reference(source, [a, b, c, d])
     rub, kzt = result.order_money
-    assert rub.amounts["recognized_purchase"].total.quality is Quality.UNKNOWN
+    assert rub.amounts["recognized_purchase"].total.quality is Quality.KNOWN
     assert rub.amounts["known_purchase_subtotal"].total.value == Decimal("1200.00000000000000000000000001")
     assert (rub.valued_orders, rub.unvalued_orders) == (2, 1)
     assert rub.mean_order.value == Decimal("600.000000000000000000000000005")
@@ -176,15 +174,13 @@ def test_fiscal_amounts_decimals_and_valued_denominators(source):
     assert result.buyer_money[0].unvalued_buyers == 1
 
 
-def test_cp_only_unknown_is_not_promoted_to_zero_by_nonpurchase_order(source):
+def test_cp_only_is_valued_and_nonpurchase_order_adds_no_cost(source):
     result = _reference(source, [order(["CP"], "cp"), order(["CD"], "cancelled")])
     rub = _money(result.order_money)
-    assert rub.amounts["known_purchase_subtotal"].known is None
-    assert rub.amounts["known_purchase_subtotal"].total.value is None
-    assert rub.amounts["recognized_purchase"].total.value is None
+    assert rub.amounts["recognized_purchase"].total.value == 20
     assert rub.amounts["partial_nominal"].total.value == 20
     assert rub.amounts["cancelled_nominal"].total.value == 20
-    assert rub.mean_order.value is None
+    assert rub.mean_order.value == 20
 
 
 def test_conflicting_owner_does_not_duplicate_population_or_buyer(source):
@@ -233,17 +229,17 @@ def test_proxy_periods_frequency_and_direct_category_pairs(source):
     result = inputs.aggregate_reference(**_options(source, order_period=(_FIRST, _SECOND),
                                                    buyer_period=(_FIRST, _END)))
     assert result.orders["purchase_orders"].total.value == 1
-    assert result.customers["buyer_purchase_orders"].total.value == 2
-    assert result.customers["repeat_buyers"].total.value == 1
-    assert result.frequency == ((2, 1),)
+    assert result.customers["buyer_purchase_orders"].total.value == 1
+    assert result.customers["repeat_buyers"].total.value == 0
+    assert result.frequency == ((1, 1),)
     assert result.first_months == (("2026-01", 1),)
-    assert result.second_intervals == ((1, 1),)
+    assert result.second_intervals == ()
     assert result.first_categories == (("cat-A", 1), ("cat-B", 1))
-    assert result.second_categories == (("cat-B", 1),)
+    assert result.second_categories == ()
     assert [(entry.categories, entry.orders.total.value) for entry in result.categories] == [
-        (("cat-A",), 1), (("cat-B",), 2)]
+        (("cat-A",), 1), (("cat-B",), 1)]
     assert [(entry.categories, entry.orders.total.value) for entry in result.pairs] == [(("cat-A", "cat-B"), 1)]
-    assert result.observed_history["purchase_orders"].total.value == 2
+    assert result.observed_history["purchase_orders"].total.value == 1
 
 
 def test_partial_structure_keeps_historical_purchase_order_and_known_position(source):
@@ -286,6 +282,50 @@ def test_purchase_intersections_use_unique_unified_positions(source):
     assert values["VIEW_FAVORITE"] == values["VIEW_FAVORITE_PURCHASE"] == 1
     assert result.diagnostics["ACTION_UNMAPPED"] == 1
     assert result.customers["population"].total.value == 3
+
+
+def test_duplicate_positions_do_not_hide_purchase_membership_or_other_products(source):
+    view = DEFAULT_SELECTION.view_action_system_names[0]
+    favorite = DEFAULT_SELECTION.favorite_action_system_names[0]
+    _write(source, "actions", [action(view, ["000001-a"], "old"),
+                               action(favorite, ["000002-a"], "new")])
+    ambiguous = order(["F", "sold"], "ambiguous")
+    ambiguous["lines"][1]["id"] = ambiguous["lines"][0]["id"]
+    other = order(["F"], "independent")
+    other["lines"][0]["product"]["ids"] = {"offline1C": "000002-size"}
+    other["customer"]["ids"]["mindboxId"] = "other"
+    result = _reference(source, [ambiguous, deepcopy(ambiguous), other])
+
+    assert result.diagnostics["LINE_ID_DUPLICATE"] == 1
+    assert result.orders["purchase_orders"].total.value == 1
+    assert result.orders["purchase_positions"].known == 1
+    assert result.orders["purchase_positions"].total.quality is Quality.CONFLICT
+    assert result.actions["PURCHASE"].total.quality is Quality.CONFLICT
+    assert _money(result.order_money, "KZT").amounts["recognized_purchase"].total.value == 0
+    for key, expected in (("VIEW", 1), ("FAVORITE", 1), ("PURCHASE_users", 1),
+                          ("VIEW_PURCHASE", 0), ("FAVORITE_PURCHASE", 0),
+                          ("VIEW_FAVORITE_PURCHASE", 0)):
+        assert result.actions[key].total.value == expected
+    affected, independent = (_item(result, code) for code in ("000001", "000002"))
+    assert affected.purchase_positions.total.reasons == ("LINE_ID_DUPLICATE",)
+    assert affected.buyers.total.value == 0
+    assert independent.buyers.total.value == 1
+    assert independent.purchase_positions.total.value == 1
+    assert _money(independent.money).amounts["recognized_purchase"].total.value == 20
+
+
+def test_duplicate_with_unknown_product_keeps_item_totals_partial(source):
+    ambiguous = order(["F", "F", "F"])
+    ambiguous["lines"][1]["id"] = ambiguous["lines"][0]["id"]
+    del ambiguous["lines"][1]["product"]
+    ambiguous["lines"][2]["product"]["ids"] = {"offline1C": "000002-size"}
+    result = _reference(source, [ambiguous])
+    item = _item(result, "000002")
+    assert item.purchase_positions.known == 1
+    assert item.purchase_positions.total.quality is Quality.CONFLICT
+    assert result.actions["PURCHASE_users"].total.value == 1
+    assert _money(result.order_money).amounts["recognized_purchase"].known == 20
+    assert _money(result.order_money).amounts["recognized_purchase"].total.value == 20
 
 
 def test_explicit_population_period_uses_dated_evidence(source):
@@ -366,3 +406,21 @@ def test_cancellation_and_incompatible_projection_fail_without_result(source, mo
     (target / index.POINTER_NAME).write_bytes(pointer.replace(b'"schema": 4', b'"schema": 3'))
     with pytest.raises(StatisticsIndexError, match="INCOMPATIBLE_SCHEMA"):
         inputs.aggregate_indexed(**_options(source), index_dir=target)
+
+
+def test_fast_decimal_addition_matches_canonical_sum():
+    from decimal import ROUND_DOWN, localcontext
+    from Application.statistics_unified_breakdowns import add_exact_decimal
+    from Application.statistics_unified_facts import _sum
+
+    pairs = [
+        ("0.000", "-0.00"), ("123.45", "0.55"), ("-123.45", "123.45"),
+        ("1E+60", "0.00001"), ("0", "1E+5000"), ("1E-5000", "2E-5000"),
+        ("1E+60", "-1E+60"), ("123456789012345678901234567890.0001", "-0.0002"),
+    ]
+    with localcontext() as context:
+        context.prec = 5
+        context.rounding = ROUND_DOWN
+        for a, b in pairs:
+            left, right = Decimal(a), Decimal(b)
+            assert add_exact_decimal(left, right).as_tuple() == _sum([left, right]).as_tuple()

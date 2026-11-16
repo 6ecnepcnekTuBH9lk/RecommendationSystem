@@ -77,7 +77,7 @@ class _Sheet:
         if isinstance(value, report.ReportCell):
             if value.tooltip:
                 cell.comment = Comment(value.tooltip, "KANZLER AI")
-            value, fmt = value.value if value.kind != "empty" else value.text, value.number_format
+            value, fmt = value.displayed_value if value.kind != "empty" else value.text, value.number_format
         elif isinstance(value, report.ReportNumber):
             cell_data = report.cell_presentation(value)
             value, fmt = cell_data.value, cell_data.number_format
@@ -173,7 +173,7 @@ def suggested_filename(result):
 
 
 def write_statistics_xlsx(result, stream, *, check=lambda: None, workspace=None, snapshot_diagnostics=None, presentation=None):
-    """The exact five GUI pages; no report-only analytics or chart duplicates."""
+    """The same pages as the GUI, without chart duplicates."""
     model = presentation if presentation is not None else report.report_presentation(result,snapshot_diagnostics=snapshot_diagnostics)
     book = Workbook()
     book.remove(book.active)
@@ -181,7 +181,12 @@ def write_statistics_xlsx(result, stream, *, check=lambda: None, workspace=None,
         for page in model.pages:
             check()
             sheet = _Sheet(book.create_sheet(page.title),check)
-            sheet.table(("Параметр отчёта", "Значение"), model.header)
+            if model.summary:
+                summary_row = sheet.row
+                sheet.write((model.summary,))
+                sheet.ws.merge_cells(start_row=summary_row, start_column=1, end_row=summary_row, end_column=2)
+            else:
+                sheet.table(("Параметр отчета", "Значение"), model.header)
             sheet.cards(model.global_cards)
             for group in page.groups:
                 if page.key == "customers":
@@ -194,11 +199,16 @@ def write_statistics_xlsx(result, stream, *, check=lambda: None, workspace=None,
                         sheet.table(("Показатель", "Значение"),
                                     [(label, cell) for label, cell in report.kpi_cells(block)])
                     elif block.kind == "table":
+                        if title := block.options.get("details"):
+                            sheet.heading(title)
                         sheet.table(block.headers, report.table_cells(block))
+                    elif block.kind == "heatmap" and block.options.get("compact"):
+                        sheet.table(("Когорта", "Покупатели (M0)", *block.data.columns), (
+                            (row.month, row.buyers, *(report.cell_presentation(cell.value, percentage=True)
+                                                      for cell in row.cells)) for row in block.data.rows))
                     elif block.kind == "text":
                         sheet.write((block.title,))
-                    # Adjacent approved tables already contain all plotted values,
-                    # including six RFM combinations and the numeric retention matrix.
+                    # Chart values are supplied by the corresponding report tables.
             sheet.finish()
         check()
         if workspace is None:
